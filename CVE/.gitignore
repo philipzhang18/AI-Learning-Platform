@@ -45,6 +45,8 @@ env/
 .env
 .env.local
 .env.*.local
+.env.llm  # LLM API 密钥配置
+llm_config.py  # 包含 API 密钥的配置文件
 
 # Logs
 logs/

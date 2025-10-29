@@ -719,7 +719,7 @@ class CVECollectorGUI:
             try:
                 dt = datetime.fromisoformat(published_date.replace("Z", ""))
                 published_date = dt.strftime("%Y-%m-%d %H:%M")
-            except:
+            except ValueError:
                 pass
 
         return {
@@ -976,7 +976,7 @@ def main():
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
-    except:
+    except ImportError:
         pass
 
     root = tk.Tk()

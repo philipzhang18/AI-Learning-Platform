@@ -2,6 +2,7 @@
 CVE 监控系统 - 主应用入口
 """
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +25,7 @@ class Settings:
     VERSION = "1.0.0"
     API_V1_STR = "/api/v1"
     BACKEND_CORS_ORIGINS = ["http://localhost:3000", "http://localhost:8000"]
+    DEBUG = os.getenv("DEBUG", "False").lower() == "true"  # 从环境变量读取调试模式
 
 settings = Settings()
 
@@ -71,13 +73,28 @@ app.add_middleware(
 # 全局异常处理器
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    """
+    全局异常处理器
+    在生产环境中隐藏详细错误信息，避免信息泄露
+    """
     logger.error(f"全局异常: {exc}", exc_info=True)
+
+    # 根据配置决定是否暴露详细错误
+    if settings.DEBUG:
+        error_detail = {
+            "detail": "服务器内部错误",
+            "error": str(exc),
+            "type": type(exc).__name__
+        }
+    else:
+        error_detail = {
+            "detail": "服务器内部错误",
+            "message": "请联系系统管理员"
+        }
+
     return JSONResponse(
         status_code=500,
-        content={
-            "detail": "服务器内部错误",
-            "error": str(exc) if logger.level == logging.DEBUG else "Internal Server Error"
-        }
+        content=error_detail
     )
 
 # 根路由
