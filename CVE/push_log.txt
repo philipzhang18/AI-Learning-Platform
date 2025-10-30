@@ -1,0 +1,48 @@
+09:16:49.688285 exec-cmd.c:266          trace: resolved executable dir: D:/Program Files/Git/mingw64/bin
+09:16:49.756541 git.c:476               trace: built-in: git push origin master --force
+09:16:49.760537 run-command.c:674       trace: run_command: unset GIT_PREFIX; 'ssh -v' git@github.com 'git-receive-pack '\''philipzhang18/CVE-Security-Solution.git'\'''
+09:16:49.760537 run-command.c:935       trace: start_command: 'D:/Program Files/Git/usr/bin/sh.exe' -c 'ssh -v "$@"' 'ssh -v' git@github.com 'git-receive-pack '\''philipzhang18/CVE-Security-Solution.git'\'''
+debug1: OpenSSH_10.0p2, OpenSSL 3.5.3 16 Sep 2025
+debug1: Reading configuration data /etc/ssh/ssh_config
+debug1: Connecting to github.com [20.205.243.166] port 22.
+debug1: Connection established.
+debug1: identity file /c/Users/philipzhang/.ssh/id_rsa type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_rsa-cert type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_ecdsa type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_ecdsa-cert type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_ecdsa_sk type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_ecdsa_sk-cert type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_ed25519 type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_ed25519-cert type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_ed25519_sk type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_ed25519_sk-cert type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_xmss type -1
+debug1: identity file /c/Users/philipzhang/.ssh/id_xmss-cert type -1
+debug1: Local version string SSH-2.0-OpenSSH_10.0
+debug1: Remote protocol version 2.0, remote software version 85ba476
+debug1: compat_banner: no match: 85ba476
+debug1: Authenticating to github.com:22 as 'git'
+debug1: load_hostkeys: fopen /c/Users/philipzhang/.ssh/known_hosts2: No such file or directory
+debug1: load_hostkeys: fopen /etc/ssh/ssh_known_hosts: No such file or directory
+debug1: load_hostkeys: fopen /etc/ssh/ssh_known_hosts2: No such file or directory
+debug1: SSH2_MSG_KEXINIT sent
+debug1: SSH2_MSG_KEXINIT received
+debug1: kex: algorithm: sntrup761x25519-sha512
+debug1: kex: host key algorithm: ssh-ed25519
+debug1: kex: server->client cipher: chacha20-poly1305@openssh.com MAC: <implicit> compression: none
+debug1: kex: client->server cipher: chacha20-poly1305@openssh.com MAC: <implicit> compression: none
+debug1: expecting SSH2_MSG_KEX_ECDH_REPLY
+debug1: SSH2_MSG_KEX_ECDH_REPLY received
+debug1: Server host key: ssh-ed25519 SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+debug1: load_hostkeys: fopen /c/Users/philipzhang/.ssh/known_hosts2: No such file or directory
+debug1: load_hostkeys: fopen /etc/ssh/ssh_known_hosts: No such file or directory
+debug1: load_hostkeys: fopen /etc/ssh/ssh_known_hosts2: No such file or directory
+debug1: hostkeys_find_by_key_hostfile: hostkeys file /c/Users/philipzhang/.ssh/known_hosts2 does not exist
+debug1: hostkeys_find_by_key_hostfile: hostkeys file /etc/ssh/ssh_known_hosts does not exist
+debug1: hostkeys_find_by_key_hostfile: hostkeys file /etc/ssh/ssh_known_hosts2 does not exist
+debug1: read_passphrase: can't open /dev/tty: No such device or address
+Host key verification failed.
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.

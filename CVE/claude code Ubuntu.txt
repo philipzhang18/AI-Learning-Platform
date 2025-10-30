@@ -1,0 +1,33 @@
+echo -e '\n export ANTHROPIC_AUTH_TOKEN=sk-lAsmq0KcW2R5lVBwi3SIE4Y8zLKv5KksJD9Jz5Cj3VUHnjaE' >> ~/.bash_profile
+echo -e '\n export ANTHROPIC_BASE_URL=https://anyrouter.top' >> ~/.bash_profile
+echo -e '\n export ANTHROPIC_AUTH_TOKEN=sk-lAsmq0KcW2R5lVBwi3SIE4Y8zLKv5KksJD9Jz5Cj3VUHnjaE' >> ~/.bashrc
+echo -e '\n export ANTHROPIC_BASE_URL=https://anyrouter.top' >> ~/.bashrc
+echo -e '\n export ANTHROPIC_AUTH_TOKEN=sk-lAsmq0KcW2R5lVBwi3SIE4Y8zLKv5KksJD9Jz5Cj3VUHnjaE' >> ~/.zshrc
+echo -e '\n export ANTHROPIC_BASE_URL=https://anyrouter.top' >> ~/.zshrc
+
+环境变量
+
+
+SSH秘钥
+
+dify@dify-VMware-Virtual-Platform:~/Desktop$ ssh-keygen -t ed25519
+Generating public/private ed25519 key pair.
+Enter file in which to save the key (/home/dify/.ssh/id_ed25519): 
+Enter passphrase for "/home/dify/.ssh/id_ed25519" (empty for no passphrase): 
+Enter same passphrase again: 
+Your identification has been saved in /home/dify/.ssh/id_ed25519
+Your public key has been saved in /home/dify/.ssh/id_ed25519.pub
+The key fingerprint is:
+SHA256:+X9OEv9RBj0W0TeKhpLXLwxT4Z0QfhpVi2iTOUuqZyk dify@dify-VMware-Virtual-Platform
+The key's randomart image is:
++--[ED25519 256]--+
+|           +o..+o|
+|          o.B oo=|
+|        . +%.=o++|
+|       o *++B....|
+|        S.=oo   o|
+|        ...o + ..|
+|       E +. o o. |
+|        +  . o...|
+|            .o. .|
++----[SHA256]-----+
