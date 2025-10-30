@@ -142,14 +142,19 @@ def main():
             data_dir = Path("cve_data")
             data_dir.mkdir(exist_ok=True)
 
-            if sys.platform == "win32":
-                os.startfile(data_dir)
-            elif sys.platform == "darwin":
-                subprocess.run(["open", data_dir])
-            else:
-                subprocess.run(["xdg-open", data_dir])
+            try:
+                if sys.platform == "win32":
+                    os.startfile(data_dir.absolute())
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", str(data_dir.absolute())], check=True)
+                else:
+                    subprocess.run(["xdg-open", str(data_dir.absolute())], check=True)
 
-            print(f"Opened data directory: {data_dir.absolute()}")
+                print(f"Opened data directory: {data_dir.absolute()}")
+            except Exception as e:
+                print(f"Failed to open data directory: {e}")
+                print(f"Data directory location: {data_dir.absolute()}")
+
             continue
         elif choice == "0":
             print("Goodbye!")
