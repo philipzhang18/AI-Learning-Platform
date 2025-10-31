@@ -65,9 +65,16 @@ app.add_middleware(
 )
 
 # 配置可信主机
+if settings.DEBUG:
+    # In development, allow localhost and example.com domain
+    allowed_hosts = ["localhost", "127.0.0.1", "*.example.com", "0.0.0.0"]
+else:
+    # In production, only allow specific domains (should be configured in settings)
+    allowed_hosts = ["localhost", "127.0.0.1", "0.0.0.0"]  # Add your production domains here
+
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["localhost", "127.0.0.1", "*.example.com"]
+    allowed_hosts=allowed_hosts
 )
 
 # 全局异常处理器
@@ -181,6 +188,23 @@ async def search_cves(
     limit: int = 20
 ):
     """搜索 CVE"""
+    # Input validation and sanitization
+    if q:
+        # Limit query length to prevent extremely long queries
+        if len(q) > 100:
+            q = q[:100]
+        # Basic sanitization to prevent potential XSS in a real implementation
+        import html
+        q = html.escape(q)
+    
+    # Validate and limit the search results
+    limit = min(max(limit, 1), 100)  # Limit between 1 and 100 results
+    
+    # Validate severity parameter
+    valid_severities = {"CRITICAL", "HIGH", "MEDIUM", "LOW", None}
+    if severity not in valid_severities:
+        severity = None
+
     results = {
         "query": q,
         "filters": {

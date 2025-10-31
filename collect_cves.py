@@ -33,7 +33,9 @@ class CVECollector:
             api_key: NVD API 密钥，如果不提供将从环境变量 NVD_API_KEY 获取
         """
         self.base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-        self.api_key = api_key
+        # Ensure api_key parameter is handled properly - only use if provided
+        # This prevents API key from being set to None when None is passed
+        self.api_key = api_key or os.getenv("NVD_API_KEY")
         self.session = None
         self.data_dir = Path("cve_data")
         self.data_dir.mkdir(exist_ok=True)
