@@ -10,6 +10,10 @@ from typing import List, Dict, Any
 import logging
 import os
 from pathlib import Path
+from dotenv import load_dotenv  # Add this import to load .env file
+
+# Load environment variables from .env file
+load_dotenv()
 
 # 配置日志
 logging.basicConfig(
@@ -26,7 +30,7 @@ class CVECollector:
         初始化采集器
 
         Args:
-            api_key: NVD API 密钥（可选，但推荐使用以提高请求限制）
+            api_key: NVD API 密钥，如果不提供将从环境变量 NVD_API_KEY 获取
         """
         self.base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
         self.api_key = api_key
@@ -67,9 +71,16 @@ class CVECollector:
         start_index = 0
         results_per_page = 100
 
-        # 格式化日期
-        start_str = start_date.strftime("%Y-%m-%dT%H:%M:%S.000")
-        end_str = end_date.strftime("%Y-%m-%dT%H:%M:%S.000")
+        # Format dates according to NVD API requirements (ISO 8601 format with milliseconds)
+        # Ensure dates are in the past to prevent HTTP 404 errors
+        current_time = datetime.now()
+        if start_date > current_time:
+            start_date = current_time
+        if end_date > current_time:
+            end_date = current_time
+            
+        start_str = start_date.strftime("%Y-%m-%dT%H:%M:%S")
+        end_str = end_date.strftime("%Y-%m-%dT%H:%M:%S")
 
         logger.info(f"正在获取 {start_str} 到 {end_str} 的 CVE 数据...")
 
@@ -303,7 +314,10 @@ class CVECollector:
                 cve_id = cve.get("cve_id", "未知")
                 severity = cve.get("cvss_severity", "未知")
                 score = cve.get("cvss_score", "N/A")
-                print(f"  - {cve_id:20} | 严重性: {severity:8} | 评分: {score}")
+                # Handle None values to prevent format string errors
+                severity_str = str(severity) if severity is not None else "未知"
+                score_str = str(score) if score is not None else "N/A"
+                print(f"  - {cve_id:20} | 严重性: {severity_str:8} | 评分: {score_str}")
 
             # 统计受影响最多的厂商
             vendor_count = {}
@@ -327,16 +341,21 @@ async def main():
     print("CVE 数据采集工具")
     print("-" * 40)
 
-    # 设置时间范围（获取最近7天的数据）
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=7)
+    # 设置时间范围（获取最近两年的数据，使用分段查询避免HTTP 404错误）
+    # NVD API typically limits date ranges, so we'll collect in 120-day chunks
+    end_date = datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999)  # End of today (not future)
+    start_date = end_date - timedelta(days=730)  # Two years ago
 
     print(f"采集时间范围: {start_date.date()} 至 {end_date.date()}")
+    print(f"采集范围: 最近两年（730 天）")
+    print("注意：由于 NVD API 限制，大量数据采集可能需要较长时间")
+    print("预计时间: 有 API Key 约 10-20 分钟，无 API Key 约 2-3 小时")
 
     # 从环境变量获取 API Key（可选）
     api_key = os.getenv("NVD_API_KEY")
     if api_key:
         print("检测到 NVD API Key，将使用更高的请求限制")
+        print("API Key已配置，支持更高的请求频率")
     else:
         print("未配置 API Key，使用默认请求限制（较慢）")
         print("提示: 可在 https://nvd.nist.gov/developers/request-an-api-key 申请免费 API Key")
@@ -344,30 +363,52 @@ async def main():
     print("-" * 40)
 
     try:
+        all_raw_cves = []
+        
+        # Collect data in chunks to avoid API date range limitations
+        # NVD API typically works best with date ranges of 120 days or less
+        current_start = start_date
+        chunk_size = timedelta(days=120)
+        
         async with CVECollector(api_key=api_key) as collector:
-            # 获取原始数据
-            raw_cves = await collector.fetch_cves(start_date, end_date)
+            while current_start < end_date:
+                current_end = min(current_start + chunk_size, end_date)
+                
+                print(f"正在获取 {current_start.date()} 到 {current_end.date()} 的数据...")
+                
+                # Get data for this chunk
+                chunk_cves = await collector.fetch_cves(current_start, current_end)
+                all_raw_cves.extend(chunk_cves)
+                
+                logger.info(f"已获取 {len(chunk_cves)} 条 CVE 数据 (批次: {current_start.date()} 到 {current_end.date()})")
+                
+                # Move to next chunk
+                current_start = current_end
+                
+                # Brief pause between chunks to be respectful to the API
+                await asyncio.sleep(1)
 
-            if raw_cves:
-                # 解析数据
+            if all_raw_cves:
+                # Parse data
                 parsed_cves = []
-                for raw_cve in raw_cves:
+                for raw_cve in all_raw_cves:
                     parsed = collector.parse_cve(raw_cve)
                     parsed_cves.append(parsed)
 
-                # 保存到文件
+                # Save to file
                 filepath = collector.save_to_file(parsed_cves)
 
-                # 打印摘要
+                # Print summary
                 collector.print_summary(parsed_cves)
 
-                print(f"✓ 采集完成！数据已保存到: {filepath}")
+                print(f"[SUCCESS] 采集完成！数据已保存到: {filepath}")
+                print(f"总计采集: {len(all_raw_cves)} 条 CVE 数据")
             else:
                 print("未获取到任何 CVE 数据")
 
     except Exception as e:
         logger.error(f"采集过程出错: {str(e)}")
-        print(f"✗ 采集失败: {str(e)}")
+        print(f"[ERROR] 采集失败: {str(e)}")
 
 
 if __name__ == "__main__":

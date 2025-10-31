@@ -68,6 +68,28 @@ htmlcov/
 # CVE Data (可选，如果不想提交采集的数据)
 cve_data/
 
+# CVE项目特定排除
+# 测试文件
+test_*.py
+verify_*.py
+run_cve_test.bat
+
+# 数据文件
+*.csv
+*.json
+!requirements.txt
+!package.json
+
+# 老版本文件（已删除，不要重新添加）
+cve_gui.py
+cve_gui_v2.py
+
+# 临时和集成测试文件
+collect_cves_with_dell.py
+collect_cves_with_dell_integration.py
+cve_dell_integration.py
+dell_security.py
+
 # Docker
 docker-compose.override.yml
 

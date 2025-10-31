@@ -20,7 +20,8 @@ amqp==5.2.0
 
 # HTTP 客户端
 httpx==0.25.2
-aiohttp==3.9.1
+aiohttp
+feedparser==3.9.1
 requests==2.31.0
 
 # 数据处理

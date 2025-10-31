@@ -5,16 +5,23 @@
 ### 虚拟环境配置
 **指令：** 所有涉及代码执行、依赖项检查或环境交互的任务，**必须优先在 `D:\AI\cursor\starone\.venv` 虚拟环境中执行**。
 
+### Claude 执行环境要求
+**重要：** Claude 在执行所有 Python 相关任务时，必须：
+1. **优先使用 Git Bash 环境**
+2. **执行前激活虚拟环境**：`source /D/AI/cursor/starone/.venv/Scripts/activate`
+3. **验证环境**：确认 Python 解释器路径为虚拟环境路径
+4. **不允许**在系统 Python 环境中执行任何代码
+
 #### 激活虚拟环境
 ```bash
+# Git Bash / WSL（Claude 默认使用）
+source /D/AI/cursor/starone/.venv/Scripts/activate
+
 # Windows PowerShell
 D:\AI\cursor\starone\.venv\Scripts\Activate.ps1
 
 # Windows CMD
 D:\AI\cursor\starone\.venv\Scripts\activate.bat
-
-# Git Bash / WSL
-source D:\AI\cursor\starone\.venv\Scripts\activate
 ```
 
 #### 验证环境
@@ -135,11 +142,19 @@ git config --local i18n.logoutputencoding utf-8
 
 ## 常用命令速查
 
-### Python 环境
+### Python 环境标准执行流程
 ```bash
-# 创建虚拟环境
-python -m venv .venv
+# 1. 激活虚拟环境（必须）
+source /D/AI/cursor/starone/.venv/Scripts/activate
 
+# 2. 验证环境（推荐）
+which python
+# 应显示：/d/AI/cursor/starone/.venv/Scripts/python
+
+# 3. 执行 Python 代码
+python your_script.py
+
+# 4. 其他常用命令
 # 查看 Python 版本
 python --version
 
@@ -148,6 +163,9 @@ pip show package_name
 
 # 导出依赖
 pip freeze > requirements.txt
+
+# 创建新虚拟环境（仅供参考）
+python -m venv .venv
 ```
 
 ### 代码质量检查
@@ -175,5 +193,6 @@ pytest tests/ -v
 
 ---
 
-*最后更新时间：2025-10-28*
-*文档版本：v1.0.0*
+*最后更新时间：2025-10-30*
+*文档版本：v1.1.0*
+*更新内容：强化虚拟环境执行要求，明确 Claude 必须在 Git Bash 虚拟环境中执行所有 Python 任务*
