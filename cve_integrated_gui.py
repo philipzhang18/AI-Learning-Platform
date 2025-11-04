@@ -481,6 +481,52 @@ class CVEIntegratedGUI:
             self.log(f"存储Dell数据失败: {str(e)}")
             return False
 
+    def get_dell_count_from_db(self):
+        """获取Dell安全公告总数（从实际数据库）
+
+        Returns:
+            int: Dell记录总数
+        """
+        if self.use_redis:
+            try:
+                return self.redis_manager.get_dell_count()
+            except Exception as e:
+                self.log(f"从Redis获取Dell总数失败: {e}")
+                # 回退到SQLite
+                pass
+
+        # SQLite模式或Redis失败时
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM dell_advisories")
+            count = cursor.fetchone()[0]
+            return count
+        except Exception as e:
+            self.log(f"从SQLite获取Dell总数失败: {e}")
+            return 0
+
+    def get_cve_count_from_db(self):
+        """获取CVE总数（从实际数据库）
+
+        Returns:
+            int: CVE记录总数
+        """
+        if self.use_redis:
+            try:
+                return self.redis_manager.get_cves_count()
+            except Exception as e:
+                self.log(f"从Redis获取CVE总数失败: {e}")
+                pass
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM cves")
+            count = cursor.fetchone()[0]
+            return count
+        except Exception as e:
+            self.log(f"从SQLite获取CVE总数失败: {e}")
+            return 0
+
     def load_dell_from_database(self):
         """从数据库加载Dell安全公告（优先使用 Redis）"""
         # 优先从 Redis 加载
@@ -1445,11 +1491,8 @@ class CVEIntegratedGUI:
                         json.dump(new_advisories, f, ensure_ascii=False, indent=2)
                     self.log_queue.put(f"新增数据已保存到: {filename}")
 
-                # 计算数据库总数（从 Redis）
-                if self.use_redis:
-                    total_count = self.redis_manager.get_dell_count()
-                else:
-                    total_count = len(self.dell_advisories)
+                # ✅ 修复：使用正确的方法计算数据库总数
+                total_count = self.get_dell_count_from_db()
 
                 self.log_queue.put("✓ Dell 安全公告采集完成！")
                 self.log_queue.put(f"✓ 数据库总计 {total_count} 条记录")
@@ -2294,9 +2337,9 @@ CVE 描述:
 
     def update_stats(self):
         """更新统计信息（优化版，使用哈希表加速）"""
-        # 统计 NVD CVE 数据
-        nvd_total = len(self.cve_data)
-        dell_total = len(self.dell_advisories)
+        # ✅ 修复：从数据库获取实际总数（而非内存列表）
+        nvd_total = self.get_cve_count_from_db()
+        dell_total = self.get_dell_count_from_db()
 
         # 优化：使用集合加速关联匹配
         # 将所有 CVE ID 放入集合
