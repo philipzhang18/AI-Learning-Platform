@@ -1,0 +1,206 @@
+version: '3.8'
+
+services:
+  # ==================== 数据存储层 ====================
+
+  # MongoDB 数据库
+  mongodb:
+    image: mongo:6.0
+    container_name: cve-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-defaultpassword}
+      MONGO_INITDB_DATABASE: cve_monitor
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - cve-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis 缓存（优化配置）
+  redis:
+    image: redis:7-alpine
+    container_name: cve-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-defaultpassword}
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+      --tcp-backlog 511
+      --timeout 0
+      --tcp-keepalive 300
+      --lazyfree-lazy-eviction yes
+      --lazyfree-lazy-expire yes
+      --lazyfree-lazy-server-del yes
+      --replica-lazy-flush yes
+      --io-threads 4
+      --io-threads-do-reads yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - cve-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-defaultpassword}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL + pgvector（向量数据库，支持相似度搜索）
+  postgres-vector:
+    image: ankane/pgvector:latest
+    container_name: cve-postgres-vector
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-defaultpassword}
+      POSTGRES_DB: cve_vectors
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-vector-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - cve-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== GPU 加速服务 ====================
+
+  # Ollama - 本地 LLM 服务（GPU 加速）
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cve-ollama
+    restart: always
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - cve-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - OLLAMA_NUM_GPU=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Open WebUI - LLM 管理界面
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: cve-open-webui
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=${SECRET_KEY:-your-secret-key-here}
+    volumes:
+      - open-webui-data:/app/backend/data
+    networks:
+      - cve-network
+    depends_on:
+      - ollama
+
+  # ==================== 应用服务层 ====================
+
+  # Redis Commander - Web管理界面
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: cve-redis-commander
+    restart: unless-stopped
+    environment:
+      - REDIS_HOSTS=local:redis:6379:0:${REDIS_PASSWORD:-defaultpassword}
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - cve-network
+
+  # pgAdmin - PostgreSQL 管理界面
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cve-pgadmin
+    restart: unless-stopped
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - cve-network
+    depends_on:
+      - postgres-vector
+
+  # 后端 API 服务
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cve-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      MONGODB_URL: mongodb://admin:${MONGO_PASSWORD:-defaultpassword}@mongodb:27017/cve_monitor?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD:-defaultpassword}@redis:6379/0
+      POSTGRES_URL: postgresql://admin:${POSTGRES_PASSWORD:-defaultpassword}@postgres-vector:5432/cve_vectors
+      OLLAMA_BASE_URL: http://ollama:11434
+      NVD_API_KEY: ${NVD_API_KEY}
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-here}
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      - mongodb
+      - redis
+      - postgres-vector
+      - ollama
+    volumes:
+      - ./:/app
+      - ./cve_data:/app/cve_data
+    networks:
+      - cve-network
+    command: python main.py
+
+volumes:
+  mongo-data:
+    driver: local
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local
+  ollama-data:
+    driver: local
+  open-webui-data:
+    driver: local
+  pgadmin-data:
+    driver: local
+
+networks:
+  cve-network:
+    driver: bridge

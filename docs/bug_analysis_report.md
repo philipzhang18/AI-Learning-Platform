@@ -215,6 +215,89 @@ python main.py
 
 ---
 
-**生成时间**: 2025-10-31
+**生成时间**: 2025-10-31 (初版), 2025-11-01 (更新)
 **分析工具**: Claude Code
-**项目版本**: v3.1
+
+---
+
+## 9. CSV加载功能Bug修复 (v3.3.1)
+
+**修复日期**: 2025-11-01
+**Bug数量**: 2个（全部已修复）
+**影响范围**: Dell安全公告CSV数据导入功能
+
+### Bug #1: CSV Reader迭代器耗尽
+**严重性**: 🔴 高 (功能完全失效)
+
+#### 问题描述
+点击Dell安全公告页面的"📊 加载CSV数据"按钮后，无法正确解析和加载CSV文件。虽然文件选择对话框正常工作，但数据无法加载到界面中。
+
+#### 根本原因
+Python的`csv.DictReader`是一次性迭代器。在`load_csv_data()`方法中，创建reader后访问`fieldnames`属性会消耗第一行数据，导致传递给`load_dell_csv()`的reader已经耗尽，无法再次遍历。
+
+**问题代码** (`cve_integrated_gui.py:1410-1420`):
+```python
+with open(csv_file, 'r', encoding='utf-8-sig') as f:
+    reader = csv.DictReader(f)
+    fieldnames = reader.fieldnames  # ❌ 消耗了第一行
+
+    if is_dell_csv:
+        self.load_dell_csv(csv_file, reader)  # ❌ reader已耗尽
+```
+
+#### 修复方案
+让`load_dell_csv()`方法打开自己的文件句柄和CSV reader：
+
+**修复后的代码**:
+```python
+# 调用方 - 只传文件路径
+if is_dell_csv:
+    self.load_dell_csv(csv_file)  # ✅ 只传路径
+
+# 接收方 - 打开自己的reader
+def load_dell_csv(self, csv_file):
+    with open(csv_file, 'r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)  # ✅ 新的reader
+        for row in reader:
+            # 处理数据...
+```
+
+### Bug #2: 方法名错误
+**严重性**: 🔴 高 (导致加载失败)
+
+#### 问题描述
+Bug #1修复后，CSV数据可以开始解析并存储，但在更新关联数据时报错："has no attribute 'update_matched_data'"。
+
+#### 根本原因
+代码中调用了不存在的方法名`update_matched_data()`，正确的方法名应该是`refresh_matched_data()`。
+
+**问题代码** (`cve_integrated_gui.py:389`):
+```python
+def load_dell_from_database(self):
+    # ... 加载数据代码 ...
+    self.update_matched_data()  # ❌ 方法名错误
+```
+
+#### 修复方案
+**修复后的代码**:
+```python
+def load_dell_from_database(self):
+    # ... 加载数据代码 ...
+    self.refresh_matched_data()  # ✅ 正确的方法名
+```
+
+### 验证结果
+- ✅ 语法检查通过（两次修复）
+- ✅ 独立测试脚本成功加载91条DSA记录
+- ✅ GUI实际测试通过，功能完全正常
+- ✅ 数据库增量存储正常
+- ✅ 关联数据更新正常
+
+### 相关文件
+- `cve_integrated_gui.py` (已修复2个bug)
+- `bug_fix_csv_loading.md` (详细修复报告)
+- `test_full_csv_loading.py` (验证测试脚本)
+
+---
+
+**项目版本**: v3.3.1

@@ -148,3 +148,6 @@ ssl/
 *.tar.gz
 *.rar
 *.7z
+
+# Project archive directory (optional - 可选择提交归档)
+# archive/

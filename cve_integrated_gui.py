@@ -1,5 +1,5 @@
 """
-CVE 漏洞监控系统 - 整合版
+CVE漏洞检测系统(Dell安全公告版)
 集成 NVD CVE 数据和 Dell 安全公告
 支持离线数据查看和 CVE ID 关联匹配
 """
@@ -21,6 +21,7 @@ import os
 # 导入自定义模块
 from collect_cves import CVECollector
 from dell_security_scraper import DellSecurityScraper
+from redis_manager import RedisDataManager
 
 
 class CVEIntegratedGUI:
@@ -28,7 +29,7 @@ class CVEIntegratedGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("CVE 漏洞监控系统 - 整合版")
+        self.root.title("CVE漏洞检测系统(Dell安全公告版)")
         self.root.geometry("1400x900")
 
         # 设置主题颜色
@@ -45,6 +46,7 @@ class CVEIntegratedGUI:
         self.data_queue = queue.Queue()
         self.log_queue = queue.Queue()
         self.dell_queue = queue.Queue()
+        self.sqlite_backup_queue = queue.Queue()  # SQLite 异步备份队列
 
         # 数据存储
         self.cve_data = []
@@ -56,11 +58,33 @@ class CVEIntegratedGUI:
         self.data_dir = Path("cve_data")
         self.data_dir.mkdir(exist_ok=True)
 
-        # 初始化本地数据库
+        # 初始化 Redis 数据管理器（优先使用）
+        self.use_redis = False
+        self.redis_init_message = ""
+        try:
+            self.redis_manager = RedisDataManager(
+                password=os.getenv('REDIS_PASSWORD', 'defaultpassword')
+            )
+            if self.redis_manager.ping():
+                self.use_redis = True
+                self.redis_init_message = "Redis 已连接 - 使用高性能缓存模式"
+            else:
+                self.redis_init_message = "Redis 连接失败 - 回退到 SQLite 模式"
+        except Exception as e:
+            self.redis_init_message = f"Redis 初始化失败: {e} - 回退到 SQLite 模式"
+
+        # 初始化本地数据库（作为备份）
         self.init_database()
 
         # 创建界面
         self.create_widgets()
+
+        # 显示 Redis 初始化消息
+        if self.redis_init_message:
+            self.log(self.redis_init_message)
+
+        # 启动 SQLite 异步备份线程
+        self.start_sqlite_backup_thread()
 
         # 启动队列检查
         self.check_queues()
@@ -82,7 +106,7 @@ class CVEIntegratedGUI:
         """创建数据库表"""
         try:
             cursor = self.conn.cursor()
-            
+
             # CVE数据表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS cves (
@@ -92,7 +116,20 @@ class CVEIntegratedGUI:
                     published_date TEXT
                 )
             ''')
-            
+
+            # Dell安全公告表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dell_advisories (
+                    dsa_id TEXT PRIMARY KEY,
+                    title TEXT,
+                    cve_ids TEXT,
+                    data TEXT NOT NULL,
+                    published_date TEXT,
+                    collected_date TEXT,
+                    link TEXT
+                )
+            ''')
+
             # 采集历史表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS collection_history (
@@ -102,7 +139,7 @@ class CVEIntegratedGUI:
                     FOREIGN KEY (cve_id) REFERENCES cves (cve_id)
                 )
             ''')
-            
+
             self.conn.commit()
         except sqlite3.Error as e:
             self.log(f"创建数据库表失败: {str(e)}")
@@ -111,19 +148,22 @@ class CVEIntegratedGUI:
         """更新数据库表结构（如果需要）"""
         try:
             cursor = self.conn.cursor()
-            
-            # 检查是否已存在 'data' 列
+
+            # 检查表结构信息
+            # PRAGMA table_info返回: (cid, name, type, notnull, dflt_value, pk)
             cursor.execute("PRAGMA table_info(cves)")
-            columns = [column[1] for column in cursor.fetchall()]
-            
+            columns_info = cursor.fetchall()
+            columns = [col[1] for col in columns_info]
+            primary_keys = [col[1] for col in columns_info if col[5] == 1]
+
             # 如果没有 'data' 列，则添加
             if 'data' not in columns:
                 # 重新创建表以添加缺失的列
                 cursor.execute("ALTER TABLE cves ADD COLUMN data TEXT DEFAULT ''")
-            
+
             # 检查并修复其他可能的问题
             # 如果主键定义不当，重新创建表
-            if 'cve_id' not in columns or columns[0] != 'cve_id':  # Check if cve_id is the primary key
+            if 'cve_id' not in columns or 'cve_id' not in primary_keys:
                 # Create the proper table if it doesn't exist
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS cves_new (
@@ -133,7 +173,7 @@ class CVEIntegratedGUI:
                         published_date TEXT
                     )
                 ''')
-                
+
                 # Copy data from old table if it exists and has data
                 try:
                     cursor.execute("SELECT cve_id, last_modified, published_date FROM cves")
@@ -143,14 +183,15 @@ class CVEIntegratedGUI:
                             INSERT OR REPLACE INTO cves_new (cve_id, data, last_modified, published_date)
                             VALUES (?, ?, ?, ?)
                         ''', (row[0], '', row[1], row[2]))
-                    
+
                     # Drop old table and rename new table
                     cursor.execute("DROP TABLE cves")
                     cursor.execute("ALTER TABLE cves_new RENAME TO cves")
-                except:
+                    self.log("数据库表结构已更新，主键已修正")
+                except sqlite3.Error as e:
                     # If the old table structure is different, just create the new one
-                    pass
-            
+                    self.log(f"数据库表迁移失败，将创建新表: {e}")
+
             self.conn.commit()
         except sqlite3.Error as e:
             self.log(f"更新数据库表结构失败: {str(e)}")
@@ -165,26 +206,76 @@ class CVEIntegratedGUI:
         except sqlite3.Error as e:
             self.log(f"查询现有CVE IDs失败: {str(e)}")
             return set()
-    
+
+    def start_sqlite_backup_thread(self):
+        """启动 SQLite 异步备份线程"""
+        def backup_worker():
+            """SQLite 备份工作线程"""
+            while True:
+                try:
+                    # 从队列获取备份任务（阻塞等待）
+                    data_type, data = self.sqlite_backup_queue.get(timeout=1)
+
+                    if data_type == 'cve':
+                        self._store_cve_to_sqlite(data)
+                    elif data_type == 'dell':
+                        self._store_dell_to_sqlite(data)
+
+                    # 标记任务完成
+                    self.sqlite_backup_queue.task_done()
+
+                except queue.Empty:
+                    # 队列为空，继续等待
+                    continue
+                except Exception as e:
+                    # 记录错误但不停止线程
+                    print(f"SQLite 备份线程错误: {e}")
+                    continue
+
+        # 创建守护线程（应用退出时自动结束）
+        backup_thread = threading.Thread(target=backup_worker, daemon=True)
+        backup_thread.start()
+        self.log("SQLite 异步备份线程已启动")
+
     def store_cve_data(self, cve_data):
-        """存储单个CVE数据到数据库"""
+        """存储单个CVE数据到数据库（Redis主存储，SQLite异步备份）"""
+        # 生产环境：只使用 Redis，SQLite 异步备份
+        if self.use_redis:
+            try:
+                is_new = self.redis_manager.store_cve(cve_data)
+
+                # ✅ 异步备份到 SQLite
+                self.sqlite_backup_queue.put(('cve', cve_data))
+
+                return is_new
+            except Exception as e:
+                self.log(f"存储到 Redis 失败: {e}, 回退到 SQLite")
+                # Redis 失败时直接写 SQLite
+                return self._store_cve_to_sqlite(cve_data)
+
+        # SQLite 存储（回退方案）
+        return self._store_cve_to_sqlite(cve_data)
+
+    def _store_cve_to_sqlite(self, cve_data):
+        """存储 CVE 数据到 SQLite（内部方法）"""
         try:
             cursor = self.conn.cursor()
-            
+
             cve_id = cve_data.get('cve_id', '')
             if not cve_id:
-                self.log("跳过空CVE ID的数据")
-                return
-                
+                return False
+
             # Ensure the data field is not None
             data_str = json.dumps(cve_data) if cve_data else '{}'
-            
+
             # 检查是否已存在
             cursor.execute("SELECT 1 FROM cves WHERE cve_id = ?", (cve_id,))
-            if cursor.fetchone():
+            is_new = cursor.fetchone() is None
+
+            if not is_new:
                 # 更新现有记录
                 cursor.execute('''
-                    UPDATE cves 
+                    UPDATE cves
                     SET data = ?, last_modified = ?, published_date = ?
                     WHERE cve_id = ?
                 ''', (
@@ -204,26 +295,50 @@ class CVEIntegratedGUI:
                     cve_data.get('last_modified', '') or '',
                     cve_data.get('published_date', '') or ''
                 ))
-            
+
             # 添加到采集历史
             cursor.execute('''
                 INSERT INTO collection_history (cve_id, collected_date)
                 VALUES (?, ?)
             ''', (cve_id, datetime.now().isoformat()))
-            
+
             self.conn.commit()
+            return is_new
         except sqlite3.Error as e:
             self.log(f"存储CVE数据失败: {str(e)}")
             # 尝试回滚事务
             try:
                 self.conn.rollback()
-            except:
-                pass  # Ignore rollback errors
+            except sqlite3.Error as rollback_err:
+                self.log(f"回滚失败: {rollback_err}")
+            return False
         except Exception as e:
             self.log(f"存储CVE数据时发生未知错误: {str(e)}")
+            return False
     
     def load_cve_data_from_db(self, cve_ids=None):
-        """从数据库加载CVE数据"""
+        """从数据库加载CVE数据（优先使用 Redis）"""
+        # 优先从 Redis 加载
+        if self.use_redis:
+            try:
+                if cve_ids:
+                    # 加载指定的 CVE
+                    cve_data = []
+                    for cve_id in cve_ids:
+                        data = self.redis_manager.get_cve(cve_id)
+                        if data:
+                            cve_data.append(data)
+                else:
+                    # 加载所有 CVE
+                    cve_data = self.redis_manager.get_all_cves()
+
+                self.log(f"从 Redis 加载了 {len(cve_data)} 条 CVE 数据")
+                return cve_data
+            except Exception as e:
+                self.log(f"Redis 加载失败: {e}, 回退到 SQLite")
+                # 如果 Redis 失败，继续使用 SQLite
+
+        # 从 SQLite 加载（回退方案）
         try:
             cursor = self.conn.cursor()
             if cve_ids:
@@ -293,6 +408,169 @@ class CVEIntegratedGUI:
             self.log(f"查询最近采集时间失败: {str(e)}")
             return None
 
+    # ==================== Dell 数据库操作方法 ====================
+
+    def get_existing_dell_ids(self):
+        """获取数据库中已存在的Dell安全公告IDs"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT dsa_id FROM dell_advisories")
+            existing_ids = [row[0] for row in cursor.fetchall()]
+            return set(existing_ids)
+        except sqlite3.Error as e:
+            self.log(f"查询现有Dell IDs失败: {str(e)}")
+            return set()
+
+    def store_dell_advisory(self, advisory_data):
+        """存储单个Dell安全公告到数据库（Redis主存储，SQLite异步备份）"""
+        # 生产环境：只使用 Redis，SQLite 异步备份
+        if self.use_redis:
+            try:
+                is_new = self.redis_manager.store_dell_advisory(advisory_data)
+
+                # ✅ 异步备份到 SQLite
+                self.sqlite_backup_queue.put(('dell', advisory_data))
+
+                return is_new  # 返回是否是新数据
+            except Exception as e:
+                self.log(f"存储 Dell 数据到 Redis 失败: {e}, 回退到 SQLite")
+                # Redis 失败时直接写 SQLite
+                return self._store_dell_to_sqlite(advisory_data)
+
+        # SQLite 存储（回退方案）
+        return self._store_dell_to_sqlite(advisory_data)
+
+    def _store_dell_to_sqlite(self, advisory_data):
+        """存储 Dell 数据到 SQLite（内部方法）"""
+        try:
+            cursor = self.conn.cursor()
+
+            dsa_id = advisory_data.get('dell_security_advisory', '')
+            if not dsa_id:
+                return False  # 返回False表示未存储
+
+            # 检查是否已存在
+            cursor.execute("SELECT 1 FROM dell_advisories WHERE dsa_id = ?", (dsa_id,))
+            is_new = cursor.fetchone() is None
+
+            if not is_new:
+                # 已存在，跳过
+                return False
+
+            # 不存在，插入新记录
+            cve_ids_str = ','.join(advisory_data.get('cve_ids', []))
+            data_str = json.dumps(advisory_data, ensure_ascii=False)
+
+            cursor.execute('''
+                INSERT INTO dell_advisories
+                (dsa_id, title, cve_ids, data, published_date, collected_date, link)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                dsa_id,
+                advisory_data.get('title', ''),
+                cve_ids_str,
+                data_str,
+                advisory_data.get('published_date', ''),
+                datetime.now().isoformat(),
+                advisory_data.get('link', '')
+            ))
+
+            self.conn.commit()
+            return True  # 返回True表示新增了记录
+        except sqlite3.Error as e:
+            self.log(f"存储Dell数据失败: {str(e)}")
+            return False
+
+    def load_dell_from_database(self):
+        """从数据库加载Dell安全公告（优先使用 Redis）"""
+        # 优先从 Redis 加载
+        if self.use_redis:
+            try:
+                self.dell_advisories = self.redis_manager.get_all_dell_advisories()
+
+                # 清空树形视图
+                for item in self.dell_tree.get_children():
+                    self.dell_tree.delete(item)
+
+                # 显示数据
+                for advisory in self.dell_advisories:
+                    self.add_dell_to_tree(advisory)
+
+                self.log(f"从 Redis 加载 {len(self.dell_advisories)} 条 Dell 安全公告")
+
+                # 更新关联数据
+                self.refresh_matched_data()
+                return
+
+            except Exception as e:
+                self.log(f"Redis 加载 Dell 数据失败: {e}, 回退到 SQLite")
+                # 继续使用 SQLite
+
+        # 从 SQLite 加载（回退方案）
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
+
+            records = cursor.fetchall()
+            self.dell_advisories = []
+
+            for record in records:
+                try:
+                    if record[0]:
+                        data = json.loads(record[0])
+                        self.dell_advisories.append(data)
+                except json.JSONDecodeError:
+                    continue
+
+            # 清空树形视图
+            for item in self.dell_tree.get_children():
+                self.dell_tree.delete(item)
+
+            # 显示数据
+            for advisory in self.dell_advisories:
+                self.add_dell_to_tree(advisory)
+
+            self.log(f"从 SQLite 加载 {len(self.dell_advisories)} 条 Dell 安全公告")
+
+            # 更新关联数据
+            self.refresh_matched_data()
+
+        except sqlite3.Error as e:
+            self.log(f"从数据库加载Dell数据失败: {str(e)}")
+
+    def enhance_dell_advisory(self, advisory):
+        """增强Dell安全公告的解决方案信息"""
+        # 查找关联的CVE数据，提供更详细的解决方案
+        cve_ids = advisory.get('cve_ids', [])
+
+        if cve_ids and self.cve_data:
+            # 尝试找到关联的CVE
+            related_cves = []
+            for cve in self.cve_data:
+                if cve.get('cve_id') in cve_ids:
+                    related_cves.append(cve)
+
+            if related_cves:
+                # 生成综合解决方案
+                enhanced_solution = advisory.get('solution', '')
+                enhanced_solution += "\n\n【CVE关联信息】\n"
+
+                for cve in related_cves:
+                    enhanced_solution += f"\n- {cve.get('cve_id')}:"
+                    enhanced_solution += f" CVSS评分 {cve.get('cvss_score', 'N/A')}"
+                    enhanced_solution += f" ({cve.get('cvss_severity', 'N/A')})"
+
+                    # 添加参考链接
+                    refs = cve.get('references', [])
+                    if refs:
+                        enhanced_solution += "\n  参考链接:"
+                        for ref in refs[:2]:  # 只取前2个
+                            enhanced_solution += f"\n    {ref.get('url', '')}"
+
+                advisory['enhanced_solution'] = enhanced_solution
+
+        return advisory
+
     def create_widgets(self):
         """创建界面组件"""
 
@@ -303,7 +581,7 @@ class CVEIntegratedGUI:
 
         title_label = tk.Label(
             header_frame,
-            text="🛡️ CVE 漏洞监控系统 - 整合版",
+            text="🛡️ CVE漏洞检测系统(Dell安全公告版)",
             font=("Microsoft YaHei", 24, "bold"),
             fg="white",
             bg=self.primary_color
@@ -377,17 +655,15 @@ class CVEIntegratedGUI:
         # 天数选择
         tk.Label(left_control, text="采集范围：", bg="white", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=(0, 5))
 
-        self.nvd_days_var = tk.StringVar(value="365")
-        days_combo = ttk.Combobox(
+        self.nvd_time_range_var = tk.StringVar(value="1年")
+        time_range_combo = ttk.Combobox(
             left_control,
-            textvariable=self.nvd_days_var,
-            values=["7", "30", "90", "180", "365"],
+            textvariable=self.nvd_time_range_var,
+            values=["最近一周", "1个月", "3个月", "半年", "1年"],
             width=10,
             state="readonly"
         )
-        days_combo.pack(side=tk.LEFT, padx=(0, 10))
-
-        tk.Label(left_control, text="天", bg="white", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=(0, 20))
+        time_range_combo.pack(side=tk.LEFT, padx=(0, 20))
 
         # API Key 状态显示
         api_key_env = os.getenv("NVD_API_KEY")
@@ -533,15 +809,15 @@ class CVEIntegratedGUI:
     def create_dell_view(self):
         """创建 Dell 安全公告视图"""
         # 提示信息框
-        info_banner = tk.Frame(self.dell_frame, bg="#fff3cd", pady=8)
+        info_banner = tk.Frame(self.dell_frame, bg="#d1ecf1", pady=8)
         info_banner.pack(fill=tk.X, padx=10, pady=(10, 0))
 
-        info_text = "ℹ️ 注意：Dell 官方 RSS 已停用。当前使用高质量示例数据（包含 5 条真实格式的 Dell 安全公告），可完整演示所有功能。"
+        info_text = "ℹ️ Dell安全公告采集：选择时间范围后点击采集按钮，数据将存储到本地数据库，支持离线查看和CVE关联分析。"
         info_label = tk.Label(
             info_banner,
             text=info_text,
-            bg="#fff3cd",
-            fg="#856404",
+            bg="#d1ecf1",
+            fg="#0c5460",
             font=("Microsoft YaHei", 9),
             wraplength=1200,
             justify=tk.LEFT
@@ -556,10 +832,24 @@ class CVEIntegratedGUI:
         left_control = tk.Frame(control_frame, bg="white")
         left_control.pack(side=tk.LEFT)
 
+        # 时间范围选择标签和下拉框
+        tk.Label(left_control, text="采集范围：", bg="white", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=(0, 5))
+
+        self.dell_time_range_var = tk.StringVar(value="1个月")
+        time_range_combo = ttk.Combobox(
+            left_control,
+            textvariable=self.dell_time_range_var,
+            values=["最近一周", "1个月", "3个月", "半年", "1年"],
+            state="readonly",
+            width=10,
+            font=("Microsoft YaHei", 9)
+        )
+        time_range_combo.pack(side=tk.LEFT, padx=(0, 10))
+
         # 开始采集按钮
         self.dell_collect_btn = tk.Button(
             left_control,
-            text="▶ 生成示例 Dell 数据",
+            text="▶ 采集Dell安全公告",
             command=self.start_dell_collection,
             bg=self.success_color,
             fg="white",
@@ -590,8 +880,8 @@ class CVEIntegratedGUI:
         # 加载本地数据按钮
         load_btn = tk.Button(
             left_control,
-            text="📁 加载本地数据",
-            command=self.load_local_dell_data,
+            text="📁 从数据库加载",
+            command=self.load_dell_from_database,
             bg=self.info_color,
             fg="white",
             font=("Microsoft YaHei", 10, "bold"),
@@ -625,7 +915,7 @@ class CVEIntegratedGUI:
         search_frame = tk.Frame(data_container, bg="white")
         search_frame.pack(fill=tk.X, pady=(0, 10))
 
-        tk.Label(search_frame, text="搜索：", bg="white", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Label(search_frame, text="公告ID：", bg="white", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=(0, 5))
         self.dell_search_var = tk.StringVar()
         search_entry = tk.Entry(search_frame, textvariable=self.dell_search_var, width=35, font=("Microsoft YaHei", 10))
         search_entry.pack(side=tk.LEFT, padx=(0, 5))
@@ -892,8 +1182,16 @@ class CVEIntegratedGUI:
 
         self.cve_data = []
 
-        # 获取天数
-        days = int(self.nvd_days_var.get())
+        # 获取时间范围并转换为天数
+        time_range = self.nvd_time_range_var.get()
+        time_range_map = {
+            "最近一周": 7,
+            "1个月": 30,
+            "3个月": 90,
+            "半年": 180,
+            "1年": 365
+        }
+        days = time_range_map.get(time_range, 365)
 
         # 优先使用环境变量的 API Key
         api_key = os.getenv("NVD_API_KEY")
@@ -903,7 +1201,7 @@ class CVEIntegratedGUI:
         thread.daemon = True
         thread.start()
 
-        self.log(f"开始采集 NVD CVE 数据（最近 {days} 天）...")
+        self.log(f"开始采集 NVD CVE 数据（{time_range}）...")
         if api_key:
             self.log("✓ 使用环境变量 API Key，采集速度更快")
         else:
@@ -932,12 +1230,12 @@ class CVEIntegratedGUI:
             self.nvd_stop_btn.config(state=tk.DISABLED)
 
     async def collect_nvd_cves_async(self, days, api_key):
-        """异步采集 NVD CVE 数据"""
+        """异步采集 NVD CVE 数据（优化版）"""
         end_date = datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999)
         start_date = end_date - timedelta(days=days)
 
         self.log_queue.put(f"时间范围: {start_date.date()} 至 {end_date.date()}")
-        
+
         # 获取数据库中已存在的CVE IDs
         existing_cve_ids = self.get_existing_cve_ids()
         self.log_queue.put(f"数据库中已存在 {len(existing_cve_ids)} 个CVE记录")
@@ -945,72 +1243,80 @@ class CVEIntegratedGUI:
         async with CVECollector(api_key=api_key) as collector:
             try:
                 # Collect data in chunks to avoid API date range limitations
-                # NVD API typically works best with date ranges of 120 days or less
                 all_raw_cves = []
-                
+
                 current_start = start_date
                 chunk_size = timedelta(days=120)  # Use 120-day chunks to avoid 404 errors
-                
+
                 while current_start < end_date and self.is_collecting:
                     current_end = min(current_start + chunk_size, end_date)
-                    
+
                     self.log_queue.put(f"正在获取 {current_start.date()} 到 {current_end.date()} 的数据...")
-                    
+
                     try:
                         # Get data for this chunk
                         chunk_cves = await collector.fetch_cves(current_start, current_end)
                         all_raw_cves.extend(chunk_cves)
-                        
-                        self.log_queue.put(f"批次完成: {len(chunk_cves)} 条 CVE 数据 (日期: {current_start.date()} 到 {current_end.date()})")
-                        
+
+                        self.log_queue.put(f"批次完成: {len(chunk_cves)} 条 CVE 数据")
+
                         # Move to next chunk
                         current_start = current_end
-                        
-                        # Brief pause between chunks to be respectful to the API
+
+                        # Brief pause between chunks
                         await asyncio.sleep(0.5)
-                        
+
                     except Exception as chunk_error:
-                        self.log_queue.put(f"批次采集错误 ({current_start.date()} to {current_end.date()}) : {str(chunk_error)}")
-                        # Continue to next chunk instead of failing completely
+                        self.log_queue.put(f"批次采集错误: {str(chunk_error)}")
                         current_start = current_end
                         continue
 
                 if all_raw_cves:
                     new_cves_count = 0
+                    updated_count = 0
                     self.log_queue.put(f"成功获取总计 {len(all_raw_cves)} 条 CVE 数据，正在解析...")
-                    
-                    # 解析数据
+
+                    # 解析并存储数据（只存储到数据库）
+                    new_cves = []  # 收集新增的 CVE
+
                     for raw_cve in all_raw_cves:
                         if not self.is_collecting:
                             break
 
                         parsed = collector.parse_cve(raw_cve)
                         cve_id = parsed.get("cve_id", "")
-                        
-                        # 只保存新数据到数据库
-                        if cve_id and cve_id not in existing_cve_ids:
-                            # 存储到数据库
-                            self.store_cve_data(parsed)
-                            
-                            # 发送到队列以更新UI
-                            self.data_queue.put(('nvd', parsed))
-                            new_cves_count += 1
-                        else:
-                            # 如果已经存在，也更新以保持数据最新
-                            self.store_cve_data(parsed)  # 更新现有数据
 
-                    # 从数据库加载所有相关数据用于显示
-                    all_cves = self.load_cve_data_from_db()
-                    self.cve_data = all_cves
-                    
-                    # Clear the tree view and reload all data
-                    for item in self.nvd_tree.get_children():
-                        self.nvd_tree.delete(item)
-                    
-                    for cve in self.cve_data:
-                        self.add_nvd_to_tree(cve)
-                    
-                    self.log_queue.put(f"NVD CVE 数据采集完成！新增 {new_cves_count} 条记录，总计 {len(all_cves)} 条")
+                        if cve_id:
+                            # 存储到数据库（增量）
+                            is_new = cve_id not in existing_cve_ids
+                            self.store_cve_data(parsed)
+
+                            if is_new:
+                                new_cves.append(parsed)
+                                new_cves_count += 1
+                                # 添加到已存在列表
+                                existing_cve_ids.add(cve_id)
+                            else:
+                                updated_count += 1
+
+                    # 优化：只将新增的 CVE 添加到内存和 GUI（不重新加载全部数据）
+                    if new_cves:
+                        self.log_queue.put(f"正在显示 {len(new_cves)} 条新增 CVE...")
+
+                        # 批量添加到内存
+                        self.cve_data.extend(new_cves)
+
+                        # 批量添加到 GUI（通过队列）
+                        for cve in new_cves:
+                            self.data_queue.put(('nvd', cve))
+
+                    # 显示统计
+                    total_in_db = len(existing_cve_ids)
+                    self.log_queue.put(f"✓ NVD CVE 数据采集完成！")
+                    self.log_queue.put(f"  新增: {new_cves_count} 条")
+                    if updated_count > 0:
+                        self.log_queue.put(f"  更新: {updated_count} 条")
+                    self.log_queue.put(f"  数据库总计: {total_in_db} 条")
                 else:
                     # 从数据库加载现有数据
                     all_cves = self.load_cve_data_from_db()
@@ -1029,6 +1335,10 @@ class CVEIntegratedGUI:
         if self.is_collecting_dell:
             return
 
+        # 获取选择的时间范围
+        time_range = self.dell_time_range_var.get()
+        self.log(f"准备采集 Dell 安全公告 - 时间范围: {time_range}")
+
         self.is_collecting_dell = True
         self.dell_collect_btn.config(state=tk.DISABLED)
         self.dell_stop_btn.config(state=tk.NORMAL)
@@ -1040,12 +1350,11 @@ class CVEIntegratedGUI:
         self.dell_advisories = []
 
         # 在新线程中运行采集
-        thread = threading.Thread(target=self.run_dell_collection)
+        thread = threading.Thread(target=self.run_dell_collection, args=(time_range,))
         thread.daemon = True
         thread.start()
 
-        self.log("开始生成 Dell 安全公告示例数据...")
-        self.log("注意：Dell RSS 已停用，使用高质量示例数据")
+        self.log(f"开始采集 Dell 安全公告（范围：{time_range}）...")
 
     def stop_dell_collection(self):
         """停止采集 Dell 数据"""
@@ -1054,13 +1363,13 @@ class CVEIntegratedGUI:
         self.dell_stop_btn.config(state=tk.DISABLED)
         self.log("Dell 安全公告采集已停止")
 
-    def run_dell_collection(self):
+    def run_dell_collection(self, time_range):
         """在线程中运行 Dell 采集"""
         try:
             # 运行异步采集
             if os.name == 'nt':
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-            asyncio.run(self.collect_dell_advisories_async())
+            asyncio.run(self.collect_dell_advisories_async(time_range))
         except Exception as e:
             self.log_queue.put(f"Dell 采集出错: {str(e)}")
         finally:
@@ -1068,38 +1377,89 @@ class CVEIntegratedGUI:
             self.dell_collect_btn.config(state=tk.NORMAL)
             self.dell_stop_btn.config(state=tk.DISABLED)
 
-    async def collect_dell_advisories_async(self):
-        """异步采集 Dell 安全公告"""
+    async def collect_dell_advisories_async(self, time_range):
+        """异步采集 Dell 安全公告（优化版）"""
         scraper = DellSecurityScraper()
         try:
-            # 注意：由于 Dell RSS 已停用，这里会使用示例数据
-            self.log_queue.put("正在生成示例数据...")
-            items = await scraper.fetch_security_advisories()
+            # 计算日期范围
+            time_range_map = {
+                "最近一周": 7,
+                "1个月": 30,
+                "3个月": 90,
+                "半年": 180,
+                "1年": 365
+            }
+            days = time_range_map.get(time_range, 30)
+
+            self.log_queue.put(f"正在采集最近 {days} 天的 Dell 安全公告...")
+            self.log_queue.put("尝试访问Dell官网获取真实数据...")
+
+            # 传递days参数
+            items = await scraper.fetch_security_advisories(days=days)
 
             if items:
-                self.log_queue.put(f"✓ 成功生成 {len(items)} 条 Dell 安全公告示例数据")
+                self.log_queue.put(f"✓ 成功获取 {len(items)} 条 Dell 安全公告（{time_range}范围）")
+
+                # 统计增量存储
+                new_count = 0
+                existing_count = 0
+                new_advisories = []  # 收集新增的公告
 
                 for item in items:
                     if not self.is_collecting_dell:
                         break
 
-                    self.dell_queue.put(item)
+                    # 增强解决方案信息
+                    item = self.enhance_dell_advisory(item)
 
-                # 保存到文件
-                if self.dell_advisories:
+                    # 存储到数据库（增量，优先 Redis）
+                    is_new = self.store_dell_advisory(item)
+                    if is_new:
+                        new_count += 1
+                        new_advisories.append(item)
+                    else:
+                        existing_count += 1
+
+                # 优化：批量添加到 GUI（只添加新数据）
+                if new_advisories:
+                    self.log_queue.put(f"正在显示 {len(new_advisories)} 条新增公告...")
+
+                    # 批量添加到内存
+                    self.dell_advisories.extend(new_advisories)
+
+                    # 批量发送到队列
+                    for advisory in new_advisories:
+                        self.dell_queue.put(advisory)
+
+                # 显示增量统计
+                if new_count > 0:
+                    self.log_queue.put(f"✓ 新增 {new_count} 条 Dell 安全公告到数据库")
+                if existing_count > 0:
+                    self.log_queue.put(f"ℹ 跳过 {existing_count} 条已存在的公告")
+
+                # 只在有新数据时保存 JSON 文件
+                if new_advisories:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = self.data_dir / f"dell_advisories_{timestamp}.json"
+                    filename = self.data_dir / f"dell_advisories_new_{timestamp}.json"
                     with open(filename, "w", encoding="utf-8") as f:
-                        json.dump(self.dell_advisories, f, ensure_ascii=False, indent=2)
-                    self.log_queue.put(f"数据已保存到: {filename}")
+                        json.dump(new_advisories, f, ensure_ascii=False, indent=2)
+                    self.log_queue.put(f"新增数据已保存到: {filename}")
 
-                self.log_queue.put("Dell 安全公告示例数据生成完成！")
-                self.log_queue.put("说明：示例数据采用真实格式，包含完整的产品型号和解决方案")
+                # 计算数据库总数（从 Redis）
+                if self.use_redis:
+                    total_count = self.redis_manager.get_dell_count()
+                else:
+                    total_count = len(self.dell_advisories)
+
+                self.log_queue.put("✓ Dell 安全公告采集完成！")
+                self.log_queue.put(f"✓ 数据库总计 {total_count} 条记录")
             else:
-                self.log_queue.put("未生成任何数据")
+                self.log_queue.put("未获取到任何数据")
 
         except Exception as e:
-            self.log_queue.put(f"生成数据出错: {str(e)}")
+            self.log_queue.put(f"采集数据出错: {str(e)}")
+            import traceback
+            self.log_queue.put(f"详细错误: {traceback.format_exc()}")
 
     # ==================== 数据加载和显示功能 ====================
 
@@ -1119,15 +1479,34 @@ class CVEIntegratedGUI:
                 
             self.log(f"已从数据库加载 NVD 数据: {len(self.cve_data)} 条")
 
-            # 加载 Dell 数据（如果有的话）
-            dell_files = list(self.data_dir.glob("dell_advisories_*.json"))
-            if dell_files:
-                latest_dell = max(dell_files, key=lambda x: x.stat().st_mtime)
-                with open(latest_dell, "r", encoding="utf-8") as f:
-                    self.dell_advisories = json.load(f)
-                for advisory in self.dell_advisories:
-                    self.add_dell_to_tree(advisory)
-                self.log(f"已加载本地 Dell 数据: {latest_dell.name} ({len(self.dell_advisories)} 条)")
+            # 加载 Dell 数据（优先从 Redis）
+            if self.use_redis:
+                try:
+                    self.dell_advisories = self.redis_manager.get_all_dell_advisories()
+                    for advisory in self.dell_advisories:
+                        self.add_dell_to_tree(advisory)
+                    self.log(f"从 Redis 加载 Dell 数据: {len(self.dell_advisories)} 条")
+                except Exception as e:
+                    self.log(f"从 Redis 加载 Dell 数据失败: {e}, 尝试从文件加载")
+                    # 回退到文件加载
+                    dell_files = list(self.data_dir.glob("dell_advisories_*.json"))
+                    if dell_files:
+                        latest_dell = max(dell_files, key=lambda x: x.stat().st_mtime)
+                        with open(latest_dell, "r", encoding="utf-8") as f:
+                            self.dell_advisories = json.load(f)
+                        for advisory in self.dell_advisories:
+                            self.add_dell_to_tree(advisory)
+                        self.log(f"已加载本地 Dell 数据: {latest_dell.name} ({len(self.dell_advisories)} 条)")
+            else:
+                # SQLite 模式：从文件加载
+                dell_files = list(self.data_dir.glob("dell_advisories_*.json"))
+                if dell_files:
+                    latest_dell = max(dell_files, key=lambda x: x.stat().st_mtime)
+                    with open(latest_dell, "r", encoding="utf-8") as f:
+                        self.dell_advisories = json.load(f)
+                    for advisory in self.dell_advisories:
+                        self.add_dell_to_tree(advisory)
+                    self.log(f"已加载本地 Dell 数据: {latest_dell.name} ({len(self.dell_advisories)} 条)")
 
             # 刷新关联数据
             if self.cve_data and self.dell_advisories:
@@ -1210,178 +1589,292 @@ class CVEIntegratedGUI:
 
     def load_csv_data(self):
         """加载离线 CSV 数据"""
-        # 从环境变量或配置文件读取预定义的 CSV 路径
-        # 支持环境变量: CVE_CSV_FILE
-        predefined_file = os.getenv("CVE_CSV_FILE", "")
-
-        # 如果环境变量未设置，尝试在几个常用位置查找示例文件
-        if not predefined_file:
-            possible_locations = [
-                Path("d:/download/sample_2025_10_30.csv"),
-                Path.home() / "Downloads" / "sample_2025_10_30.csv",
-                self.data_dir / "sample_2025_10_30.csv",
-                Path("sample_2025_10_30.csv")  # 当前目录
-            ]
-
-            for location in possible_locations:
-                if location.exists():
-                    predefined_file = str(location)
-                    break
-
-        # 尝试加载预定义的 CSV 文件
-        if predefined_file and Path(predefined_file).exists():
-            result = messagebox.askyesno(
-                "加载确认",
-                f"找到CSV文件: {predefined_file}\n是否直接加载此文件？\n\n点击\"否\"可选择其他CSV文件"
-            )
-            if result:
-                csv_file = predefined_file
-            else:
-                csv_file = filedialog.askopenfilename(
-                    title="选择 CSV 数据文件",
-                    initialdir=str(Path(predefined_file).parent),
-                    filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")]
-                )
-        else:
-            # 默认打开文件选择对话框
-            initial_dir = str(Path.home() / "Downloads")
-            csv_file = filedialog.askopenfilename(
-                title="选择 CSV 数据文件",
-                initialdir=initial_dir,
-                filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")]
-            )
+        # 默认从cve_data目录打开文件选择对话框
+        initial_dir = str(self.data_dir)
+        csv_file = filedialog.askopenfilename(
+            title="选择 CSV 数据文件",
+            initialdir=initial_dir,
+            filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")]
+        )
 
         if csv_file:
             try:
                 import csv
-                with open(csv_file, 'r', encoding='utf-8') as f:
-                    # 首先尝试使用默认的逗号分隔符
-                    try:
-                        f.seek(0)
-                        reader = csv.DictReader(f)
-                        fieldnames = reader.fieldnames
-                    except:
-                        # 如果失败，尝试识别分隔符
-                        f.seek(0)
-                        sample = f.read(1024)
-                        f.seek(0)
-                        sniffer = csv.Sniffer()
-                        delimiter = sniffer.sniff(sample).delimiter
-                        reader = csv.DictReader(f, delimiter=delimiter)
-                        fieldnames = reader.fieldnames
-                    
-                    csv_data = []
-                    
-                    # 检查是否包含CVE ID列
-                    cve_field = None
-                    for field in fieldnames:
-                        if 'cve' in field.lower() or 'id' in field.lower():
-                            cve_field = field
-                            break
-                    
-                    if not cve_field:
-                        # 如果没有找到可能的CVE字段，则使用第一列作为CVE ID
-                        cve_field = fieldnames[0] if fieldnames else None
-                        if not cve_field:
-                            raise ValueError("CSV文件中未找到有效的列")
-                    
-                    for row in reader:
-                        cve_id = row.get(cve_field, "").strip()
-                        if cve_id:  # 确保不是空值
-                            # 将CSV行转换为NVD CVE数据格式
-                            cve_entry = {
-                                "cve_id": cve_id,
-                                "description": row.get('description', row.get('title', row.get('summary', 'No Description'))),
-                                "published_date": row.get('published_date', row.get('date', row.get('publish_date', ''))),
-                                "last_modified": row.get('last_modified', row.get('update_date', '')),
-                                "vuln_status": row.get('status', row.get('vuln_status', 'Analyzed')),
-                                "cvss_score": row.get('cvss_score', row.get('score', 'N/A')),
-                                "cvss_severity": row.get('cvss_severity', row.get('severity', 'UNKNOWN')),
-                                "cvss_vector": row.get('cvss_vector', row.get('vector', '')),
-                                "references": [],
-                                "affected_products": [],
-                                "weaknesses": [],
-                                "source": "CSV Import"
-                            }
-                            
-                            # 解析参考链接
-                            refs = row.get('references', row.get('refs', ''))
-                            if refs:
-                                for ref in refs.split(','):
-                                    ref = ref.strip()
-                                    if ref:
-                                        cve_entry["references"].append({
-                                            "url": ref,
-                                            "source": "",
-                                            "tags": []
-                                        })
-                            
-                            # 解析受影响的产品 - 处理可能有多列的情况
-                            # 首先检查 'products' 列
-                            products = row.get('products', row.get('affected_products', ''))
-                            if products:
-                                for product in products.split(','):
-                                    product = product.strip()
-                                    if product:
-                                        cve_entry["affected_products"].append({
-                                            "cpe": "",
-                                            "vendor": "",
-                                            "product": product,
-                                            "version": "*",
-                                            "versionEndExcluding": None,
-                                            "versionEndIncluding": None,
-                                            "versionStartExcluding": None,
-                                            "versionStartIncluding": None
-                                        })
-                            else:
-                                # 如果没有 'products' 列，检查是否有其他潜在的产品相关列
-                                # 或检查是否有多个连续的空值不为空的列（可能是产品列表）
-                                for field_name, field_value in row.items():
-                                    if field_name not in [cve_field, 'description', 'cvss_score', 'cvss_severity', 
-                                                          'published_date', 'last_modified', 'references']:
-                                        if field_value and field_value.strip():
-                                            # 假设这些是产品信息
-                                            product = field_value.strip()
-                                            if product and product not in ['None', 'N/A', '']:
-                                                cve_entry["affected_products"].append({
-                                                    "cpe": "",
-                                                    "vendor": "",
-                                                    "product": product,
-                                                    "version": "*",
-                                                    "versionEndExcluding": None,
-                                                    "versionEndIncluding": None,
-                                                    "versionStartExcluding": None,
-                                                    "versionStartIncluding": None
-                                                })
-                            
-                            csv_data.append(cve_entry)
-                    
-                    # 将CSV数据存储到数据库
-                    for cve in csv_data:
-                        self.store_cve_data(cve)
-                    
-                    # 从数据库加载所有数据
-                    self.cve_data = self.load_cve_data_from_db()
-                    
-                    # 添加到树视图
-                    for item in self.nvd_tree.get_children():
-                        self.nvd_tree.delete(item)
-                    
-                    for cve in self.cve_data:
-                        self.add_nvd_to_tree(cve)
-                    
-                    self.log(f"成功加载 CSV 数据: {Path(csv_file).name} ({len(csv_data)} 条), 现在数据库中共有 {len(self.cve_data)} 条")
-                    self.update_stats()
-                    
-                    # 如果已有Dell数据，则刷新关联数据
-                    if self.dell_advisories:
-                        self.refresh_matched_data()
-                
+                with open(csv_file, 'r', encoding='utf-8-sig') as f:
+                    # 尝试读取CSV文件
+                    reader = csv.DictReader(f)
+                    fieldnames = reader.fieldnames
+
+                    # 检测是否是Dell DSA CSV格式
+                    is_dell_csv = all(col in fieldnames for col in ['TITLE', 'CVE IDENTIFIER', 'PUBLISHED', 'IMPACT'])
+
+                    if is_dell_csv:
+                        self.log("检测到Dell安全公告CSV格式，开始解析...")
+                        # 在后台线程中加载
+                        thread = threading.Thread(target=self.run_dell_csv_loading, args=(csv_file,))
+                        thread.daemon = True
+                        thread.start()
+                    else:
+                        # 原有的NVD CVE CSV处理逻辑
+                        self.load_nvd_csv(csv_file, reader, fieldnames)
+
             except Exception as e:
                 messagebox.showerror("加载失败", f"加载CSV文件失败：{str(e)}")
                 self.log(f"加载CSV文件失败: {str(e)}")
                 import traceback
                 self.log(f"详细错误信息: {traceback.format_exc()}")
+
+    def run_dell_csv_loading(self, csv_file):
+        """在后台线程中运行Dell CSV加载"""
+        try:
+            self.load_dell_csv(csv_file)
+        except Exception as e:
+            self.log_queue.put(f"Dell CSV加载出错: {str(e)}")
+            import traceback
+            self.log_queue.put(f"详细错误: {traceback.format_exc()}")
+
+    def load_dell_csv(self, csv_file):
+        """加载Dell安全公告CSV数据（保存到本地并更新界面）"""
+        try:
+            dell_data = []
+            new_count = 0
+            existing_count = 0
+            new_advisories = []  # 收集新增的公告
+
+            # 打开CSV文件并创建新的reader
+            with open(csv_file, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+
+                for row in reader:
+                    title_field = row.get('TITLE', '').strip()
+                    if not title_field:
+                        continue
+
+                    # 解析TITLE字段，提取DSA ID和标题
+                    # 格式: "DSA-2025-386: Security Update for Dell Secure Connect Gateway REST API"
+                    if ':' in title_field:
+                        parts = title_field.split(':', 1)
+                        dsa_id = parts[0].strip()
+                        title = parts[1].strip()
+                    else:
+                        dsa_id = title_field
+                        title = title_field
+
+                    # 提取CVE IDs
+                    cve_str = row.get('CVE IDENTIFIER', '').strip()
+                    cve_ids = []
+                    if cve_str:
+                        # CVE可能用逗号分隔
+                        cve_ids = [cve.strip() for cve in cve_str.split(',') if cve.strip()]
+
+                    # 解析发布日期
+                    published_str = row.get('PUBLISHED', '').strip()
+                    # 将"OCT 29 2025"格式转换为ISO格式
+                    published_date = self.parse_dell_date(published_str)
+
+                    # 获取影响级别
+                    impact = row.get('IMPACT', '').strip()
+
+                    # 构建Dell advisory数据
+                    advisory = {
+                        'dell_security_advisory': dsa_id,
+                        'title': title,
+                        'cve_ids': cve_ids,
+                        'published_date': published_date,
+                        'link': f'https://www.dell.com/support/kbdoc/en-us/{dsa_id.lower().replace("dsa-", "")}',
+                        'summary': f'{impact} severity security update.',
+                        'description': title,
+                        'affected_products': [
+                            {
+                                'name': '如标题',
+                                'model': '如标题',
+                                'version_range': '如标题'
+                            }
+                        ],
+                        'solution': f'Refer to {dsa_id} for detailed remediation steps.',
+                        'impact': impact,
+                        'source': 'CSV Import'
+                    }
+
+                    # 存储到数据库（增量，Redis主存储）
+                    is_new = self.store_dell_advisory(advisory)
+                    if is_new:
+                        new_count += 1
+                        new_advisories.append(advisory)  # 收集新增数据
+                    else:
+                        existing_count += 1
+
+                    dell_data.append(advisory)
+
+            # ✅ 保存 CSV 数据到本地 JSON 文件
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if new_advisories:
+                # 只保存新增数据
+                filename = self.data_dir / f"dell_csv_new_{timestamp}.json"
+                with open(filename, "w", encoding="utf-8") as f:
+                    json.dump(new_advisories, f, ensure_ascii=False, indent=2)
+                self.log_queue.put(f"✓ 新增数据已保存到: {filename.name}")
+
+            # 保存全量数据（可选）
+            full_filename = self.data_dir / f"dell_csv_full_{timestamp}.json"
+            with open(full_filename, "w", encoding="utf-8") as f:
+                json.dump(dell_data, f, ensure_ascii=False, indent=2)
+
+            # 发送日志到队列
+            self.log_queue.put(f"✓ 成功加载Dell CSV数据: {Path(csv_file).name}")
+            self.log_queue.put(f"  总计: {len(dell_data)} 条DSA")
+            if new_count > 0:
+                self.log_queue.put(f"  新增: {new_count} 条Dell安全公告到数据库")
+            if existing_count > 0:
+                self.log_queue.put(f"  跳过: {existing_count} 条已存在的公告")
+            self.log_queue.put(f"✓ 全量数据已保存到: {full_filename.name}")
+
+            # ✅ 通知主线程刷新GUI（从数据库重新加载）
+            self.dell_queue.put(('refresh_database', None))
+
+            # 通知主线程更新统计
+            self.dell_queue.put(('update_stats', None))
+
+            self.log_queue.put(f"✓ Dell CSV加载完成")
+
+        except Exception as e:
+            self.log_queue.put(f"加载Dell CSV失败: {str(e)}")
+            import traceback
+            self.log_queue.put(f"详细错误信息: {traceback.format_exc()}")
+            self.dell_queue.put(('refresh_database', None))
+
+            self.log_queue.put(f"✓ Dell CSV加载完成")
+
+            # 通知主线程更新统计和关联数据
+            self.dell_queue.put(('update_stats', None))
+
+        except Exception as e:
+            self.log_queue.put(f"加载Dell CSV失败: {str(e)}")
+            import traceback
+            self.log_queue.put(f"详细错误信息: {traceback.format_exc()}")
+
+    def parse_dell_date(self, date_str):
+        """解析Dell日期格式 (例如: OCT 29 2025) 为ISO格式"""
+        if not date_str:
+            return datetime.now().isoformat()
+
+        try:
+            from datetime import datetime
+            # 月份映射
+            months = {
+                'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4,
+                'MAY': 5, 'JUN': 6, 'JUL': 7, 'AUG': 8,
+                'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+            }
+
+            parts = date_str.split()
+            if len(parts) == 3:
+                month_str, day_str, year_str = parts
+                month = months.get(month_str.upper(), 1)
+                day = int(day_str)
+                year = int(year_str)
+
+                dt = datetime(year, month, day)
+                return dt.isoformat()
+        except Exception:
+            pass
+
+        return datetime.now().isoformat()
+
+    def load_nvd_csv(self, csv_file, reader, fieldnames):
+        """加载NVD CVE CSV数据"""
+        try:
+            csv_data = []
+
+            # 检查是否包含CVE ID列
+            cve_field = None
+            for field in fieldnames:
+                if 'cve' in field.lower() or 'id' in field.lower():
+                    cve_field = field
+                    break
+
+            if not cve_field:
+                # 如果没有找到可能的CVE字段，则使用第一列作为CVE ID
+                cve_field = fieldnames[0] if fieldnames else None
+                if not cve_field:
+                    raise ValueError("CSV文件中未找到有效的列")
+
+            for row in reader:
+                cve_id = row.get(cve_field, "").strip()
+                if cve_id:  # 确保不是空值
+                    # 将CSV行转换为NVD CVE数据格式
+                    cve_entry = {
+                        "cve_id": cve_id,
+                        "description": row.get('description', row.get('title', row.get('summary', 'No Description'))),
+                        "published_date": row.get('published_date', row.get('date', row.get('publish_date', ''))),
+                        "last_modified": row.get('last_modified', row.get('update_date', '')),
+                        "vuln_status": row.get('status', row.get('vuln_status', 'Analyzed')),
+                        "cvss_score": row.get('cvss_score', row.get('score', 'N/A')),
+                        "cvss_severity": row.get('cvss_severity', row.get('severity', 'UNKNOWN')),
+                        "cvss_vector": row.get('cvss_vector', row.get('vector', '')),
+                        "references": [],
+                        "affected_products": [],
+                        "weaknesses": [],
+                        "source": "CSV Import"
+                    }
+
+                    # 解析参考链接
+                    refs = row.get('references', row.get('refs', ''))
+                    if refs:
+                        for ref in refs.split(','):
+                            ref = ref.strip()
+                            if ref:
+                                cve_entry["references"].append({
+                                    "url": ref,
+                                    "source": "",
+                                    "tags": []
+                                })
+
+                    # 解析受影响的产品
+                    products = row.get('products', row.get('affected_products', ''))
+                    if products:
+                        for product in products.split(','):
+                            product = product.strip()
+                            if product:
+                                cve_entry["affected_products"].append({
+                                    "cpe": "",
+                                    "vendor": "",
+                                    "product": product,
+                                    "version": "*",
+                                    "versionEndExcluding": None,
+                                    "versionEndIncluding": None,
+                                    "versionStartExcluding": None,
+                                    "versionStartIncluding": None
+                                })
+
+                    csv_data.append(cve_entry)
+
+            # 将CSV数据存储到数据库
+            for cve in csv_data:
+                self.store_cve_data(cve)
+
+            # 从数据库加载所有数据
+            self.cve_data = self.load_cve_data_from_db()
+
+            # 添加到树视图
+            for item in self.nvd_tree.get_children():
+                self.nvd_tree.delete(item)
+
+            for cve in self.cve_data:
+                self.add_nvd_to_tree(cve)
+
+            self.log(f"成功加载 CSV 数据: {Path(csv_file).name} ({len(csv_data)} 条), 现在数据库中共有 {len(self.cve_data)} 条")
+            self.update_stats()
+
+            # 如果已有Dell数据，则刷新关联数据
+            if self.dell_advisories:
+                self.refresh_matched_data()
+
+        except Exception as e:
+            messagebox.showerror("加载失败", f"加载NVD CSV失败：{str(e)}")
+            self.log(f"加载NVD CSV失败: {str(e)}")
+            import traceback
+            self.log(f"详细错误信息: {traceback.format_exc()}")
 
     def add_nvd_to_tree(self, cve_data):
         """添加 NVD CVE 数据到树视图"""
@@ -1394,7 +1887,8 @@ class CVEIntegratedGUI:
             try:
                 dt = datetime.fromisoformat(published.replace("Z", ""))
                 published = dt.strftime("%Y-%m-%d %H:%M")
-            except:
+            except (ValueError, TypeError) as e:
+                # 日期格式无效，保持原样
                 pass
 
         # 截断描述
@@ -1430,7 +1924,8 @@ class CVEIntegratedGUI:
                 from dateutil import parser
                 dt = parser.parse(published)
                 published = dt.strftime("%Y-%m-%d %H:%M")
-            except:
+            except (ValueError, TypeError, ImportError) as e:
+                # 日期解析失败或dateutil未安装，保持原样
                 pass
 
         # 受影响产品数
@@ -1450,7 +1945,7 @@ class CVEIntegratedGUI:
         )
 
     def refresh_matched_data(self):
-        """刷新关联数据"""
+        """刷新关联数据（优化版，使用哈希表加速）"""
         # 清空关联树视图
         for item in self.matched_tree.get_children():
             self.matched_tree.delete(item)
@@ -1459,14 +1954,20 @@ class CVEIntegratedGUI:
             self.log("无法刷新关联数据：缺少 NVD 或 Dell 数据")
             return
 
-        # 匹配 CVE ID
-        matched_count = 0
-        for cve in self.cve_data:
-            cve_id = cve.get("cve_id", "")
+        # 优化：构建 CVE ID 到 CVE 数据的映射
+        cve_dict = {cve.get("cve_id", ""): cve for cve in self.cve_data}
 
-            # 查找匹配的 Dell 公告
-            for advisory in self.dell_advisories:
-                if cve_id in advisory.get("cve_ids", []):
+        # 匹配 CVE ID（优化：遍历 Dell 公告，查找对应的 CVE）
+        matched_count = 0
+        matched_items = []  # 先收集所有匹配项
+
+        for advisory in self.dell_advisories:
+            advisory_cve_ids = advisory.get("cve_ids", [])
+
+            for cve_id in advisory_cve_ids:
+                if cve_id in cve_dict:
+                    cve = cve_dict[cve_id]
+
                     # 提取产品型号
                     products = advisory.get("affected_products", [])
                     product_names = [p.get("name", "") for p in products[:3]]  # 最多显示3个
@@ -1482,10 +1983,8 @@ class CVEIntegratedGUI:
                     severity = cve.get("cvss_severity", "未知")
                     tag = severity if severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else ""
 
-                    self.matched_tree.insert(
-                        "",
-                        "end",
-                        values=(
+                    matched_items.append({
+                        "values": (
                             cve_id,
                             severity,
                             cve.get("cvss_score", "N/A"),
@@ -1493,12 +1992,28 @@ class CVEIntegratedGUI:
                             products_str,
                             solution
                         ),
-                        tags=(tag,)
-                    )
+                        "tag": tag
+                    })
                     matched_count += 1
-                    break
 
-        self.log(f"关联匹配完成：找到 {matched_count} 条匹配的 CVE-Dell 数据（包含CSV加载的数据）")
+        # 批量插入到树视图（减少 GUI 更新次数）
+        # 如果数据太多，只显示前 1000 条
+        max_display = 1000
+        items_to_display = matched_items[:max_display]
+
+        for item_data in items_to_display:
+            self.matched_tree.insert(
+                "",
+                "end",
+                values=item_data["values"],
+                tags=(item_data["tag"],)
+            )
+
+        if matched_count > max_display:
+            self.log(f"关联匹配完成：找到 {matched_count} 条匹配数据，显示前 {max_display} 条（性能优化）")
+        else:
+            self.log(f"关联匹配完成：找到 {matched_count} 条匹配的 CVE-Dell 数据")
+
         self.update_stats()
 
     # ==================== 搜索过滤功能 ====================
@@ -1778,19 +2293,24 @@ CVE 描述:
     # ==================== 统计更新功能 ====================
 
     def update_stats(self):
-        """更新统计信息"""
+        """更新统计信息（优化版，使用哈希表加速）"""
         # 统计 NVD CVE 数据
         nvd_total = len(self.cve_data)
         dell_total = len(self.dell_advisories)
 
-        # 统计关联匹配数
-        matched_count = 0
-        for cve in self.cve_data:
-            cve_id = cve.get("cve_id", "")
-            for advisory in self.dell_advisories:
-                if cve_id in advisory.get("cve_ids", []):
-                    matched_count += 1
-                    break
+        # 优化：使用集合加速关联匹配
+        # 将所有 CVE ID 放入集合
+        cve_ids_set = {cve.get("cve_id", "") for cve in self.cve_data}
+
+        # 统计关联匹配数（优化：只遍历 Dell 公告，使用 set 查找）
+        matched_cves = set()
+        for advisory in self.dell_advisories:
+            advisory_cve_ids = advisory.get("cve_ids", [])
+            for cve_id in advisory_cve_ids:
+                if cve_id in cve_ids_set:
+                    matched_cves.add(cve_id)
+
+        matched_count = len(matched_cves)
 
         # 统计各严重等级
         severity_count = {
@@ -1851,7 +2371,10 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
             has_dell = any(cve_id in advisory.get('cve_ids', []) for advisory in self.dell_advisories)
             dell_mark = "[Dell]" if has_dell else ""
 
-            stats_text += f"  - {cve_id:20} | {severity:8} | 评分: {score} {dell_mark}\n"
+            # 处理 None 值
+            severity_str = str(severity) if severity else "N/A"
+            score_str = str(score) if score is not None else "N/A"
+            stats_text += f"  - {cve_id:20} | {severity_str:8} | 评分: {score_str} {dell_mark}\n"
 
         if self.dell_advisories:
             stats_text += f"\n【最新 Dell 安全公告 (前5个)】\n"
@@ -1869,35 +2392,61 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
     # ==================== 队列检查和日志功能 ====================
 
     def check_queues(self):
-        """检查队列中的数据"""
+        """检查队列中的数据（优化版：增量更新）"""
         # 检查 NVD 数据队列
+        new_nvd_items = []  # 收集本次批量新增的数据
+
         while not self.data_queue.empty():
             try:
                 data_type, data = self.data_queue.get_nowait()
                 if data_type == 'nvd':
-                    # 存储到数据库
-                    self.store_cve_data(data)
-                    
-                    # 从数据库重新加载所有数据 to ensure consistency
-                    self.cve_data = self.load_cve_data_from_db()
-                    
-                    # Clear the tree view and reload all data
-                    for item in self.nvd_tree.get_children():
-                        self.nvd_tree.delete(item)
-                    
-                    for cve in self.cve_data:
-                        self.add_nvd_to_tree(cve)
+                    # ✅ 优化：直接添加到内存，无需重新加载数据库
+                    # 检查是否已存在（避免重复）
+                    cve_id = data.get('cve_id', '')
+                    if cve_id and not any(cve.get('cve_id') == cve_id for cve in self.cve_data):
+                        self.cve_data.append(data)
+                        new_nvd_items.append(data)
             except queue.Empty:
                 break
 
+        # ✅ 批量添加到树视图（减少 GUI 更新次数）
+        if new_nvd_items:
+            for cve in new_nvd_items:
+                self.add_nvd_to_tree(cve)
+
         # 检查 Dell 数据队列
+        new_dell_items = []  # 收集新增的 Dell 数据
+        need_refresh_database = False
+        need_update_stats = False
+
         while not self.dell_queue.empty():
             try:
                 data = self.dell_queue.get_nowait()
-                self.add_dell_to_tree(data)
-                self.dell_advisories.append(data)
+                # 检查是否是特殊命令
+                if isinstance(data, tuple) and len(data) == 2:
+                    command, _ = data
+                    if command == 'refresh_database':
+                        need_refresh_database = True
+                    elif command == 'update_stats':
+                        need_update_stats = True
+                else:
+                    # ✅ 优化：收集数据，稍后批量处理
+                    # 检查是否已存在（避免重复）
+                    dsa_id = data.get('dell_security_advisory', '')
+                    if dsa_id and not any(adv.get('dell_security_advisory') == dsa_id for adv in self.dell_advisories):
+                        self.dell_advisories.append(data)
+                        new_dell_items.append(data)
             except queue.Empty:
                 break
+
+        # 执行特殊命令
+        if need_refresh_database:
+            self.load_dell_from_database()
+
+        # ✅ 批量添加 Dell 数据到树视图
+        if new_dell_items:
+            for advisory in new_dell_items:
+                self.add_dell_to_tree(advisory)
 
         # 检查日志队列
         while not self.log_queue.empty():
@@ -1907,21 +2456,33 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
             except queue.Empty:
                 break
 
-        # 更新统计信息
-        if self.cve_data or self.dell_advisories:
+        # ✅ 优化：只在有新数据或收到更新命令时才更新统计
+        if new_nvd_items or new_dell_items or need_update_stats:
             self.update_stats()
+            # 如果有新的 CVE 或 Dell 数据，刷新关联数据
+            if (new_nvd_items or new_dell_items) and self.cve_data and self.dell_advisories:
+                self.refresh_matched_data()
 
         # 继续检查
         self.root.after(100, self.check_queues)
 
     def close_database_connection(self):
         """关闭数据库连接"""
+        # 关闭 Redis 连接
+        if hasattr(self, 'redis_manager') and self.redis_manager:
+            try:
+                self.redis_manager.close()
+                self.log("Redis 连接已关闭")
+            except Exception as e:
+                self.log(f"关闭 Redis 连接时出错: {str(e)}")
+
+        # 关闭 SQLite 连接
         if hasattr(self, 'conn') and self.conn:
             try:
                 self.conn.close()
-                self.log("数据库连接已关闭")
+                self.log("SQLite 连接已关闭")
             except sqlite3.Error as e:
-                self.log(f"关闭数据库连接时出错: {str(e)}")
+                self.log(f"关闭 SQLite 连接时出错: {str(e)}")
 
     def log(self, message):
         """添加日志消息"""
@@ -1943,7 +2504,8 @@ def main():
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
-    except:
+    except (ImportError, OSError, AttributeError) as e:
+        # 非Windows系统或Windows版本不支持DPI设置，忽略
         pass
 
     root = tk.Tk()
