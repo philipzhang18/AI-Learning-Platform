@@ -6,6 +6,10 @@
 
 一个专业的CVE漏洞数据监控与管理系统，集成了NVD (National Vulnerability Database) CVE数据和Dell安全公告，支持离线数据查看和CVE-Dell关联匹配分析。
 
+![CVE监控系统主界面](docs/images/screenshot.png)
+
+> 💡 **查看更多截图**: [完整截图说明文档](docs/SCREENSHOTS.md)
+
 ---
 
 ## 📋 目录
