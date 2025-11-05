@@ -1,48 +1,42 @@
 #!/bin/bash
+# CVE 程序启动脚本
 
-# CVE 漏洞监控系统 - 快速启动脚本
-
-echo "=================================="
-echo " CVE 漏洞监控系统 - 启动中..."
-echo "=================================="
+echo "========================================"
+echo "CVE 漏洞监控系统 - 启动脚本"
+echo "========================================"
 echo ""
 
-# 激活虚拟环境
-echo "[1/2] 激活虚拟环境..."
-source /D/AI/cursor/starone/.venv/Scripts/activate
+# 检查 MongoDB 和 Redis 服务
+echo "检查后端服务状态..."
+MONGODB_RUNNING=$(docker ps -q -f name=cve-mongodb)
+REDIS_RUNNING=$(docker ps -q -f name=cve-redis)
 
-if [ $? -ne 0 ]; then
-    echo "错误：无法激活虚拟环境"
-    echo "请检查虚拟环境路径是否正确"
-    exit 1
+if [ -z "$MONGODB_RUNNING" ]; then
+    echo "⚠ MongoDB 未运行，正在��动..."
+    cd /D/AI/Claude/CVE
+    docker-compose -f docker-compose-mongodb-optimized.yml up -d mongodb
+    sleep 5
 fi
 
-echo "✓ 虚拟环境已激活"
-echo ""
-
-# 检查依赖
-echo "[2/2] 检查依赖包..."
-python -c "import tkinter, aiohttp, feedparser" 2>/dev/null
-
-if [ $? -ne 0 ]; then
-    echo "警告：某些依赖包可能缺失"
-    echo "正在安装依赖..."
-    pip install -r requirements.txt
+if [ -z "$REDIS_RUNNING" ]; then
+    echo "⚠ Redis 未运行，正在启动..."
+    cd /D/AI/Claude/CVE
+    docker-compose -f docker-compose-mongodb-optimized.yml up -d redis
+    sleep 3
 fi
 
-echo "✓ 依赖包检查完成"
+# 验证服务状态
+echo ""
+echo "后端服务状态:"
+docker ps --format "table {{.Names}}\t{{.Status}}" | grep -E "cve-mongodb|cve-redis"
 echo ""
 
-# 启动程序
-echo "=================================="
-echo " 正在启动 GUI 程序..."
-echo "=================================="
+echo "========================================"
+echo "正在启动 CVE 漏洞监控系统..."
+echo "========================================"
 echo ""
 
-python cve_integrated_gui.py
-
-# 退出后的消息
-echo ""
-echo "=================================="
-echo " 程序已退出"
-echo "=================================="
+# 进入项目目录并启动 GUI
+cd /D/AI/Claude/CVE
+export PYTHONPATH=/D/AI/Claude/CVE:$PYTHONPATH
+/D/AI/cursor/starone/.venv/Scripts/python.exe cve_integrated_gui.py

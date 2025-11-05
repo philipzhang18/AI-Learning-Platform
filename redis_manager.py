@@ -27,10 +27,13 @@ class RedisDataManager:
         self.password = password
         self.db = db
 
-        # 从环境变量读取Redis配置
+        # 从环境变量读取Redis配置（WSL Redis 支持）
         self.host = os.getenv('REDIS_HOST', host)
         self.port = int(os.getenv('REDIS_PORT', port))
-        self.password = os.getenv('REDIS_PASSWORD', password)
+        redis_pwd = os.getenv('REDIS_PASSWORD', password)
+        # 空字符串视为无密码
+        self.password = redis_pwd if redis_pwd and redis_pwd.strip() else None
+        self.db = int(os.getenv('REDIS_DB', db))
 
         # 创建连接池（性能优化）
         self.pool = ConnectionPool(
@@ -293,6 +296,58 @@ class RedisDataManager:
             advisories = advisories[:limit]
 
         return advisories
+
+    def get_dell_advisories_paginated(self, page: int = 1, per_page: int = 100) -> Dict[str, Any]:
+        """分页获取Dell安全公告（性能优化）
+
+        Args:
+            page: 页码（从1开始）
+            per_page: 每页数量
+
+        Returns:
+            {
+                'data': 公告列表,
+                'total': 总数,
+                'page': 当前页,
+                'per_page': 每页数量,
+                'total_pages': 总页数
+            }
+        """
+        # 获取所有ID
+        dell_ids = list(self.get_all_dell_ids())
+        total = len(dell_ids)
+
+        if total == 0:
+            return {
+                'data': [],
+                'total': 0,
+                'page': page,
+                'per_page': per_page,
+                'total_pages': 0
+            }
+
+        # 计算分页
+        total_pages = (total + per_page - 1) // per_page
+        page = max(1, min(page, total_pages))  # 确保页码有效
+
+        # 获取当前页的数据
+        start_idx = (page - 1) * per_page
+        end_idx = min(start_idx + per_page, total)
+
+        # 按发布日期排序所有ID（需要先获取数据来排序）
+        # 优化：批量获取所有数据再排序（因为需要按日期排序）
+        advisories = self.get_all_dell_advisories()
+
+        # 返回当前页数据
+        page_data = advisories[start_idx:end_idx]
+
+        return {
+            'data': page_data,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': total_pages
+        }
 
     def get_dell_count(self) -> int:
         """获取Dell公告总数"""

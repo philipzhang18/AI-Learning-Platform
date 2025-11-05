@@ -1,0 +1,139 @@
+╔════════════════════════════════════════════════════════════════╗
+║          CVE 漏洞监控系统 - 启动命令速查表                    ║
+╚════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 快速启动（推荐）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【Git Bash / Linux】
+cd /D/AI/Claude/CVE && bash start_cve_gui.sh
+
+【Windows 双击】
+D:\AI\Claude\CVE\启动CVE程序.bat
+
+【PowerShell】
+cd D:\AI\Claude\CVE; .\启动CVE程序.bat
+
+【手动启动】
+cd /D/AI/Claude/CVE
+/D/AI/cursor/starone/.venv/Scripts/python.exe cve_integrated_gui.py
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 后端服务管理
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【查看服务状态】
+docker ps | grep cve-
+
+【启动所有服务】
+cd /D/AI/Claude/CVE
+docker-compose -f docker-compose-mongodb-optimized.yml up -d
+
+【停止所有服务】
+docker-compose -f docker-compose-mongodb-optimized.yml down
+
+【重启服务】
+docker-compose -f docker-compose-mongodb-optimized.yml restart
+
+【实时监控资源】
+docker stats
+
+【查看服务日志】
+docker logs cve-mongodb -f
+docker logs cve-redis -f
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 数据库操作
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【连接 MongoDB】
+docker exec -it cve-mongodb mongosh -u admin -p secure_password cve_database
+
+【查询 CVE 总数】
+docker exec cve-mongodb mongosh -u admin -p secure_password --authenticationDatabase admin cve_database --eval "db.cve_collection.countDocuments({})" --quiet
+
+【查询 Dell 总数】
+docker exec cve-mongodb mongosh -u admin -p secure_password --authenticationDatabase admin cve_database --eval "db.dell_collection.countDocuments({})" --quiet
+
+【连接 Redis】
+docker exec -it cve-redis redis-cli -a defaultpassword
+
+【查看 Redis 缓存数量】
+docker exec cve-redis redis-cli -a defaultpassword DBSIZE
+
+【清空 Redis 缓存】
+docker exec cve-redis redis-cli -a defaultpassword FLUSHDB
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🛠️ 数据备份与恢复
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【备份 SQLite 数据库】
+cd /D/AI/Claude/CVE
+cp cve_data/cve_database.db "backups/cve_database_backup_$(date +%Y%m%d_%H%M%S).db"
+
+【恢复 SQLite 数据库】
+cp backups/cve_database_backup_YYYYMMDD_HHMMSS.db cve_data/cve_database.db
+
+【导出 MongoDB 数据】
+docker exec cve-mongodb mongodump -u admin -p secure_password --authenticationDatabase admin -d cve_database -o /data/backup
+
+【查看备份文件】
+ls -lh /D/AI/Claude/CVE/backups/
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 故障排查
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【验证 Python 环境】
+/D/AI/cursor/starone/.venv/Scripts/python.exe --version
+
+【验证 Tkinter】
+/D/AI/cursor/starone/.venv/Scripts/python.exe -c "import tkinter; print('Tkinter OK')"
+
+【验证 GUI 模块】
+cd /D/AI/Claude/CVE
+/D/AI/cursor/starone/.venv/Scripts/python.exe -c "from cve_integrated_gui import CVEIntegratedGUI; print('GUI module OK')"
+
+【检查依赖包】
+/D/AI/cursor/starone/.venv/Scripts/pip.exe list | grep -E "motor|pymongo|redis"
+
+【查看 Docker Desktop 资源】
+在 Windows 任务管理器中查找：
+  • "Docker Desktop" - Docker 主进程
+  • "Vmmem" - WSL 2 后端进程
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 文档位置
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+D:\AI\Claude\CVE\START_CVE_NOW.md           - 快速启动指南
+D:\AI\Claude\CVE\RUN_CVE_GUIDE.md           - 完整使用指南
+D:\AI\Claude\CVE\DEPLOYMENT_REPORT_20251104.md  - 部署报告
+D:\AI\Claude\CVE\DOCKER_OPTIMIZATION_REPORT.md - 优化报告
+D:\AI\Claude\CVE\start_cve_gui.sh           - Linux 启动脚本
+D:\AI\Claude\CVE\启动CVE程序.bat             - Windows 启动脚本
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 当前系统状态
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ MongoDB 7.0:       271.6MB / 1.5GB (健康运行)
+✅ Redis 7:           3.3MB / 1GB (健康运行)
+✅ Redis Commander:   17MB / 128MB (运行中)
+✅ 数据完整性:         51,126 CVE + 431 Dell Advisory
+✅ Tkinter:           已安装并可用
+✅ Python 环境:        虚拟环境已激活
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎉 系统已完全就绪！请选择启动方式运行程序。
+
+💡 推荐：双击运行 "启动CVE程序.bat" 或在 Git Bash 中执行启动脚本。
+
+如遇问题，请参考 START_CVE_NOW.md 或 RUN_CVE_GUIDE.md 文档。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+最后更新：2025-11-04
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
