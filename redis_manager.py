@@ -508,8 +508,18 @@ class RedisDataManager:
         }
 
     def close(self):
-        """关闭Redis连接"""
-        self.redis_client.close()
+        """✅ 修复 #3: 关闭Redis连接并释放连接池"""
+        try:
+            # 关闭客户端连接
+            if hasattr(self, 'redis_client') and self.redis_client:
+                self.redis_client.close()
+
+            # 断开连接池中的所有连接
+            if hasattr(self, 'pool') and self.pool:
+                self.pool.disconnect()
+                print("Redis 连接池已释放")
+        except Exception as e:
+            print(f"关闭 Redis 连接时出错: {e}")
 
 
 # 测试代码

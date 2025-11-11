@@ -17,6 +17,9 @@ from pathlib import Path
 import threading
 import queue
 import os
+import atexit
+import signal
+import sys
 
 # 导入自定义模块
 from collect_cves import CVECollector
@@ -48,6 +51,13 @@ class CVEIntegratedGUI:
         self.dell_queue = queue.Queue()
         self.sqlite_backup_queue = queue.Queue()  # SQLite 异步备份队列
         self.matched_tree_queue = queue.Queue()  # 关联树视图队列
+
+        # ✅ 修复 #2: 添加数据库访问锁（线程安全）
+        self.db_lock = threading.Lock()
+
+        # ✅ 修复 #4: 添加清理标志（防止重复清理）
+        self._cleaned_up = False
+        self._cleanup_lock = threading.Lock()
 
         # 数据存储
         self.cve_data = []
@@ -101,6 +111,17 @@ class CVEIntegratedGUI:
 
         # 加载本地数据
         self.load_local_data()
+
+        # ✅ 修复 #4: 注册退出处理程序和信号处理
+        atexit.register(self.cleanup)
+
+        # 处理系统信号（仅在非 Windows 或支持的情况下）
+        try:
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
+        except (AttributeError, ValueError) as e:
+            # Windows 或某些环境可能不支持所有信号
+            self.log(f"信号处理器注册部分失败（可忽略）: {e}")
 
     def init_database(self):
         """初始化本地数据库（性能优化版）"""
@@ -282,64 +303,66 @@ class CVEIntegratedGUI:
         return self._store_cve_to_sqlite(cve_data)
 
     def _store_cve_to_sqlite(self, cve_data):
-        """存储 CVE 数据到 SQLite（内部方法）"""
-        try:
-            cursor = self.conn.cursor()
-
-            cve_id = cve_data.get('cve_id', '')
-            if not cve_id:
-                return False
-
-            # Ensure the data field is not None
-            data_str = json.dumps(cve_data) if cve_data else '{}'
-
-            # 检查是否已存在
-            cursor.execute("SELECT 1 FROM cves WHERE cve_id = ?", (cve_id,))
-            is_new = cursor.fetchone() is None
-
-            if not is_new:
-                # 更新现有记录
-                cursor.execute('''
-                    UPDATE cves
-                    SET data = ?, last_modified = ?, published_date = ?
-                    WHERE cve_id = ?
-                ''', (
-                    data_str,
-                    cve_data.get('last_modified', '') or '',
-                    cve_data.get('published_date', '') or '',
-                    cve_id
-                ))
-            else:
-                # 插入新记录
-                cursor.execute('''
-                    INSERT INTO cves (cve_id, data, last_modified, published_date)
-                    VALUES (?, ?, ?, ?)
-                ''', (
-                    cve_id,
-                    data_str,
-                    cve_data.get('last_modified', '') or '',
-                    cve_data.get('published_date', '') or ''
-                ))
-
-            # 添加到采集历史
-            cursor.execute('''
-                INSERT INTO collection_history (cve_id, collected_date)
-                VALUES (?, ?)
-            ''', (cve_id, datetime.now().isoformat()))
-
-            self.conn.commit()
-            return is_new
-        except sqlite3.Error as e:
-            self.log(f"存储CVE数据失败: {str(e)}")
-            # 尝试回滚事务
+        """存储 CVE 数据到 SQLite（内部方法，线程安全）"""
+        # ✅ 修复 #2: 使用锁保护数据库操作
+        with self.db_lock:
             try:
-                self.conn.rollback()
-            except sqlite3.Error as rollback_err:
-                self.log(f"回滚失败: {rollback_err}")
-            return False
-        except Exception as e:
-            self.log(f"存储CVE数据时发生未知错误: {str(e)}")
-            return False
+                cursor = self.conn.cursor()
+
+                cve_id = cve_data.get('cve_id', '')
+                if not cve_id:
+                    return False
+
+                # Ensure the data field is not None
+                data_str = json.dumps(cve_data) if cve_data else '{}'
+
+                # 检查是否已存在
+                cursor.execute("SELECT 1 FROM cves WHERE cve_id = ?", (cve_id,))
+                is_new = cursor.fetchone() is None
+
+                if not is_new:
+                    # 更新现有记录
+                    cursor.execute('''
+                        UPDATE cves
+                        SET data = ?, last_modified = ?, published_date = ?
+                        WHERE cve_id = ?
+                    ''', (
+                        data_str,
+                        cve_data.get('last_modified', '') or '',
+                        cve_data.get('published_date', '') or '',
+                        cve_id
+                    ))
+                else:
+                    # 插入新记录
+                    cursor.execute('''
+                        INSERT INTO cves (cve_id, data, last_modified, published_date)
+                        VALUES (?, ?, ?, ?)
+                    ''', (
+                        cve_id,
+                        data_str,
+                        cve_data.get('last_modified', '') or '',
+                        cve_data.get('published_date', '') or ''
+                    ))
+
+                # 添加到采集历史
+                cursor.execute('''
+                    INSERT INTO collection_history (cve_id, collected_date)
+                    VALUES (?, ?)
+                ''', (cve_id, datetime.now().isoformat()))
+
+                self.conn.commit()
+                return is_new
+            except sqlite3.Error as e:
+                self.log(f"存储CVE数据失败: {str(e)}")
+                # 尝试回滚事务
+                try:
+                    self.conn.rollback()
+                except sqlite3.Error as rollback_err:
+                    self.log(f"回滚失败: {rollback_err}")
+                return False
+            except Exception as e:
+                self.log(f"存储CVE数据时发生未知错误: {str(e)}")
+                return False
     
     def load_cve_data_from_db(self, cve_ids=None):
         """从数据库加载CVE数据（优先使用 Redis）"""
@@ -536,45 +559,47 @@ class CVEIntegratedGUI:
         return self._store_dell_to_sqlite(advisory_data)
 
     def _store_dell_to_sqlite(self, advisory_data):
-        """存储 Dell 数据到 SQLite（内部方法）"""
-        try:
-            cursor = self.conn.cursor()
+        """存储 Dell 数据到 SQLite（内部方法，线程安全）"""
+        # ✅ 修复 #2: 使用锁保护数据库操作
+        with self.db_lock:
+            try:
+                cursor = self.conn.cursor()
 
-            dsa_id = advisory_data.get('dell_security_advisory', '')
-            if not dsa_id:
-                return False  # 返回False表示未存储
+                dsa_id = advisory_data.get('dell_security_advisory', '')
+                if not dsa_id:
+                    return False  # 返回False表示未存储
 
-            # 检查是否已存在
-            cursor.execute("SELECT 1 FROM dell_advisories WHERE dsa_id = ?", (dsa_id,))
-            is_new = cursor.fetchone() is None
+                # 检查是否已存在
+                cursor.execute("SELECT 1 FROM dell_advisories WHERE dsa_id = ?", (dsa_id,))
+                is_new = cursor.fetchone() is None
 
-            if not is_new:
-                # 已存在，跳过
+                if not is_new:
+                    # 已存在，跳过
+                    return False
+
+                # 不存在，插入新记录
+                cve_ids_str = ','.join(advisory_data.get('cve_ids', []))
+                data_str = json.dumps(advisory_data, ensure_ascii=False)
+
+                cursor.execute('''
+                    INSERT INTO dell_advisories
+                    (dsa_id, title, cve_ids, data, published_date, collected_date, link)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    dsa_id,
+                    advisory_data.get('title', ''),
+                    cve_ids_str,
+                    data_str,
+                    advisory_data.get('published_date', ''),
+                    datetime.now().isoformat(),
+                    advisory_data.get('link', '')
+                ))
+
+                self.conn.commit()
+                return True  # 返回True表示新增了记录
+            except sqlite3.Error as e:
+                self.log(f"存储Dell数据失败: {str(e)}")
                 return False
-
-            # 不存在，插入新记录
-            cve_ids_str = ','.join(advisory_data.get('cve_ids', []))
-            data_str = json.dumps(advisory_data, ensure_ascii=False)
-
-            cursor.execute('''
-                INSERT INTO dell_advisories
-                (dsa_id, title, cve_ids, data, published_date, collected_date, link)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                dsa_id,
-                advisory_data.get('title', ''),
-                cve_ids_str,
-                data_str,
-                advisory_data.get('published_date', ''),
-                datetime.now().isoformat(),
-                advisory_data.get('link', '')
-            ))
-
-            self.conn.commit()
-            return True  # 返回True表示新增了记录
-        except sqlite3.Error as e:
-            self.log(f"存储Dell数据失败: {str(e)}")
-            return False
 
     def get_dell_count_from_db(self):
         """获取Dell安全公告总数（从实际数据库）
@@ -3107,22 +3132,63 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
         self.root.after(100, self.check_queues)
 
     def close_database_connection(self):
-        """关闭数据库连接"""
+        """关闭数据库连接（改进版，等待队列清空）"""
+        # ✅ 修复 #1: 等待备份队列清空
+        if hasattr(self, 'sqlite_backup_queue') and not self.sqlite_backup_queue.empty():
+            try:
+                print("等待数据备份完成...")
+                # 等待队列清空，最多等待 10 秒
+                import time
+                start_time = time.time()
+                while not self.sqlite_backup_queue.empty() and (time.time() - start_time) < 10:
+                    time.sleep(0.1)
+
+                if self.sqlite_backup_queue.empty():
+                    print("✓ 数据备份完成")
+                else:
+                    print(f"⚠ 备份队列仍有 {self.sqlite_backup_queue.qsize()} 项未完成，强制关闭")
+            except Exception as e:
+                print(f"等待备份队列时出错: {e}")
+
         # 关闭 Redis 连接
         if hasattr(self, 'redis_manager') and self.redis_manager:
             try:
                 self.redis_manager.close()
-                self.log("Redis 连接已关闭")
+                print("Redis 连接已关闭")
             except Exception as e:
-                self.log(f"关闭 Redis 连接时出错: {str(e)}")
+                print(f"关闭 Redis 连接时出错: {str(e)}")
 
         # 关闭 SQLite 连接
         if hasattr(self, 'conn') and self.conn:
             try:
                 self.conn.close()
-                self.log("SQLite 连接已关闭")
+                print("SQLite 连接已关闭")
             except sqlite3.Error as e:
-                self.log(f"关闭 SQLite 连接时出错: {str(e)}")
+                print(f"关闭 SQLite 连接时出错: {str(e)}")
+
+    def cleanup(self):
+        """✅ 修复 #4: 统一的资源清理函数（防止重复清理）"""
+        with self._cleanup_lock:
+            if self._cleaned_up:
+                return  # 已经清理过，直接返回
+
+            try:
+                print("\n正在清理资源...")
+                self.close_database_connection()
+                self._cleaned_up = True
+                print("✓ 资源清理完成\n")
+            except Exception as e:
+                print(f"清理资源时出错: {e}")
+
+    def _signal_handler(self, signum, frame):
+        """✅ 修复 #4: 处理系统信号（Ctrl+C 等）"""
+        print(f"\n收到信号 {signum}，正在安全退出...")
+        try:
+            self.cleanup()
+        except Exception as e:
+            print(f"信号处理出错: {e}")
+        finally:
+            sys.exit(0)
 
     def log(self, message):
         """添加日志消息"""
@@ -3150,14 +3216,14 @@ def main():
 
     root = tk.Tk()
     app = CVEIntegratedGUI(root)
-    
-    # 添加协议处理程序，在窗口关闭时关闭数据库连接
+
+    # ✅ 修复 #1 & #4: 改进窗口关闭处理，使用统一的清理函数
     def on_closing():
-        app.close_database_connection()
+        app.cleanup()  # 使用统一的清理函数
         root.destroy()
-    
+
     root.protocol("WM_DELETE_WINDOW", on_closing)
-    
+
     root.mainloop()
 
 
