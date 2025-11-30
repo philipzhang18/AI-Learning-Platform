@@ -1,22 +1,9 @@
-# ==========================================
-# CVE 项目 .gitignore
-# ==========================================
-
-# ============ Python ============
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-
-# 虚拟环境
-.venv/
-venv/
-ENV/
-env/
-.virtualenv
-
-# 分发/打包
 build/
 develop-eggs/
 dist/
@@ -32,148 +19,135 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# ============ 数据和缓存 ============
-# 数据库文件
-cve_data/
-*.db
-*.sqlite
-*.sqlite3
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
 
-# 备份文件
-backups/
-backup/
-*.backup
-*.bak
-
-# 日志文件
-*.log
-logs/
-log/
-
-# 临时数据
-temp/
-tmp/
-output/
-
-# CSV 和 JSON 数据文件
-*.csv
-cves_*.json
-dell_advisories_*.json
-*_backup_*.json
-
-# 保留配置文件（不忽略）
-!requirements.txt
-!package.json
-!claude.config.json
-!qwen_http_tools.json
-
-# ============ Docker ============
-.docker/
-docker-data/
-mongodb-data/
-redis-data/
-postgres-data/
-
-# ============ IDE 和编辑器 ============
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-*.sublime-project
-*.sublime-workspace
 
-# ============ 系统文件 ============
-.DS_Store
-Thumbs.db
-[Dd]esktop.ini
-$RECYCLE.BIN/
+# Logs
+*.log
+logs/
+log/
 
-# ============ 测试和临时文件 ============
-# 测试脚本
-test_*.py
-*_test.py
-diagnose_*.py
-fix_*.py
-migrate_*.py
-sync_*.py
-verify_*.py
-comprehensive_performance_test.py
-gpu_performance_test.py
-simple_performance_test.py
-system_test.py
+# Data and Cache
+cve_data/
+cache/
+temp/
+data/
+output/
+temp_*.json
+*.jsonl
+*.csv
+*.db
+*.db-shm
+*.db-wal
+checkpoints/
+models/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pkl
+*.pickle
 
-# 临时备份文件
-*_backup_*.py
-*_old.py
-cve_integrated_gui_sqlite_backup_*.py
-
-# ============ 文档报告 ============
-# 临时报告（保留核心文档）
-BUG_FIX_REPORT_*.md
-CLEANUP_*.md
-DATA_*.md
-DELL_*.md
-DEPLOYMENT_*.md
-DOCKER_TROUBLESHOOTING.md
-DOCKER_OPTIMIZATION_*.md
-FEATURE_*.md
-FINAL_*.md
-GITHUB_*.md
-GPU_*.md
-LIGHTWEIGHT_*.md
-MATCHING_*.md
-NVD_*.md
-PERFORMANCE_*.md
-PROJECT_*.md
-REDIS_*.md
-STARTUP_*.md
-SYSTEM_*.md
-WORKSPACE_*.md
-COMPLETE_*.md
-
-# 保留这些重要文档
-!README.md
-!QUICKSTART.md
-!CONFIG.md
-!CLAUDE.md
-!CHANGELOG.md
-!DOCUMENTATION_INDEX.md
-
-# 临时文本文件
-files_to_delete.txt
-FIXES_CHECKLIST.txt
-*.txt.bak
-claude code Ubuntu.txt
-点击启动CVE系统.txt
-启动命令.txt
-
-# ============ 归档目录 ============
-archive/
-old/
-deprecated/
-mongodb_backup_*/
-
-# ============ 配置和密钥 ============
-.env
-.env.local
-.env.*.local
-*.secret
-secrets/
-configuration_summary.json
-*_api_key.txt
-*.pem
-*.key
-
-# ============ 其他 ============
-*.zip
-*.tar.gz
-*.rar
-*.7z
+# Selenium
 *.png
 *.jpg
 *.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+*.tmp
 
-# Claude 特定
-.claude/
+# Browser drivers
+chromedriver*
+geckodriver*
+msedgedriver*
+chromedriver.exe
+geckodriver.exe
+msedgedriver.exe
+
+# System
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Git config
+.git/config
+
+# Environment specific
+.env
+.env.local
+.env.dev
+.env.prod
+
+# Backup files
+*.bak
+*.backup
+backup/
+backups/
+
+# Test files
+test_*.py
+*_test.py
+tests/
+pytest_cache/
+.coverage
+htmlcov/
+
+# Git temporary files
+.git/COMMIT_EDITMSG
+*.orig
+*.rej
+
+# Documentation builds
+docs/_build/
+_site/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Configuration files that should not be committed
+config.json
+settings.json
+secrets.json
+credentials.json
+
+# Other temporary directories
+.DS_Store
+*.tmp
+tmp/
+
+# Docker
+.dockerenv
+!Dockerfile
+!docker-compose*.yml
+
+# Web files
+*.min.js
+*.min.css
+node_modules/
+
+# AI generated temporary files
+final_validation_report.py
+full_system_validation.py
+test_new_features.py
+test_match_performance.py
+
+# Archive files
+archive/
+
+# DB backups
+backups/

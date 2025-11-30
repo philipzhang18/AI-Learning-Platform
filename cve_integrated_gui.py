@@ -109,8 +109,8 @@ class CVEIntegratedGUI:
         # 启动队列检查
         self.check_queues()
 
-        # 加载本地数据
-        self.load_local_data()
+        # 加载本地数据 (修改：仅加载统计数据，不自动开始采集)
+        self.load_local_data_summary()
 
         # ✅ 修复 #4: 注册退出处理程序和信号处理
         atexit.register(self.cleanup)
@@ -133,12 +133,15 @@ class CVEIntegratedGUI:
         # SQLite 性能优化配置
         optimizations = [
             'PRAGMA journal_mode=WAL',           # WAL 模式，提升并发性能
-            'PRAGMA cache_size=10000',           # 缓存大小（~40MB）
+            'PRAGMA cache_size=20000',           # 增加缓存大小（~80MB）for better performance
             'PRAGMA synchronous=NORMAL',         # 平衡性能和安全
             'PRAGMA temp_store=MEMORY',          # 临时数据存储在内存
             'PRAGMA mmap_size=30000000000',      # 内存映射 I/O（30GB）
             'PRAGMA page_size=4096',             # 页大小 4KB
-            'PRAGMA auto_vacuum=INCREMENTAL'     # 增量自动清理
+            'PRAGMA auto_vacuum=INCREMENTAL',    # 增量自动清理
+            'PRAGMA foreign_keys=ON',            # 启用外键约束
+            'PRAGMA locking_mode=NORMAL',        # Set appropriate locking mode
+            'PRAGMA busy_timeout=30000'          # 30s timeout for busy operations
         ]
 
         for pragma in optimizations:
@@ -185,6 +188,15 @@ class CVEIntegratedGUI:
                     FOREIGN KEY (cve_id) REFERENCES cves (cve_id)
                 )
             ''')
+
+            # Create indexes for better query performance
+            # Index on published_date for date-based queries
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_cves_published_date ON cves(published_date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_cves_last_modified ON cves(last_modified)")
+
+            # Index for Dell advisories
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_published_date ON dell_advisories(published_date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_cve_ids ON dell_advisories(cve_ids)")
 
             self.conn.commit()
         except sqlite3.Error as e:
@@ -246,8 +258,15 @@ class CVEIntegratedGUI:
         """获取数据库中已存在的CVE IDs"""
         try:
             cursor = self.conn.cursor()
+            # Optimize query: use a more efficient approach for large datasets
             cursor.execute("SELECT cve_id FROM cves")
-            existing_ids = [row[0] for row in cursor.fetchall()]
+            # Use fetchmany for better memory usage with large datasets
+            existing_ids = []
+            while True:
+                rows = cursor.fetchmany(1000)  # Fetch 1000 rows at a time
+                if not rows:
+                    break
+                existing_ids.extend([row[0] for row in rows])
             return set(existing_ids)
         except sqlite3.Error as e:
             self.log(f"查询现有CVE IDs失败: {str(e)}")
@@ -301,6 +320,83 @@ class CVEIntegratedGUI:
 
         # SQLite 存储（回退方案）
         return self._store_cve_to_sqlite(cve_data)
+
+    def bulk_store_cve_data(self, cve_list):
+        """批量存储CVE数据到数据库（优化大量数据插入性能）"""
+        if not cve_list:
+            return
+
+        if self.use_redis:
+            try:
+                # Bulk store to Redis if supported
+                new_count = 0
+                for cve_data in cve_list:
+                    is_new = self.redis_manager.store_cve(cve_data)
+                    if is_new:
+                        new_count += 1
+
+                # Add all to SQLite backup queue
+                for cve_data in cve_list:
+                    self.sqlite_backup_queue.put(('cve', cve_data))
+
+                return new_count
+            except Exception as e:
+                self.log(f"批量存储到 Redis 失败: {e}, 回退到 SQLite")
+                # Fall back to SQLite bulk insert
+                return self._bulk_store_cve_to_sqlite(cve_list)
+
+        # SQLite bulk storage (fallback)
+        return self._bulk_store_cve_to_sqlite(cve_list)
+
+    def _bulk_store_cve_to_sqlite(self, cve_list):
+        """批量存储CVE数据到SQLite（事务处理，提高性能）"""
+        with self.db_lock:
+            try:
+                cursor = self.conn.cursor()
+
+                # Start transaction for better performance
+                cursor.execute("BEGIN TRANSACTION")
+
+                new_count = 0
+
+                for cve_data in cve_list:
+                    cve_id = cve_data.get('cve_id', '')
+                    if not cve_id:
+                        continue
+
+                    data_str = json.dumps(cve_data) if cve_data else '{}'
+
+                    # Use INSERT OR REPLACE to handle both new and update cases efficiently
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO cves (cve_id, data, last_modified, published_date)
+                        VALUES (?, ?, ?, ?)
+                    ''', (
+                        cve_id,
+                        data_str,
+                        cve_data.get('last_modified', '') or '',
+                        cve_data.get('published_date', '') or ''
+                    ))
+
+                    # Insert into collection history
+                    cursor.execute('''
+                        INSERT INTO collection_history (cve_id, collected_date)
+                        VALUES (?, ?)
+                    ''', (cve_id, datetime.now().isoformat()))
+
+                    new_count += 1
+
+                self.conn.commit()
+                return new_count
+            except sqlite3.Error as e:
+                self.log(f"批量存储CVE数据失败: {str(e)}")
+                try:
+                    self.conn.rollback()
+                except sqlite3.Error as rollback_err:
+                    self.log(f"批量存储回滚失败: {rollback_err}")
+                return 0
+            except Exception as e:
+                self.log(f"批量存储CVE数据时发生未知错误: {str(e)}")
+                return 0
 
     def _store_cve_to_sqlite(self, cve_data):
         """存储 CVE 数据到 SQLite（内部方法，线程安全）"""
@@ -395,17 +491,41 @@ class CVEIntegratedGUI:
             else:
                 cursor.execute("SELECT cve_id, data, last_modified, published_date FROM cves")
 
-            records = cursor.fetchall()
+            # Optimize memory usage for large datasets
             cve_data = []
-            for record in records:
-                try:
-                    # First try to load the stored JSON data
-                    if record[1]:  # The data field is not empty
-                        data = json.loads(record[1])
-                        cve_data.append(data)
-                    else:
-                        # If data is empty but we have basic info, create a minimal record
-                        # This handles cases where the schema may be inconsistent
+            batch_size = 1000  # Process in batches to optimize memory
+
+            while True:
+                records = cursor.fetchmany(batch_size)  # Fetch in batches
+                if not records:
+                    break
+
+                for record in records:
+                    try:
+                        # First try to load the stored JSON data
+                        if record[1]:  # The data field is not empty
+                            data = json.loads(record[1])
+                            cve_data.append(data)
+                        else:
+                            # If data is empty but we have basic info, create a minimal record
+                            # This handles cases where the schema may be inconsistent
+                            cve_entry = {
+                                "cve_id": record[0],
+                                "description": "",
+                                "published_date": record[3],
+                                "last_modified": record[2],
+                                "vuln_status": "",
+                                "cvss_score": "",
+                                "cvss_severity": "",
+                                "cvss_vector": "",
+                                "references": [],
+                                "affected_products": [],
+                                "weaknesses": [],
+                                "source": "Database"
+                            }
+                            cve_data.append(cve_entry)
+                    except json.JSONDecodeError:
+                        # If JSON parsing fails, create a minimal record
                         cve_entry = {
                             "cve_id": record[0],
                             "description": "",
@@ -421,23 +541,6 @@ class CVEIntegratedGUI:
                             "source": "Database"
                         }
                         cve_data.append(cve_entry)
-                except json.JSONDecodeError:
-                    # If JSON parsing fails, create a minimal record
-                    cve_entry = {
-                        "cve_id": record[0],
-                        "description": "",
-                        "published_date": record[3],
-                        "last_modified": record[2],
-                        "vuln_status": "",
-                        "cvss_score": "",
-                        "cvss_severity": "",
-                        "cvss_vector": "",
-                        "references": [],
-                        "affected_products": [],
-                        "weaknesses": [],
-                        "source": "Database"
-                    }
-                    cve_data.append(cve_entry)
             return cve_data
         except sqlite3.Error as e:
             self.log(f"从数据库加载CVE数据失败: {str(e)}")
@@ -617,6 +720,7 @@ class CVEIntegratedGUI:
 
         # SQLite模式或Redis失败时
         try:
+            # Use a more efficient COUNT query with index
             cursor = self.conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM dell_advisories")
             count = cursor.fetchone()[0]
@@ -719,9 +823,16 @@ class CVEIntegratedGUI:
                     # 清空树形视图（使用队列通知主线程）
                     self.dell_queue.put(('clear', None))
 
-                    # 批量添加数据
+                    # 批量添加数据 with performance optimization
+                    processed_count = 0
                     for advisory in self.dell_advisories:
                         self.dell_queue.put(('add', advisory))
+                        processed_count += 1
+
+                        # Yield control periodically to prevent GUI freezing
+                        if processed_count % 20 == 0:  # Update every 20 items for Dell data
+                            import time
+                            time.sleep(0.001)  # Small pause to allow other operations
 
                     # 通知加载完成
                     total_count = self.redis_manager.get_dell_count()
@@ -733,7 +844,8 @@ class CVEIntegratedGUI:
 
                     # 刷新关联数据（使用后台线程）
                     self.log_queue.put("正在计算 CVE-Dell 关联匹配...")
-                    if self.cve_data:
+                    # Only refresh if we have both CVE and Dell data available
+                    if self.cve_data and self.dell_advisories:
                         self._refresh_matched_data_background()
 
                     return
@@ -763,9 +875,16 @@ class CVEIntegratedGUI:
             # 清空树形视图
             self.dell_queue.put(('clear', None))
 
-            # 显示数据
+            # 显示数据 with performance optimization
+            processed_count = 0
             for advisory in self.dell_advisories:
                 self.dell_queue.put(('add', advisory))
+                processed_count += 1
+
+                # Yield control periodically to prevent GUI freezing
+                if processed_count % 20 == 0:  # Update every 20 items for Dell data
+                    import time
+                    time.sleep(0.001)  # Small pause to allow other operations
 
             self.log_queue.put(f"从 SQLite 加载 {len(self.dell_advisories)} 条 Dell 安全公告")
 
@@ -860,27 +979,55 @@ class CVEIntegratedGUI:
         self.create_log_view()
 
         # 底部状态栏
-        status_bar = tk.Frame(self.root, bg=self.primary_color, height=35)
+        status_bar = tk.Frame(self.root, bg=self.primary_color, height=50)  # Increased height to accommodate progress bar
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
         status_bar.pack_propagate(False)
 
+        # Top section of status bar
+        status_top = tk.Frame(status_bar, bg=self.primary_color)
+        status_top.pack(fill=tk.X, padx=10, pady=(5, 0))
+
         self.bottom_status = tk.Label(
-            status_bar,
+            status_top,
             text="准备就绪 | 支持离线数据查看",
             bg=self.primary_color,
             fg="white",
             font=("Microsoft YaHei", 9)
         )
-        self.bottom_status.pack(side=tk.LEFT, padx=10, pady=5)
+        self.bottom_status.pack(side=tk.LEFT)
 
         self.cve_count_label = tk.Label(
-            status_bar,
+            status_top,
             text="NVD CVE: 0 | Dell 公告: 0 | 关联: 0",
             bg=self.primary_color,
             fg="white",
             font=("Microsoft YaHei", 9, "bold")
         )
-        self.cve_count_label.pack(side=tk.RIGHT, padx=10, pady=5)
+        self.cve_count_label.pack(side=tk.RIGHT)
+
+        # Progress bar (hidden by default)
+        self.progress_frame = tk.Frame(status_bar, bg=self.primary_color)
+        self.progress_frame.pack(fill=tk.X, padx=10, pady=(2, 5))
+
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(
+            self.progress_frame,
+            variable=self.progress_var,
+            maximum=100,
+            length=300
+        )
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.progress_bar.pack_forget()  # Hide by default
+
+        self.progress_text = tk.Label(
+            self.progress_frame,
+            text="",
+            bg=self.primary_color,
+            fg="white",
+            font=("Microsoft YaHei", 8)
+        )
+        self.progress_text.pack(side=tk.RIGHT, padx=(5, 0))
+        self.progress_text.pack_forget()  # Hide by default
 
     def create_nvd_view(self):
         """创建 NVD CVE 数据视图"""
@@ -1420,6 +1567,28 @@ class CVEIntegratedGUI:
         )
         clear_btn.pack(pady=(0, 10))
 
+    # ==================== Progress Bar Control ====================
+
+    def show_progress(self, text=""):
+        """显示进度条"""
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.progress_text.config(text=text)
+        self.progress_text.pack(side=tk.RIGHT, padx=(5, 0))
+        self.progress_var.set(0)
+
+    def update_progress(self, value, text=""):
+        """更新进度条"""
+        self.progress_var.set(value)
+        if text:
+            self.progress_text.config(text=text)
+        self.root.update_idletasks()  # Update the GUI
+
+    def hide_progress(self):
+        """隐藏进度条"""
+        self.progress_bar.pack_forget()
+        self.progress_text.pack_forget()
+        self.bottom_status.config(text="准备就绪 | 支持离线数据查看")
+
     # ==================== NVD CVE 采集功能 ====================
 
     def start_nvd_collection(self):
@@ -1448,6 +1617,10 @@ class CVEIntegratedGUI:
             "1年": 365
         }
         days = time_range_map.get(time_range, 365)
+
+        # Show progress bar
+        self.show_progress(f"开始采集 NVD CVE 数据 ({time_range})...")
+        self.bottom_status.config(text=f"正在采集 NVD CVE 数据...")
 
         # 优先使用环境变量的 API Key
         api_key = os.getenv("NVD_API_KEY")
@@ -1482,8 +1655,14 @@ class CVEIntegratedGUI:
             self.log_queue.put(f"NVD 采集出错: {str(e)}")
         finally:
             self.is_collecting = False
-            self.nvd_collect_btn.config(state=tk.NORMAL)
-            self.nvd_stop_btn.config(state=tk.DISABLED)
+            # Schedule the UI updates to run in the main thread
+            self.root.after(0, self._finish_nvd_collection)
+
+    def _finish_nvd_collection(self):
+        """Finish NVD collection UI updates (run in main thread)"""
+        self.nvd_collect_btn.config(state=tk.NORMAL)
+        self.nvd_stop_btn.config(state=tk.DISABLED)
+        self.hide_progress()
 
     async def collect_nvd_cves_async(self, days, api_key):
         """异步采集 NVD CVE 数据（优化版）"""
@@ -1533,38 +1712,71 @@ class CVEIntegratedGUI:
                     self.log_queue.put(f"成功获取总计 {len(all_raw_cves)} 条 CVE 数据，正在解析...")
 
                     # 解析并存储数据（只存储到数据库）
-                    new_cves = []  # 收集新增的 CVE
+                    new_cves = []  # 收集新增的 CVE for GUI updates
+                    cves_to_store = []  # Collect all parsed CVEs for bulk storage
 
-                    for raw_cve in all_raw_cves:
+                    # Process in batches to keep UI responsive
+                    batch_size = 50  # Larger batch for bulk processing
+                    for i, raw_cve in enumerate(all_raw_cves):
                         if not self.is_collecting:
+                            self.log_queue.put(f"采集被用户中断，已处理 {i}/{len(all_raw_cves)} 条数据")
                             break
 
                         parsed = collector.parse_cve(raw_cve)
                         cve_id = parsed.get("cve_id", "")
 
                         if cve_id:
-                            # 存储到数据库（增量）
                             is_new = cve_id not in existing_cve_ids
-                            self.store_cve_data(parsed)
 
                             if is_new:
-                                new_cves.append(parsed)
+                                new_cves.append(parsed)  # For GUI updates
                                 new_cves_count += 1
                                 # 添加到已存在列表
                                 existing_cve_ids.add(cve_id)
+                                cves_to_store.append(parsed)  # For bulk storage
                             else:
                                 updated_count += 1
 
+                        # Process in bulk batches for better performance
+                        if len(cves_to_store) >= batch_size or i == len(all_raw_cves) - 1:
+                            if cves_to_store:
+                                # Bulk store to Redis/SQLite
+                                if self.use_redis:
+                                    for cve_to_store in cves_to_store:
+                                        self.redis_manager.store_cve(cve_to_store)
+                                        # Add to SQLite backup queue
+                                        self.sqlite_backup_queue.put(('cve', cve_to_store))
+                                else:
+                                    # Fall back to SQLite bulk storage
+                                    self._bulk_store_cve_to_sqlite(cves_to_store)
+
+                                # Clear the batch
+                                cves_to_store = []
+
+                        # Provide progress updates and allow other tasks to run
+                        if i % 20 == 0 and i > 0:  # Update progress every 20 items
+                            progress_percent = int((i / len(all_raw_cves)) * 100)
+                            self.log_queue.put(f"正在处理: {i}/{len(all_raw_cves)} ({progress_percent}%)")
+                            await asyncio.sleep(0.01)  # Yield to other async tasks
+
+                    self.log_queue.put(f"数据解析完成: 新增 {new_cves_count}, 更新 {updated_count}")
+
                     # 优化：只将新增的 CVE 添加到内存和 GUI（不重新加载全部数据）
                     if new_cves:
-                        self.log_queue.put(f"正在显示 {len(new_cves)} 条新增 CVE...")
+                        self.log_queue.put(f"正在处理 {len(new_cves)} 条新增 CVE...")
 
                         # 批量添加到内存
                         self.cve_data.extend(new_cves)
 
-                        # 批量添加到 GUI（通过队列）
+                        # 批量添加到 GUI（通过队列）- limit to avoid GUI freezing
+                        processed_count = 0
                         for cve in new_cves:
                             self.data_queue.put(('nvd', cve))
+                            processed_count += 1
+
+                            # Yield control periodically to prevent GUI freezing
+                            if processed_count % 50 == 0:  # Update every 50 items
+                                await asyncio.sleep(0.01)  # Small pause to yield to other tasks
 
                     # 显示统计
                     total_in_db = len(existing_cve_ids)
@@ -1574,16 +1786,26 @@ class CVEIntegratedGUI:
                         self.log_queue.put(f"  更新: {updated_count} 条")
                     self.log_queue.put(f"  数据库总计: {total_in_db} 条")
 
-                    # ✅ 修复：采集完成后重新加载全部数据
+                    # ✅ 修复：采集完成后重新加载全部数据 - only if needed
                     self.log_queue.put("正在从数据库重新加载全部CVE数据...")
                     all_cves = self.load_cve_data_from_db()
                     self.cve_data = all_cves
 
-                    # 重新填充树视图
-                    for cve in all_cves:
+                    # 重新填充树视图 (with performance optimization for large datasets)
+                    display_cves = all_cves[:500]  # Only show first 500 in UI to prevent freezing
+                    processed_count = 0
+                    for cve in display_cves:
                         self.data_queue.put(('nvd', cve))
+                        processed_count += 1
 
-                    self.log_queue.put(f"✓ 已重新加载 {len(all_cves)} 条CVE到界面")
+                        # Yield control periodically to prevent GUI freezing
+                        if processed_count % 50 == 0:
+                            await asyncio.sleep(0.01)  # Small pause to yield to other tasks
+
+                    if len(all_cves) > 500:
+                        self.log_queue.put(f"✓ 已加载 {len(display_cves)} 条CVE到界面 (共 {len(all_cves)} 条，使用搜索功能查询全部)")
+                    else:
+                        self.log_queue.put(f"✓ 已加载 {len(all_cves)} 条CVE到界面")
                 else:
                     # 从数据库加载现有数据
                     all_cves = self.load_cve_data_from_db()
@@ -1613,6 +1835,10 @@ class CVEIntegratedGUI:
         self.is_collecting_dell = True
         self.dell_collect_btn.config(state=tk.DISABLED)
         self.dell_stop_btn.config(state=tk.NORMAL)
+
+        # Show progress bar
+        self.show_progress(f"开始采集 Dell 安全公告 ({time_range})...")
+        self.bottom_status.config(text=f"正在采集 Dell 安全公告...")
 
         # ✅ 修复：只清空树视图，不清空内存数据
         # 采集完成后会从数据库重新加载全部数据
@@ -1647,8 +1873,14 @@ class CVEIntegratedGUI:
             self.log_queue.put(f"Dell 采集出错: {str(e)}")
         finally:
             self.is_collecting_dell = False
-            self.dell_collect_btn.config(state=tk.NORMAL)
-            self.dell_stop_btn.config(state=tk.DISABLED)
+            # Schedule the UI updates to run in the main thread
+            self.root.after(0, self._finish_dell_collection)
+
+    def _finish_dell_collection(self):
+        """Finish Dell collection UI updates (run in main thread)"""
+        self.dell_collect_btn.config(state=tk.NORMAL)
+        self.dell_stop_btn.config(state=tk.DISABLED)
+        self.hide_progress()
 
     async def collect_dell_advisories_async(self, time_range):
         """异步采集 Dell 安全公告（优化版）"""
@@ -1678,8 +1910,11 @@ class CVEIntegratedGUI:
                 existing_count = 0
                 new_advisories = []  # 收集新增的公告
 
-                for item in items:
+                # Process in batches to keep UI responsive
+                batch_size = 5  # Smaller batch for Dell data
+                for i, item in enumerate(items):
                     if not self.is_collecting_dell:
+                        self.log_queue.put(f"采集被用户中断，已处理 {i}/{len(items)} 条数据")
                         break
 
                     # 增强解决方案信息
@@ -1693,6 +1928,12 @@ class CVEIntegratedGUI:
                     else:
                         existing_count += 1
 
+                    # Provide progress updates and allow other tasks to run
+                    if i % batch_size == 0 and i > 0:
+                        progress_percent = int((i / len(items)) * 100)
+                        self.log_queue.put(f"Dell数据处理: {i}/{len(items)} ({progress_percent}%)")
+                        await asyncio.sleep(0.01)  # Yield to other async tasks
+
                 # 优化：批量添加到 GUI（只添加新数据）
                 if new_advisories:
                     self.log_queue.put(f"正在显示 {len(new_advisories)} 条新增公告...")
@@ -1700,9 +1941,15 @@ class CVEIntegratedGUI:
                     # 批量添加到内存
                     self.dell_advisories.extend(new_advisories)
 
-                    # 批量发送到队列
+                    # 批量发送到队列 with performance optimization
+                    processed_count = 0
                     for advisory in new_advisories:
                         self.dell_queue.put(advisory)
+                        processed_count += 1
+
+                        # Yield control periodically to prevent GUI freezing
+                        if processed_count % 20 == 0:  # Update every 20 items for Dell data
+                            await asyncio.sleep(0.01)  # Small pause to yield to other tasks
 
                 # 显示增量统计
                 if new_count > 0:
@@ -1778,9 +2025,16 @@ class CVEIntegratedGUI:
                         except json.JSONDecodeError:
                             continue
 
-                    # 显示Dell数据到界面
+                    # 显示Dell数据到界面 with performance optimization
+                    processed_count = 0
                     for advisory in self.dell_advisories:
-                        self.add_dell_to_tree(advisory)
+                        self.dell_queue.put(('add', advisory))  # Use queue instead of direct add
+                        processed_count += 1
+
+                        # Yield control periodically to prevent GUI freezing
+                        if processed_count % 20 == 0:  # Update every 20 items
+                            import time
+                            time.sleep(0.001)  # Small pause to allow other operations
 
                     self.log(f"✓ 已加载 {len(self.dell_advisories)} 条Dell安全公告数据")
                 except Exception as e:
@@ -1803,6 +2057,44 @@ class CVEIntegratedGUI:
 
         except Exception as e:
             self.log(f"加载数据库信息出错: {str(e)}")
+
+    def load_local_data_summary(self):
+        """仅加载数据库统计信息，不自动开始数据采集（优化启动速度）"""
+        try:
+            # 只获取数据库中的统计信息
+            cve_total = self.get_cve_count_from_db()
+            dell_total = self.redis_manager.get_dell_count() if self.use_redis else 0
+
+            # 如果未使用Redis，从SQLite获取Dell总数
+            if not self.use_redis:
+                try:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM dell_advisories")
+                    dell_total = cursor.fetchone()[0]
+                except Exception:
+                    dell_total = 0
+
+            # 显示统计信息
+            self.log("=" * 60)
+            self.log("📊 数据库状态概览")
+            self.log(f"  CVE 数据：{cve_total:,} 条")
+            self.log(f"  Dell 安全公告：{dell_total:,} 条")
+            self.log("=" * 60)
+            self.log("")
+
+            self.log("💡 使用方法：")
+            self.log("  1. 点击 [💾 从数据库加载] 按钮加载最新NVD CVE数据")
+            self.log("  2. 点击 [📁 从数据库加载] 按钮加载Dell安全公告")
+            self.log("  3. 点击 [▶ 采集 NVD 数据] 或 [▶ 采集Dell安全公告] 手动采集最新数据")
+            self.log("  4. 切换到 [🔗 CVE-Dell 关联] 标签页查看匹配结果")
+            self.log("")
+            self.log(f"✓ {'Redis 缓存' if self.use_redis else 'SQLite'} 模式已就绪")
+
+            # 更新统计显示
+            self.update_stats()
+
+        except Exception as e:
+            self.log(f"加载数据库统计信息出错: {str(e)}")
 
     def load_local_nvd_data(self):
         """手动加载本地 NVD 数据（从JSON文件）"""
@@ -1894,9 +2186,16 @@ class CVEIntegratedGUI:
                     # 清空树形视图（使用队列通知主线程）
                     self.data_queue.put(('clear_nvd', None))
 
-                    # 批量添加数据
+                    # 批量添加数据 with performance optimization
+                    processed_count = 0
                     for cve in self.cve_data:
                         self.data_queue.put(('add_nvd', cve))
+                        processed_count += 1
+
+                        # Yield control periodically to prevent GUI freezing
+                        if processed_count % 50 == 0:  # Update every 50 items
+                            import time
+                            time.sleep(0.001)  # Small pause to allow other operations
 
                     # 通知加载完成
                     total_count = len(all_cves)
@@ -1944,9 +2243,16 @@ class CVEIntegratedGUI:
             # 清空树形视图
             self.data_queue.put(('clear_nvd', None))
 
-            # 显示数据
+            # 显示数据 with performance optimization
+            processed_count = 0
             for cve in self.cve_data:
                 self.data_queue.put(('add_nvd', cve))
+                processed_count += 1
+
+                # Yield control periodically to prevent GUI freezing
+                if processed_count % 50 == 0:  # Update every 50 items
+                    import time
+                    time.sleep(0.001)  # Small pause to allow other operations
 
             # 获取总数量
             cursor.execute("SELECT COUNT(*) FROM cves")
@@ -1958,7 +2264,8 @@ class CVEIntegratedGUI:
                 self.log_queue.put(f"💡 提示：使用搜索功能可查询全部数据")
 
             # 更新关联数据
-            if self.dell_advisories:
+            # Only refresh if we have both CVE and Dell data available
+            if self.cve_data and self.dell_advisories:
                 self._refresh_matched_data_background()
 
         except sqlite3.Error as e:
@@ -2350,7 +2657,7 @@ class CVEIntegratedGUI:
         try:
             # ✅ 修复：从数据库加载数据，不依赖内存
             # 检查Dell数据
-            if not self.dell_advisories:
+            if not hasattr(self, 'dell_advisories') or not self.dell_advisories:
                 # 如果内存中没有Dell数据，从数据库加载
                 cursor = self.conn.cursor()
                 cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
@@ -2471,76 +2778,138 @@ class CVEIntegratedGUI:
             self.log_queue.put(f"详细错误: {traceback.format_exc()}")
 
     def refresh_matched_data(self):
-        """刷新关联数据（优化版，使用哈希表加速）"""
+        """刷新关联数据（优化版，使用哈希表加速，从数据库加载数据）"""
         # 清空关联树视图
         for item in self.matched_tree.get_children():
             self.matched_tree.delete(item)
 
-        if not self.cve_data or not self.dell_advisories:
-            self.log("无法刷新关联数据：缺少 NVD 或 Dell 数据")
-            return
+        # ✅ 修复：从数据库加载数据，不依赖内存（与 _refresh_matched_data_background 一致）
+        try:
+            # 检查Dell数据
+            if not hasattr(self, 'dell_advisories') or not self.dell_advisories:
+                # 如果内存中没有Dell数据，从数据库加载
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
+                records = cursor.fetchall()
+                dell_advisories = []
+                for record in records:
+                    try:
+                        if record[0]:
+                            data = json.loads(record[0])
+                            dell_advisories.append(data)
+                    except:
+                        continue
 
-        # 优化：构建 CVE ID 到 CVE 数据的映射
-        cve_dict = {cve.get("cve_id", ""): cve for cve in self.cve_data}
+                if not dell_advisories:
+                    self.log("无法刷新关联数据：数据库中无Dell数据")
+                    return
+            else:
+                dell_advisories = self.dell_advisories
 
-        # 匹配 CVE ID（优化：遍历 Dell 公告，查找对应的 CVE）
-        matched_count = 0
-        matched_items = []  # 先收集所有匹配项
+            # 从数据库加载CVE数据用于关联匹配
+            # 获取所有Dell公告中的CVE IDs
+            all_dell_cve_ids = set()
+            for advisory in dell_advisories:
+                cve_ids = advisory.get("cve_ids", [])
+                all_dell_cve_ids.update(cve_ids)
 
-        for advisory in self.dell_advisories:
-            advisory_cve_ids = advisory.get("cve_ids", [])
+            if not all_dell_cve_ids:
+                self.log("无法刷新关联数据：Dell公告中无CVE ID")
+                return
 
-            for cve_id in advisory_cve_ids:
-                if cve_id in cve_dict:
-                    cve = cve_dict[cve_id]
+            # 从数据库查询这些CVE的详细信息
+            cursor = self.conn.cursor()
+            placeholders = ','.join(['?' for _ in all_dell_cve_ids])
+            query = f'SELECT data FROM cves WHERE cve_id IN ({placeholders})'
+            cursor.execute(query, list(all_dell_cve_ids))
 
-                    # 提取产品型号
-                    products = advisory.get("affected_products", [])
-                    product_names = [p.get("name", "") for p in products[:3]]  # 最多显示3个
-                    products_str = ", ".join(product_names) if product_names else "详见公告"
+            cve_records = cursor.fetchall()
+            cve_dict = {}
+            for record in cve_records:
+                try:
+                    if record[0]:
+                        cve_data = json.loads(record[0])
+                        cve_id = cve_data.get("cve_id", "")
+                        if cve_id:
+                            cve_dict[cve_id] = cve_data
+                except:
+                    continue
 
-                    # 提取解决方案预览
-                    solution = advisory.get("solution", "")
-                    if len(solution) > 100:
-                        solution = solution[:100] + "..."
-                    if not solution:
-                        solution = "详见公告详情"
+            if not cve_dict:
+                self.log("无法刷新关联数据：数据库中无匹配的CVE数据")
+                return
 
-                    severity = cve.get("cvss_severity", "未知")
-                    tag = severity if severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else ""
+            self.log(f"从数据库加载了 {len(cve_dict)} 个匹配的CVE用于关联显示")
 
-                    matched_items.append({
-                        "values": (
-                            cve_id,
-                            severity,
-                            cve.get("cvss_score", "N/A"),
-                            advisory.get("dell_security_advisory", "N/A"),
-                            products_str,
-                            solution
-                        ),
-                        "tag": tag
-                    })
-                    matched_count += 1
+            # 匹配 CVE ID
+            matched_count = 0
+            matched_items = []  # 收集所有匹配项
 
-        # 批量插入到树视图（减少 GUI 更新次数）
-        # 如果数据太多，只显示前 1000 条
-        max_display = 1000
-        items_to_display = matched_items[:max_display]
+            for advisory in dell_advisories:  # 使用本地变量而非self.dell_advisories
+                advisory_cve_ids = advisory.get("cve_ids", [])
 
-        for item_data in items_to_display:
-            self.matched_tree.insert(
-                "",
-                "end",
-                values=item_data["values"],
-                tags=(item_data["tag"],)
-            )
+                for cve_id in advisory_cve_ids:
+                    if cve_id in cve_dict:
+                        cve = cve_dict[cve_id]
 
-        if matched_count > max_display:
-            self.log(f"关联匹配完成：找到 {matched_count} 条匹配数据，显示前 {max_display} 条（性能优化）")
-        else:
-            self.log(f"关联匹配完成：找到 {matched_count} 条匹配的 CVE-Dell 数据")
+                        # 提取产品型号
+                        products = advisory.get("affected_products", [])
+                        product_names = [p.get("name", "") for p in products[:3]]
+                        products_str = ", ".join(product_names) if product_names else "详见公告"
 
-        self.update_stats()
+                        # 提取解决方案预览
+                        solution = advisory.get("solution", "")
+                        if len(solution) > 100:
+                            solution = solution[:100] + "..."
+                        if not solution:
+                            solution = "详见公告详情"
+
+                        severity = cve.get("cvss_severity", "未知")
+                        tag = severity if severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else ""
+
+                        matched_items.append({
+                            "values": (
+                                cve_id,
+                                severity,
+                                cve.get("cvss_score", "N/A"),
+                                advisory.get("dell_security_advisory", "N/A"),
+                                products_str,
+                                solution
+                            ),
+                            "tag": tag
+                        })
+                        matched_count += 1
+
+            # 批量插入到树视图（减少 GUI 更新次数）
+            # 如果数据太多，只显示前 1000 条
+            max_display = 1000
+            items_to_display = matched_items[:max_display]
+
+            processed_count = 0
+            for item_data in items_to_display:
+                self.matched_tree.insert(
+                    "",
+                    "end",
+                    values=item_data["values"],
+                    tags=(item_data["tag"],)
+                )
+                processed_count += 1
+
+                # Yield control periodically to prevent GUI freezing for large batches
+                if processed_count % 30 == 0:
+                    self.root.update_idletasks()  # Process pending GUI events
+
+            if matched_count > max_display:
+                self.log(f"关联匹配完成：找到 {matched_count} 条匹配数据，显示前 {max_display} 条（性能优化）")
+            else:
+                self.log(f"关联匹配完成：找到 {matched_count} 条匹配的 CVE-Dell 数据")
+
+            self.update_stats()
+
+        except Exception as e:
+            self.log(f"刷新关联数据时出错: {str(e)}")
+            import traceback
+            self.log(f"详细错误信息: {traceback.format_exc()}")
 
     # ==================== 搜索过滤功能 ====================
 
@@ -3029,10 +3398,16 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
             for item in self.nvd_tree.get_children():
                 self.nvd_tree.delete(item)
 
-        # ✅ 批量添加到树视图（减少 GUI 更新次数）
+        # ✅ 批量添加到树视图（减少 GUI 更新次数）with performance optimization
         if new_nvd_items:
+            processed_count = 0
             for cve in new_nvd_items:
                 self.add_nvd_to_tree(cve)
+                processed_count += 1
+
+                # Yield control periodically to prevent GUI freezing for large batches
+                if processed_count % 50 == 0:
+                    self.root.update_idletasks()  # Process pending GUI events
 
         # 检查 Dell 数据队列
         new_dell_items = []  # 收集新增的 Dell 数据
@@ -3079,15 +3454,34 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
         if need_refresh_database:
             self.load_dell_from_database()
 
-        # ✅ 批量添加 Dell 数据到树视图
+        # ✅ 批量添加 Dell 数据到树视图 with performance optimization
         if new_dell_items:
+            processed_count = 0
             for advisory in new_dell_items:
                 self.add_dell_to_tree(advisory)
+                processed_count += 1
+
+                # Yield control periodically to prevent GUI freezing for large batches
+                if processed_count % 20 == 0:
+                    self.root.update_idletasks()  # Process pending GUI events
 
         # 检查日志队列
         while not self.log_queue.empty():
             try:
                 message = self.log_queue.get_nowait()
+
+                # Check if this is a progress update message
+                if message.startswith("正在处理:") or message.startswith("Dell数据处理:"):
+                    # Extract progress percentage if present
+                    if " (" in message and "%" in message:
+                        try:
+                            percent_str = message.split("(")[-1].split("%")[0]
+                            if percent_str.isdigit():
+                                progress_val = int(percent_str)
+                                self.root.after(0, self.update_progress, progress_val, message)
+                        except:
+                            pass  # If parsing fails, just log the message
+
                 self.log(message)
             except queue.Empty:
                 break
@@ -3111,8 +3505,9 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
             for item in self.matched_tree.get_children():
                 self.matched_tree.delete(item)
 
-        # 批量添加关联数据
+        # 批量添加关联数据 with performance optimization
         if matched_items_to_add:
+            processed_count = 0
             for item_data in matched_items_to_add:
                 self.matched_tree.insert(
                     "",
@@ -3120,12 +3515,18 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
                     values=item_data["values"],
                     tags=(item_data["tag"],)
                 )
+                processed_count += 1
+
+                # Yield control periodically to prevent GUI freezing for large batches
+                if processed_count % 30 == 0:
+                    self.root.update_idletasks()  # Process pending GUI events
 
         # ✅ 优化：只在有新数据或收到更新命令时才更新统计
         if new_nvd_items or new_dell_items or need_update_stats:
             self.update_stats()
             # 如果有新的 CVE 或 Dell 数据，刷新关联数据
-            if (new_nvd_items or new_dell_items) and self.cve_data and self.dell_advisories:
+            # Only refresh matched data if we have both types of data available
+            if (new_nvd_items or new_dell_items) and self.cve_data and self.dell_advisories and len(self.cve_data) > 0 and len(self.dell_advisories) > 0:
                 self.refresh_matched_data()
 
         # 继续检查
