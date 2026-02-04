@@ -974,27 +974,27 @@ class CVEIntegratedGUI:
 
         # 1. NVD CVE 数据标签页
         self.nvd_frame = tk.Frame(self.notebook, bg="white")
-        self.notebook.add(self.nvd_frame, text="📊 NVD CVE 数据")
+        self.nvd_tab_id = self.notebook.add(self.nvd_frame, text="📊 NVD CVE 数据")
 
         # 2. Dell 安全公告标签页
         self.dell_frame = tk.Frame(self.notebook, bg="white")
-        self.notebook.add(self.dell_frame, text="🏢 Dell 安全公告")
+        self.dell_tab_id = self.notebook.add(self.dell_frame, text="🏢 Dell 安全公告")
 
         # 3. 关联数据标签页
         self.matched_frame = tk.Frame(self.notebook, bg="white")
-        self.notebook.add(self.matched_frame, text="🔗 CVE-Dell 关联")
+        self.matched_tab_id = self.notebook.add(self.matched_frame, text="🔗 CVE-Dell 关联")
 
         # 4. 解决方案标签页
         self.solution_frame = tk.Frame(self.notebook, bg="white")
-        self.notebook.add(self.solution_frame, text="💡 解决方案")
+        self.solution_tab_id = self.notebook.add(self.solution_frame, text="💡 解决方案")
 
         # 5. 统计分析标签页
         self.stats_frame = tk.Frame(self.notebook, bg="white")
-        self.notebook.add(self.stats_frame, text="📈 统计分析")
+        self.stats_tab_id = self.notebook.add(self.stats_frame, text="📈 统计分析")
 
         # 6. 日志标签页
         self.log_frame = tk.Frame(self.notebook, bg="white")
-        self.notebook.add(self.log_frame, text="📝 操作日志")
+        self.log_tab_id = self.notebook.add(self.log_frame, text="📝 操作日志")
 
         # 创建各个标签页的内容
         self.create_nvd_view()
@@ -3584,7 +3584,8 @@ CVE编号: {cve_data.get('cve_id')} | 公告ID: {advisory_id}
                 self.solution_detail_text.config(state=tk.DISABLED)
 
             # 切换到解决方案标签页
-            self.notebook.select(self.notebook.tabs().index(self.solution_frame))
+            # 使用保存的标签页ID而不是尝试从tabs列表中查找
+            self.notebook.select(self.solution_tab_id)
 
             self.log(f"AI分析完成: {cve_data.get('cve_id')}")
 
