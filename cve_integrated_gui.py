@@ -3407,8 +3407,9 @@ Dell 安全公告详细信息
                 try:
                     with self.db_lock:
                         cursor = self.db_conn.cursor()
+                        # 注意：数据库列名是dsa_id，不是dell_security_advisory
                         cursor.execute(
-                            "SELECT * FROM dell_advisories WHERE dell_security_advisory = ?",
+                            "SELECT * FROM dell_advisories WHERE dsa_id = ?",
                             (advisory_id,)
                         )
                         row = cursor.fetchone()
@@ -3498,6 +3499,9 @@ Dell 安全公告详细信息
 
     def _build_ai_solution_prompt(self, cve_data, dell_advisory_data):
         """构建AI分析的提示词"""
+        # 兼容两种Dell公告ID字段名
+        advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id', 'N/A')
+
         prompt = f"""
 请为以下CVE漏洞和Dell安全公告提供专业的安全解决方案分析：
 
@@ -3509,7 +3513,7 @@ Dell 安全公告详细信息
 - 描述: {cve_data.get('description', '无详细描述')[:500]}
 
 【Dell安全公告】
-- 公告编号: {dell_advisory_data.get('dell_security_advisory', 'N/A')}
+- 公告编号: {advisory_id}
 - 标题: {dell_advisory_data.get('title', 'N/A')}
 - 发布日期: {dell_advisory_data.get('published_date', 'N/A')}
 - 影响产品: {', '.join([p.get('name', 'N/A') for p in dell_advisory_data.get('affected_products', [])])}
@@ -3541,9 +3545,12 @@ Dell 安全公告详细信息
                 self.solution_detail_text.config(state=tk.NORMAL)
                 self.solution_detail_text.delete(1.0, tk.END)
 
+                # 兼容两种Dell公告ID字段名
+                advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id')
+
                 header = f"""
 【AI解决方案分析】
-CVE编号: {cve_data.get('cve_id')} | 公告ID: {dell_advisory_data.get('dell_security_advisory')}
+CVE编号: {cve_data.get('cve_id')} | 公告ID: {advisory_id}
 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {'=' * 80}
 
@@ -3567,6 +3574,9 @@ CVE编号: {cve_data.get('cve_id')} | 公告ID: {dell_advisory_data.get('dell_se
         try:
             with self.db_lock:
                 cursor = self.db_conn.cursor()
+                # 兼容两种Dell公告ID字段名：dell_security_advisory 或 dsa_id
+                advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id')
+
                 cursor.execute(
                     """
                     INSERT INTO ai_solutions
@@ -3575,7 +3585,7 @@ CVE编号: {cve_data.get('cve_id')} | 公告ID: {dell_advisory_data.get('dell_se
                     """,
                     (
                         cve_data.get('cve_id'),
-                        dell_advisory_data.get('dell_security_advisory'),
+                        advisory_id,
                         datetime.now().isoformat(),
                         os.getenv("qwen3-max-2026-01-23", "qwen-max-latest"),
                         "",  # 提示词可选
