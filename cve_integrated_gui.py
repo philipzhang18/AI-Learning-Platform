@@ -3439,12 +3439,36 @@ Dell 安全公告详细信息
         """在后台线程中调用AI分析"""
         try:
             # 读取环境变量配置
-            model_name = os.getenv("qwen3-max-2026-01-23", "qwen-max-latest")
-            api_key = os.getenv("QWEN_API_KEY", os.getenv("DASHSCOPE_API_KEY"))
+            # 模型名称：从QWEN_MODEL环境变量读取，默认为qwen-max-latest
+            model_name = os.getenv("QWEN_MODEL", "qwen-max-latest")
+
+            # API密钥：优先读取QWEN_API_KEY，回退到DASHSCOPE_API_KEY
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+
+            # API基础URL
             base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
+            # 详细的错误诊断
             if not api_key:
-                raise ValueError("Qwen API密钥未设置。请设置QWEN_API_KEY或DASHSCOPE_API_KEY环境变量")
+                error_info = f"""
+Qwen API密钥未设置。
+
+请检查以下环境变量：
+1. QWEN_API_KEY (优先级更高)
+2. DASHSCOPE_API_KEY (备选)
+
+当前检测到的环境变量值：
+- QWEN_API_KEY: {repr(os.getenv('QWEN_API_KEY'))}
+- DASHSCOPE_API_KEY: {'已设置' if os.getenv('DASHSCOPE_API_KEY') else '未设置'}
+- QWEN_MODEL: {repr(os.getenv('QWEN_MODEL'))}
+- QWEN_BASE_URL: {repr(os.getenv('QWEN_BASE_URL'))}
+
+解决方案：
+1. 设置环境变量: setx DASHSCOPE_API_KEY your_api_key_here
+2. 重启应用
+3. 重试分析
+"""
+                raise ValueError(error_info)
 
             # 构建AI请求的提示
             prompt = self._build_ai_solution_prompt(cve_data, dell_advisory_data)
