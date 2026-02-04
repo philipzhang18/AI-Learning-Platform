@@ -1,4 +1,4 @@
-# Python
+# Python and Virtual Environments
 __pycache__/
 *.py[cod]
 *$py.class
@@ -20,37 +20,51 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
-# Virtual Environment
 .venv/
 venv/
 env/
 ENV/
 
-# IDE
+# IDE and Editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.DS_Store
+Thumbs.db
+desktop.ini
 
 # Logs
 *.log
 logs/
 log/
+gui_output.log
 
-# Data and Cache
+# Data, Cache and Backups (DO NOT UPLOAD)
 cve_data/
 cache/
 temp/
 data/
 output/
-temp_*.json
-*.jsonl
-*.csv
+backups/
+backup/
+archive/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+
+# Temporary data files
+temp_*.json
+*.jsonl
+*.csv
+dsa_DSA-*.json
+dsa_DSA-*.csv
+configuration_summary.json
+
+# Model files and checkpoints
 checkpoints/
 models/
 *.pt
@@ -60,7 +74,7 @@ models/
 *.pkl
 *.pickle
 
-# Selenium
+# Temporary images and web files
 *.png
 *.jpg
 *.jpeg
@@ -69,6 +83,10 @@ models/
 *.tiff
 *.webp
 *.tmp
+*.html
+cve_web_interface*.html
+dsa_*.html
+dell_*.html
 
 # Browser drivers
 chromedriver*
@@ -78,69 +96,38 @@ chromedriver.exe
 geckodriver.exe
 msedgedriver.exe
 
-# System
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Git config
-.git/config
-
-# Environment specific
+# Environment and Configuration
 .env
 .env.local
 .env.dev
 .env.prod
-
-# Backup files
-*.bak
-*.backup
-backup/
-backups/
-
-# Test files
-test_*.py
-*_test.py
-tests/
-pytest_cache/
-.coverage
-htmlcov/
+.claude/
+.qwen/
+claude.config.json
+qwen_http_tools.json
+secrets.json
+credentials.json
 
 # Git temporary files
-.git/COMMIT_EDITMSG
 *.orig
 *.rej
-
-# Documentation builds
-docs/_build/
-_site/
 
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
 
-# Configuration files that should not be committed
-config.json
-settings.json
-secrets.json
-credentials.json
+# Testing and Debugging (temporary scripts)
+test_*.py
+*_test.py
+debug_*.py
+gpu_*.py
+tests/
+pytest_cache/
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Other temporary directories
-.DS_Store
-*.tmp
-tmp/
-
-# Docker
-.dockerenv
-!Dockerfile
-!docker-compose*.yml
-
-# Web files
-*.min.js
-*.min.css
-node_modules/
-
-# AI generated temporary files
+# AI-generated temporary validation/test scripts
 final_validation_report.py
 full_system_validation.py
 test_new_features.py
@@ -164,102 +151,71 @@ test_stress.py
 test_system_complete.py
 test_wsl_redis.py
 test_wsl_redis_simple.py
-debug_dsa_detail_page.py
-debug_selenium_page.py
+
+# Debug and helper scripts
 diagnose_dell_display.py
 diagnose_matching_issue.py
 fix_gui_data_loading.py
 migrate_to_redis.py
 sync_sqlite_to_redis.py
 verify_fixes.py
-configuration_summary.json
-dsa_DSA-2025-379_data.json
-dsa_DSA-2025-391_data.json
-dsa_detail_page_debug.html
-dell_page_2023_debug.html
-dell_page_2024_debug.html
-dell_page_2025_debug.html
-dell_selenium_2024_debug.html
 
-# Documentation and reports
-BUG_FIX_REPORT_v2.md
-BUG_FIX_REPORT_v3.9.0.md
-CLEANUP_COMPLETE_REPORT.md
-CLEANUP_PLAN.md
-CLEANUP_SUMMARY.md
-COMPLETE_MATCHING_FIX_REPORT.md
-COMPLETE_TEST_REPORT.md
-DATA_COLLECTION_FIX_REPORT.md
-DATA_DISPLAY_CONFLICT_ANALYSIS.md
-DATA_DISPLAY_TEST_REPORT.md
-DATA_LOADING_BUTTONS_TEST_REPORT.md
-DATA_LOADING_TEST_REPORT.md
-DELL_BUG_FIX_COMPLETE.md
-DELL_DATA_BUG_ANALYSIS.md
-DELL_DISPLAY_FIX_REPORT.md
-DELL_DSA_SCRAPER_README.md
-DELL_DSA_SCRAPER_SUMMARY.md
-DEPLOYMENT_REPORT_20251104.md
-DOCKER_CPU_OPTIMIZATION.md
-DOCKER_OPTIMIZATION_GUIDE.md
-DOCKER_OPTIMIZATION_REPORT.md
-DOCKER_TROUBLESHOOTING.md
-DOCUMENTATION_INDEX.md
-DSA_EXTRACTION_IMPROVEMENTS.md
-DSA_EXTRACTION_SUCCESS.md
-FEATURE_COMPLETION_REPORT.md
-FINAL_COMPREHENSIVE_TEST_REPORT.md
-FINAL_TEST_REPORT.md
-FIXES_CHECKLIST.txt
-GITHUB_SET_DEFAULT_BRANCH.md
-GITHUB_UPDATE_REPORT.md
-GITHUB_UPLOAD_CHECKLIST.md
-GITHUB_UPLOAD_SUMMARY.md
-GPU_ARCHITECTURE.md
-GPU_DOCKER_SETUP.md
-GPU_OPTIMIZATION_SUMMARY.md
-GPU_QUICKSTART.md
-GPU_TEST_REPORT.md
-GPU_USAGE_GUIDE.md
-LIGHTWEIGHT_MIGRATION_GUIDE.md
-MATCHING_FIX_COMPLETE_REPORT.md
-MATCHING_ISSUE_FIX_REPORT.md
-NVD_LOAD_SEARCH_FEATURE_REPORT.md
-PERFORMANCE_OPTIMIZATION_REPORT.md
-PROJECT_SUMMARY_AND_GITHUB_RELEASE.md
-QUICK_GITHUB_BRANCH_SETUP.md
-QUICK_OPTIMIZATION_GUIDE.md
-QUICK_UPLOAD_GUIDE.md
-README_WSL_ARCHITECTURE.md
-REDIS_OPTIMIZATION_REPORT.md
-REDIS_TEST_REPORT.md
-SELENIUM_SETUP.md
-SELENIUM_VERSION_SUMMARY.md
-STARTUP_SUCCESS_REPORT.md
-SYSTEM_OPTIMIZATION_REPORT.md
-SYSTEM_STATUS.md
-SYSTEM_TEST_REPORT.md
-WORKSPACE_CHECK_SUMMARY.md
-WORKSPACE_ISSUES_REPORT.md
-claude code Ubuntu.txt
-files_to_delete.txt
+# Backup code files (not in use)
+cve_integrated_gui_sqlite_backup*.py
+*_sqlite_backup*.py
 
-# Backup and temp files
-cve_integrated_gui_sqlite_backup_20251104.py
-init-vector-db.sql
-llm_config.py.example
+# Helper modules (not needed for main program)
+llm_config.py
+ollama_llm_service.py
+qwen_assistant.py
+hybrid_data_manager.py
+unified_data_manager.py
+dell_dsa_scraper.py
+dell_dsa_scraper_selenium.py
+
+# Startup scripts (use start_cve_gui.bat/sh instead)
 run_cve_test.bat
 test_gpu_services.sh
 start_cve_wsl_redis.sh
 start_gpu_services.sh
 start_gpu_wsl.sh
 
-# Archive files
-archive/
-backups/
-
-# Documentation directory (if not needed in the main project)
-docs/
-
-# WSL config example if not needed
+# Temporary and archived reports/documentation
+# These should be archived separately, not in main repo
+BUG_FIX_REPORT*.md
+CLEANUP_*.md
+COMPLETE_*.md
+DATA_*.md
+DELL_BUG*.md
+DELL_DATA*.md
+DELL_DISPLAY*.md
+DEPLOYMENT_*.md
+DOCKER_*.md
+DSA_*.md
+FEATURE_*.md
+FINAL_*.md
+GITHUB_*.md
+GPU_*.md
+LIGHTWEIGHT_*.md
+MATCHING_*.md
+PERFORMANCE_*.md
+PROJECT_SUMMARY*.md
+QUICK_GITHUB*.md
+QUICK_OPTIMIZATION*.md
+QUICK_UPLOAD*.md
+README_WSL*.md
+REDIS_OPTIMIZATION*.md
+REDIS_TEST*.md
+SELENIUM_*.md
+STARTUP_*.md
+SYSTEM_*.md
+WORKSPACE_*.md
+CODE_SCALE*.md
+NVD_*.md
+DOCUMENTATION_INDEX.md
+FIXES_CHECKLIST.txt
+files_to_delete.txt
+claude code Ubuntu.txt
+CONFIG.md
 .wslconfig.example
+init-vector-db.sql
