@@ -129,6 +129,7 @@ class CVEIntegratedGUI:
 
         # 创建数据库连接（允许多线程）
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.db_conn = self.conn  # 为了兼容旧代码，设置db_conn别名
 
         # SQLite 性能优化配置
         optimizations = [
@@ -189,6 +190,21 @@ class CVEIntegratedGUI:
                 )
             ''')
 
+            # AI解决方案表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ai_solutions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cve_id TEXT NOT NULL,
+                    dell_advisory_id TEXT NOT NULL,
+                    analysis_time TEXT NOT NULL,
+                    model_name TEXT,
+                    prompt TEXT,
+                    result TEXT,
+                    status TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             # Create indexes for better query performance
             # Index on published_date for date-based queries
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_cves_published_date ON cves(published_date)")
@@ -197,6 +213,11 @@ class CVEIntegratedGUI:
             # Index for Dell advisories
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_published_date ON dell_advisories(published_date)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_cve_ids ON dell_advisories(cve_ids)")
+
+            # Index for AI solutions
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_cve ON ai_solutions(cve_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_advisory ON ai_solutions(dell_advisory_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_time ON ai_solutions(analysis_time)")
 
             self.conn.commit()
         except sqlite3.Error as e:
@@ -963,11 +984,15 @@ class CVEIntegratedGUI:
         self.matched_frame = tk.Frame(self.notebook, bg="white")
         self.notebook.add(self.matched_frame, text="🔗 CVE-Dell 关联")
 
-        # 4. 统计分析标签页
+        # 4. 解决方案标签页
+        self.solution_frame = tk.Frame(self.notebook, bg="white")
+        self.notebook.add(self.solution_frame, text="💡 解决方案")
+
+        # 5. 统计分析标签页
         self.stats_frame = tk.Frame(self.notebook, bg="white")
         self.notebook.add(self.stats_frame, text="📈 统计分析")
 
-        # 5. 日志标签页
+        # 6. 日志标签页
         self.log_frame = tk.Frame(self.notebook, bg="white")
         self.notebook.add(self.log_frame, text="📝 操作日志")
 
@@ -975,6 +1000,7 @@ class CVEIntegratedGUI:
         self.create_nvd_view()
         self.create_dell_view()
         self.create_matched_view()
+        self.create_solution_view()
         self.create_stats_view()
         self.create_log_view()
 
@@ -1408,6 +1434,21 @@ class CVEIntegratedGUI:
         )
         refresh_btn.pack(side=tk.LEFT, padx=5)
 
+        # AI解决方案按钮
+        ai_solution_btn = tk.Button(
+            info_frame,
+            text="🤖 AI解决方案",
+            command=self.ai_solution_click,
+            bg=self.info_color,
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        ai_solution_btn.pack(side=tk.LEFT, padx=5)
+
         # 数据展示区域
         data_container = tk.Frame(self.matched_frame, bg="white")
         data_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
@@ -1460,6 +1501,120 @@ class CVEIntegratedGUI:
 
         # 绑定双击事件
         self.matched_tree.bind("<Double-1>", self.on_matched_item_double_click)
+
+    def create_solution_view(self):
+        """创建AI解决方案视图"""
+        # 说明文本
+        info_frame = tk.Frame(self.solution_frame, bg="white", pady=10)
+        info_frame.pack(fill=tk.X, padx=10)
+
+        info_label = tk.Label(
+            info_frame,
+            text="此页面显示AI解决方案分析的历史记录。选中项目可查看详细分析结果",
+            bg="white",
+            font=("Microsoft YaHei", 10),
+            fg=self.info_color
+        )
+        info_label.pack(side=tk.LEFT)
+
+        # 导出和清空按钮
+        export_btn = tk.Button(
+            info_frame,
+            text="📥 导出历史记录",
+            command=self.export_solution_history,
+            bg=self.success_color,
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        export_btn.pack(side=tk.RIGHT, padx=5)
+
+        clear_btn = tk.Button(
+            info_frame,
+            text="🗑️ 清空历史记录",
+            command=self.clear_solution_history,
+            bg=self.danger_color,
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        clear_btn.pack(side=tk.RIGHT, padx=5)
+
+        # 历史记录展示区域
+        data_container = tk.Frame(self.solution_frame, bg="white")
+        data_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        # 创建 Treeview 来展示历史记录
+        columns = ("时间戳", "CVE ID", "Dell公告", "分析状态", "结果预览")
+
+        # 创建滚动条
+        tree_scroll_y = tk.Scrollbar(data_container, orient=tk.VERTICAL)
+        tree_scroll_x = tk.Scrollbar(data_container, orient=tk.HORIZONTAL)
+
+        self.solution_tree = ttk.Treeview(
+            data_container,
+            columns=columns,
+            show="headings",
+            yscrollcommand=tree_scroll_y.set,
+            xscrollcommand=tree_scroll_x.set,
+            height=10
+        )
+
+        # 配置滚动条
+        tree_scroll_y.config(command=self.solution_tree.yview)
+        tree_scroll_x.config(command=self.solution_tree.xview)
+
+        # 设置列标题和宽度
+        self.solution_tree.heading("时间戳", text="分析时间")
+        self.solution_tree.heading("CVE ID", text="CVE 编号")
+        self.solution_tree.heading("Dell公告", text="Dell 公告 ID")
+        self.solution_tree.heading("分析状态", text="分析状态")
+        self.solution_tree.heading("结果预览", text="结果预览")
+
+        self.solution_tree.column("时间戳", width=180, minwidth=150)
+        self.solution_tree.column("CVE ID", width=150, minwidth=100)
+        self.solution_tree.column("Dell公告", width=150, minwidth=100)
+        self.solution_tree.column("分析状态", width=100, minwidth=80)
+        self.solution_tree.column("结果预览", width=400, minwidth=300)
+
+        # 布局
+        self.solution_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
+        tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 绑定双击事件
+        self.solution_tree.bind("<Double-1>", self.on_solution_item_double_click)
+
+        # 详细结果显示区域
+        detail_frame = tk.Frame(self.solution_frame, bg="white")
+        detail_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        tk.Label(
+            detail_frame,
+            text="详细分析结果",
+            bg="white",
+            font=("Microsoft YaHei", 12, "bold")
+        ).pack(anchor="w", pady=(10, 5))
+
+        self.solution_detail_text = scrolledtext.ScrolledText(
+            detail_frame,
+            wrap=tk.WORD,
+            width=100,
+            height=8,
+            font=("Consolas", 9),
+            bg="#f8f9fa"
+        )
+        self.solution_detail_text.pack(fill=tk.BOTH, expand=True)
+
+        # 初始化数据
+        self.solution_history = []
+        self.load_ai_solution_history()
 
     def create_stats_view(self):
         """创建统计视图"""
@@ -3179,6 +3334,413 @@ Dell 安全公告详细信息
 
         text.insert(tk.END, detail_text)
         text.config(state=tk.DISABLED)
+
+    # ==================== AI解决方案功能 ====================
+
+    def ai_solution_click(self):
+        """AI解决方案按钮点击事件"""
+        try:
+            # 获取当前选中的关联数据
+            selection = self.matched_tree.selection()
+
+            if not selection:
+                messagebox.showwarning("提示", "请先选择要分析的CVE-Dell关联数据")
+                return
+
+            # 收集所有选中的数据用于AI分析
+            selected_data = []
+            for item_id in selection:
+                item = self.matched_tree.item(item_id)
+                values = item['values']
+                cve_id = values[0]
+                severity = values[1]
+                cvss_score = values[2]
+                advisory_id = values[3]
+                affected_product = values[4]
+
+                selected_data.append({
+                    'cve_id': cve_id,
+                    'severity': severity,
+                    'cvss_score': cvss_score,
+                    'advisory_id': advisory_id,
+                    'affected_product': affected_product
+                })
+
+            # 如果选中多个，只处理第一个（可后续扩展）
+            data = selected_data[0]
+            cve_id = data['cve_id']
+            advisory_id = data['advisory_id']
+
+            # 查找详细数据
+            cve_detail = None
+            dell_detail = None
+
+            for cve in self.cve_data:
+                if cve.get('cve_id') == cve_id:
+                    cve_detail = cve
+                    break
+
+            for advisory in self.dell_advisories:
+                if advisory.get('dell_security_advisory') == advisory_id:
+                    dell_detail = advisory
+                    break
+
+            if not cve_detail:
+                # 尝试从数据库查询
+                try:
+                    with self.db_lock:
+                        cursor = self.db_conn.cursor()
+                        cursor.execute(
+                            "SELECT * FROM cves WHERE cve_id = ?",
+                            (cve_id,)
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            # 将数据库行转换为字典
+                            cols = [desc[0] for desc in cursor.description]
+                            cve_detail = dict(zip(cols, row))
+                except Exception as e:
+                    self.log(f"从数据库查询CVE数据失败: {str(e)}")
+
+            if not dell_detail:
+                # 尝试从数据库查询
+                try:
+                    with self.db_lock:
+                        cursor = self.db_conn.cursor()
+                        cursor.execute(
+                            "SELECT * FROM dell_advisories WHERE dell_security_advisory = ?",
+                            (advisory_id,)
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            cols = [desc[0] for desc in cursor.description]
+                            dell_detail = dict(zip(cols, row))
+                except Exception as e:
+                    self.log(f"从数据库查询Dell公告数据失败: {str(e)}")
+
+            if cve_detail and dell_detail:
+                # 在后台线程中调用AI分析
+                self.log(f"正在调用AI分析: {cve_id} - {advisory_id}...")
+                threading.Thread(
+                    target=self._call_ai_solution_thread,
+                    args=(cve_detail, dell_detail),
+                    daemon=True
+                ).start()
+            else:
+                messagebox.showerror("错误", "无法找到完整的CVE或Dell公告数据")
+
+        except Exception as e:
+            error_msg = f"AI解决方案处理失败: {str(e)}"
+            self.log(error_msg)
+            messagebox.showerror("错误", error_msg)
+
+    def _call_ai_solution_thread(self, cve_data, dell_advisory_data):
+        """在后台线程中调用AI分析"""
+        try:
+            # 读取环境变量配置
+            model_name = os.getenv("qwen3-max-2026-01-23", "qwen-max-latest")
+            api_key = os.getenv("QWEN_API_KEY", os.getenv("DASHSCOPE_API_KEY"))
+            base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+            if not api_key:
+                raise ValueError("Qwen API密钥未设置。请设置QWEN_API_KEY或DASHSCOPE_API_KEY环境变量")
+
+            # 构建AI请求的提示
+            prompt = self._build_ai_solution_prompt(cve_data, dell_advisory_data)
+
+            # 调用Qwen API (OpenAI兼容)
+            try:
+                from openai import OpenAI
+
+                client = OpenAI(
+                    api_key=api_key,
+                    base_url=base_url
+                )
+
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "你是一个企业级安全顾问，专业提供CVE漏洞分析和解决方案建议"
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000
+                )
+
+                solution_result = response.choices[0].message.content
+
+                # 在主线程中显示结果
+                self.root.after(
+                    0,
+                    self._show_ai_solution_result,
+                    solution_result,
+                    cve_data,
+                    dell_advisory_data
+                )
+
+            except ImportError:
+                raise ImportError("openai库未安装。请运行: pip install openai")
+            except Exception as e:
+                error_msg = f"AI API调用失败: {str(e)}"
+                self.root.after(0, self.log, error_msg)
+                self.root.after(0, messagebox.showerror, "错误", error_msg)
+
+        except Exception as e:
+            error_msg = f"AI解决方案分析失败: {str(e)}"
+            self.root.after(0, self.log, error_msg)
+            self.root.after(0, messagebox.showerror, "错误", error_msg)
+
+    def _build_ai_solution_prompt(self, cve_data, dell_advisory_data):
+        """构建AI分析的提示词"""
+        prompt = f"""
+请为以下CVE漏洞和Dell安全公告提供专业的安全解决方案分析：
+
+【CVE信息】
+- CVE编号: {cve_data.get('cve_id', 'N/A')}
+- 严重等级: {cve_data.get('cvss_severity', '未知')}
+- CVSS评分: {cve_data.get('cvss_score', 'N/A')}
+- 发布日期: {cve_data.get('published_date', 'N/A')}
+- 描述: {cve_data.get('description', '无详细描述')[:500]}
+
+【Dell安全公告】
+- 公告编号: {dell_advisory_data.get('dell_security_advisory', 'N/A')}
+- 标题: {dell_advisory_data.get('title', 'N/A')}
+- 发布日期: {dell_advisory_data.get('published_date', 'N/A')}
+- 影响产品: {', '.join([p.get('name', 'N/A') for p in dell_advisory_data.get('affected_products', [])])}
+
+【分析要求】
+请提供以下内容：
+1. 漏洞详细分析：包括漏洞原理、攻击向量和影响范围
+2. Dell受影响产品清单及版本范围
+3. 推荐的修复和缓解方案
+4. 临时解决措施（如果完整修复不可用）
+5. 监控和检测建议
+6. 相关参考资源和链接
+
+请以专业、结构清晰的格式组织答案。
+"""
+        return prompt
+
+    def _show_ai_solution_result(self, result, cve_data, dell_advisory_data):
+        """显示AI分析结果"""
+        try:
+            # 保存到数据库
+            self.save_ai_solution_to_db(cve_data, dell_advisory_data, result, "成功")
+
+            # 刷新解决方案列表
+            self.load_ai_solution_history()
+
+            # 在详细结果区域显示
+            if hasattr(self, 'solution_detail_text'):
+                self.solution_detail_text.config(state=tk.NORMAL)
+                self.solution_detail_text.delete(1.0, tk.END)
+
+                header = f"""
+【AI解决方案分析】
+CVE编号: {cve_data.get('cve_id')} | 公告ID: {dell_advisory_data.get('dell_security_advisory')}
+分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{'=' * 80}
+
+"""
+                self.solution_detail_text.insert(tk.END, header)
+                self.solution_detail_text.insert(tk.END, result)
+                self.solution_detail_text.config(state=tk.DISABLED)
+
+            # 切换到解决方案标签页
+            self.notebook.select(self.notebook.tabs().index(self.solution_frame))
+
+            self.log(f"AI分析完成: {cve_data.get('cve_id')}")
+
+        except Exception as e:
+            error_msg = f"显示分析结果失败: {str(e)}"
+            self.log(error_msg)
+            messagebox.showerror("错误", error_msg)
+
+    def save_ai_solution_to_db(self, cve_data, dell_advisory_data, result, status="成功"):
+        """保存AI分析结果到数据库"""
+        try:
+            with self.db_lock:
+                cursor = self.db_conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO ai_solutions
+                    (cve_id, dell_advisory_id, analysis_time, model_name, prompt, result, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cve_data.get('cve_id'),
+                        dell_advisory_data.get('dell_security_advisory'),
+                        datetime.now().isoformat(),
+                        os.getenv("qwen3-max-2026-01-23", "qwen-max-latest"),
+                        "",  # 提示词可选
+                        result[:10000],  # 限制长度
+                        status
+                    )
+                )
+                self.db_conn.commit()
+        except sqlite3.OperationalError as e:
+            # 表可能不存在，尝试创建
+            self.log(f"数据库操作失败，尝试创建ai_solutions表: {str(e)}")
+
+    def load_ai_solution_history(self):
+        """从数据库加载历史记录"""
+        try:
+            # 清空TreeView
+            for item in self.solution_tree.get_children():
+                self.solution_tree.delete(item)
+
+            with self.db_lock:
+                cursor = self.db_conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, cve_id, dell_advisory_id, analysis_time, status, result
+                    FROM ai_solutions
+                    ORDER BY analysis_time DESC
+                    LIMIT 100
+                    """
+                )
+                rows = cursor.fetchall()
+
+                for row in rows:
+                    id, cve_id, advisory_id, analysis_time, status, result = row
+
+                    # 格式化时间戳
+                    try:
+                        dt = datetime.fromisoformat(analysis_time)
+                        time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    except:
+                        time_str = analysis_time
+
+                    # 生成结果预览
+                    preview = result[:100].replace('\n', ' ') if result else "无结果"
+
+                    # 状态颜色标签
+                    tag = "success" if status == "成功" else "error"
+
+                    self.solution_tree.insert(
+                        "",
+                        tk.END,
+                        values=(time_str, cve_id, advisory_id, status, preview),
+                        tags=(tag,)
+                    )
+
+                    # 存储完整结果供双击查看
+                    self.solution_history.append({
+                        'id': id,
+                        'cve_id': cve_id,
+                        'advisory_id': advisory_id,
+                        'time': time_str,
+                        'status': status,
+                        'result': result
+                    })
+
+            # 配置标签样式
+            self.solution_tree.tag_configure("success", background="#f0f0f0", foreground="#27ae60")
+            self.solution_tree.tag_configure("error", background="#fff3f3", foreground="#e74c3c")
+
+        except sqlite3.OperationalError:
+            self.log("ai_solutions表不存在，暂无历史记录")
+        except Exception as e:
+            self.log(f"加载AI解决方案历史记录失败: {str(e)}")
+
+    def on_solution_item_double_click(self, event):
+        """处理解决方案项目双击事件"""
+        selection = self.solution_tree.selection()
+        if selection:
+            item = self.solution_tree.item(selection[0])
+            values = item['values']
+
+            # 从历史记录中找完整结果
+            cve_id = values[1]
+            advisory_id = values[2]
+
+            for history in self.solution_history:
+                if history['cve_id'] == cve_id and history['advisory_id'] == advisory_id:
+                    # 显示详细结果
+                    self.solution_detail_text.config(state=tk.NORMAL)
+                    self.solution_detail_text.delete(1.0, tk.END)
+
+                    header = f"""
+【AI解决方案详情】
+CVE编号: {cve_id} | 公告ID: {advisory_id}
+分析时间: {history['time']} | 状态: {history['status']}
+{'=' * 80}
+
+"""
+                    self.solution_detail_text.insert(tk.END, header)
+                    self.solution_detail_text.insert(tk.END, history['result'])
+                    self.solution_detail_text.config(state=tk.DISABLED)
+                    break
+
+    def export_solution_history(self):
+        """导出解决方案历史记录"""
+        try:
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("文本文件", "*.txt"), ("CSV文件", "*.csv"), ("所有文件", "*.*")]
+            )
+
+            if not filepath:
+                return
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                if filepath.endswith('.csv'):
+                    import csv
+                    writer = csv.writer(f)
+                    writer.writerow(['分析时间', 'CVE编号', '公告编号', '分析状态', '结果'])
+                    for history in self.solution_history:
+                        writer.writerow([
+                            history['time'],
+                            history['cve_id'],
+                            history['advisory_id'],
+                            history['status'],
+                            history['result'][:200]
+                        ])
+                else:
+                    for history in self.solution_history:
+                        f.write(f"\n{'=' * 80}\n")
+                        f.write(f"CVE编号: {history['cve_id']}\n")
+                        f.write(f"公告编号: {history['advisory_id']}\n")
+                        f.write(f"分析时间: {history['time']}\n")
+                        f.write(f"状态: {history['status']}\n")
+                        f.write(f"\n{history['result']}\n")
+
+            self.log(f"解决方案历史记录已导出: {filepath}")
+            messagebox.showinfo("成功", f"历史记录已导出到:\n{filepath}")
+
+        except Exception as e:
+            error_msg = f"导出历史记录失败: {str(e)}"
+            self.log(error_msg)
+            messagebox.showerror("错误", error_msg)
+
+    def clear_solution_history(self):
+        """清空解决方案历史记录"""
+        if not messagebox.askyesno("确认", "确定要清空所有AI解决方案历史记录吗？"):
+            return
+
+        try:
+            with self.db_lock:
+                cursor = self.db_conn.cursor()
+                cursor.execute("DELETE FROM ai_solutions")
+                self.db_conn.commit()
+
+            self.solution_history = []
+            self.load_ai_solution_history()
+            self.log("AI解决方案历史记录已清空")
+            messagebox.showinfo("成功", "历史记录已清空")
+
+        except sqlite3.OperationalError:
+            self.log("ai_solutions表不存在")
+        except Exception as e:
+            error_msg = f"清空历史记录失败: {str(e)}"
+            self.log(error_msg)
+            messagebox.showerror("错误", error_msg)
 
     def on_matched_item_double_click(self, event):
         """处理关联项目双击事件"""
