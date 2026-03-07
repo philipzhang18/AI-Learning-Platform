@@ -7,8 +7,19 @@ echo.
 
 cd /D E:\AI\Claude\CVE
 
+REM 从 .env 读取 REDIS_PASSWORD 作为 sudo 密码
+set "SUDO_PASS="
+for /f "tokens=1,* delims==" %%a in ('findstr /b "REDIS_PASSWORD=" .env') do (
+    if not "%%b"=="" set "SUDO_PASS=%%b"
+)
+
 echo 正在 WSL 中启动 Redis...
-wsl sudo service redis-server start
+if defined SUDO_PASS (
+    echo %SUDO_PASS%| wsl sudo -S service redis-server start 2>nul
+) else (
+    echo [警告] .env 中未设置 REDIS_PASSWORD，需手动输入密码
+    wsl sudo service redis-server start
+)
 timeout /t 2 /nobreak >nul
 
 echo 验证 Redis 连接...

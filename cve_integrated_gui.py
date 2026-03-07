@@ -1,5 +1,5 @@
 """
-CVE漏洞检测系统(Dell安全公告版)
+智能知识学习平台
 集成 NVD CVE 数据和 Dell 安全公告
 支持离线数据查看和 CVE ID 关联匹配
 """
@@ -12,7 +12,7 @@ import json
 import csv
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
 from pathlib import Path
 import threading
 import queue
@@ -20,6 +20,15 @@ import os
 import atexit
 import signal
 import sys
+import urllib.request
+import urllib.parse
+
+# 日历组件（可选）
+try:
+    from tkcalendar import Calendar
+    HAS_TKCALENDAR = True
+except ImportError:
+    HAS_TKCALENDAR = False
 
 # 导入自定义模块
 from collect_cves import CVECollector
@@ -32,7 +41,7 @@ class CVEIntegratedGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("CVE漏洞检测系统(Dell安全公告版)")
+        self.root.title("智能知识学习平台")
         self.root.geometry("1400x900")
 
         # 设置主题颜色
@@ -62,14 +71,20 @@ class CVEIntegratedGUI:
         # 数据存储
         self.cve_data = []
         self.dell_advisories = []
+        self.matched_items_cache = []  # 关联数据缓存，用于搜索过滤
         self.is_collecting = False
         self.is_collecting_dell = False
 
-        # IT新闻早晚报数据
+        # IT新闻简报数据
         self.news_articles = []          # 采集到的新闻文章列表
         self.is_collecting_news = False  # 新闻采集状态标志
         self.news_brief_text = ""        # 当前生成的简报文本
         self._tts_process = None         # TTS 播放子进程句柄
+
+        # 天气数据
+        self._weather_config = {}        # 天气配置（城市等）
+        self._weather_daily_cache = {}   # 日期→天气数据缓存
+        self._weather_city_coords = None # 当前城市经纬度 (lat, lon, name)
 
         # 智能学习数据
         self.learn_messages = []         # 费曼对话历史
@@ -217,6 +232,41 @@ class CVEIntegratedGUI:
                 )
             ''')
 
+            # IT新闻简报表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS news_briefs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    brief_date TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    articles_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 播客脚本表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS podcast_scripts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    script_date TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 学习对话记录表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS learn_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic TEXT NOT NULL,
+                    level TEXT,
+                    source_type TEXT,
+                    source_content TEXT,
+                    conversation TEXT NOT NULL,
+                    summary TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             # Create indexes for better query performance
             # Index on published_date for date-based queries
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_cves_published_date ON cves(published_date)")
@@ -230,6 +280,14 @@ class CVEIntegratedGUI:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_cve ON ai_solutions(cve_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_advisory ON ai_solutions(dell_advisory_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_time ON ai_solutions(analysis_time)")
+
+            # Index for news briefs and podcast scripts
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_news_briefs_date ON news_briefs(brief_date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_podcast_scripts_date ON podcast_scripts(script_date)")
+
+            # Index for learn sessions
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_sessions_topic ON learn_sessions(topic)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_sessions_created ON learn_sessions(created_at)")
 
             self.conn.commit()
         except sqlite3.Error as e:
@@ -973,7 +1031,7 @@ class CVEIntegratedGUI:
 
         title_label = tk.Label(
             header_frame,
-            text="🛡️ CVE漏洞检测系统(Dell安全公告版)",
+            text="🛡️ 智能知识学习平台",
             font=("Microsoft YaHei", 24, "bold"),
             fg="white",
             bg=self.primary_color
@@ -984,9 +1042,9 @@ class CVEIntegratedGUI:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # 0. IT新闻早晚报标签页（放在最前面）
+        # 0. IT新闻简报标签页（放在最前面）
         self.news_frame = tk.Frame(self.notebook, bg="white")
-        self.news_tab_id = self.notebook.add(self.news_frame, text="📰 IT新闻早晚报")
+        self.news_tab_id = self.notebook.add(self.news_frame, text="📰 IT新闻简报")
 
         # 1. NVD CVE 数据标签页
         self.nvd_frame = tk.Frame(self.notebook, bg="white")
@@ -1077,7 +1135,7 @@ class CVEIntegratedGUI:
         self.progress_text.pack(side=tk.RIGHT, padx=(5, 0))
         self.progress_text.pack_forget()  # Hide by default
 
-    # ==================== IT新闻早晚报 ====================
+    # ==================== IT新闻简报 ====================
 
     # IT新闻 RSS 源配置
     IT_NEWS_RSS_FEEDS = [
@@ -1091,15 +1149,66 @@ class CVEIntegratedGUI:
         {"name": "Wired",            "url": "https://www.wired.com/feed/rss"},
     ]
 
+    # 重点城市列表（含经纬度，免去地理编码请求）
+    MAJOR_CITIES = [
+        {"name": "北京", "lat": 39.9042, "lon": 116.4074},
+        {"name": "上海", "lat": 31.2304, "lon": 121.4737},
+        {"name": "广州", "lat": 23.1291, "lon": 113.2644},
+        {"name": "深圳", "lat": 22.5431, "lon": 114.0579},
+        {"name": "杭州", "lat": 30.2741, "lon": 120.1551},
+        {"name": "成都", "lat": 30.5728, "lon": 104.0668},
+        {"name": "武汉", "lat": 30.5928, "lon": 114.3055},
+        {"name": "南京", "lat": 32.0603, "lon": 118.7969},
+        {"name": "重庆", "lat": 29.4316, "lon": 106.9123},
+        {"name": "西安", "lat": 34.3416, "lon": 108.9398},
+        {"name": "天津", "lat": 39.3434, "lon": 117.3616},
+        {"name": "苏州", "lat": 31.2990, "lon": 120.5853},
+        {"name": "厦门", "lat": 24.4798, "lon": 118.0894},
+        {"name": "长沙", "lat": 28.2282, "lon": 112.9388},
+        {"name": "青岛", "lat": 36.0671, "lon": 120.3826},
+        {"name": "大连", "lat": 38.9140, "lon": 121.6147},
+        {"name": "郑州", "lat": 34.7466, "lon": 113.6253},
+        {"name": "沈阳", "lat": 41.8057, "lon": 123.4315},
+        {"name": "合肥", "lat": 31.8206, "lon": 117.2272},
+        {"name": "昆明", "lat": 25.0389, "lon": 102.7183},
+    ]
+
+    # Open-Meteo 天气码 → 中文描述
+    WEATHER_CODE_DESC = {
+        0: '晴', 1: '晴间多云', 2: '多云', 3: '阴',
+        45: '雾', 48: '雾霜',
+        51: '小雨', 53: '中雨', 55: '大雨', 56: '小冻雨', 57: '大冻雨',
+        61: '小雨', 63: '中雨', 65: '大雨', 66: '小冻雨', 67: '大冻雨',
+        71: '小雪', 73: '中雪', 75: '大雪', 77: '霰',
+        80: '小阵雨', 81: '阵雨', 82: '强阵雨',
+        85: '小阵雪', 86: '大阵雪',
+        95: '雷暴', 96: '雷暴伴冰雹', 99: '雷暴伴大冰雹',
+    }
+
+    # 天气码 → Emoji
+    WEATHER_CODE_ICON = {
+        0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️',
+        45: '🌫️', 48: '🌫️',
+        51: '🌧️', 53: '🌧️', 55: '🌧️', 56: '🌧️', 57: '🌧️',
+        61: '🌧️', 63: '🌧️', 65: '🌧️', 66: '🌧️', 67: '🌧️',
+        71: '❄️', 73: '❄️', 75: '❄️', 77: '❄️',
+        80: '🌦️', 81: '🌦️', 82: '🌦️',
+        85: '❄️', 86: '❄️',
+        95: '⛈️', 96: '⛈️', 99: '⛈️',
+    }
+
     def create_news_view(self):
-        """创建 IT新闻早晚报 标签页内容"""
+        """创建 IT新闻简报 标签页内容（含天气、日历、数据库保存）"""
+        # 加载天气配置
+        self._load_weather_config()
+
         # ── 顶部控制栏 ──────────────────────────────────────────────
         ctrl = tk.Frame(self.news_frame, bg="white", pady=8)
         ctrl.pack(fill=tk.X, padx=10)
 
         tk.Label(
             ctrl,
-            text="IT新闻早晚报 — 每日自动采集科技资讯，AI生成500字简报",
+            text="IT新闻简报 — 每日自动采集科技资讯，AI生成500字简报",
             bg="white",
             font=("Microsoft YaHei", 11, "bold"),
             fg=self.primary_color,
@@ -1129,19 +1238,106 @@ class CVEIntegratedGUI:
         )
         self.news_podcast_btn.pack(side=tk.LEFT, padx=4)
 
-        # ── 水平分割：左=文章区  右=简报/播客 ──────────────────────
+        # ── 天气与穿衣建议栏 ────────────────────────────────────────
+        weather_bar = tk.Frame(self.news_frame, bg="#e8f4fd", pady=6)
+        weather_bar.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        # 城市选择
+        tk.Label(
+            weather_bar, text="🌤️ 城市：", bg="#e8f4fd",
+            font=("Microsoft YaHei", 10, "bold"), fg="#1a5276",
+        ).pack(side=tk.LEFT, padx=(8, 2))
+
+        city_names = [c["name"] for c in self.MAJOR_CITIES]
+        self._weather_city_var = tk.StringVar()
+        self._weather_city_combo = ttk.Combobox(
+            weather_bar, textvariable=self._weather_city_var,
+            values=city_names, width=8, font=("Microsoft YaHei", 9), state="readonly",
+        )
+        self._weather_city_combo.pack(side=tk.LEFT, padx=(0, 4))
+        # 恢复上次保存的城市
+        saved_city = self._weather_config.get("city", "上海")
+        if saved_city in city_names:
+            self._weather_city_combo.set(saved_city)
+        else:
+            self._weather_city_combo.set("上海")
+        self._weather_city_combo.bind("<<ComboboxSelected>>", self._on_weather_city_changed)
+
+        tk.Button(
+            weather_bar, text="📍 自动定位", command=self._weather_autolocate,
+            bg="#3498db", fg="white", font=("Microsoft YaHei", 9),
+            padx=6, pady=1, relief=tk.FLAT, cursor="hand2",
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
+            weather_bar, text="🔄 刷新天气", command=self._weather_refresh,
+            bg="#27ae60", fg="white", font=("Microsoft YaHei", 9),
+            padx=6, pady=1, relief=tk.FLAT, cursor="hand2",
+        ).pack(side=tk.LEFT, padx=(0, 12))
+
+        # 天气信息显示
+        self._weather_info_label = tk.Label(
+            weather_bar, text="点击「刷新天气」获取天气信息",
+            bg="#e8f4fd", font=("Microsoft YaHei", 10), fg="#2c3e50", anchor="w",
+        )
+        self._weather_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        # ── 水平分割：左=日历+文章区  右=简报/播客 ──────────────────
         h_paned = tk.PanedWindow(
             self.news_frame, orient=tk.HORIZONTAL, bg="#d0d0d0", sashwidth=5, sashrelief=tk.RAISED
         )
         h_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 4))
 
-        # ── 左侧：文章列表（上）+ 文章详情（下）竖向排列 ──────────
+        # ── 左侧：日历（上）+ 文章列表（中）+ 文章详情（下）──────────
         v_paned = tk.PanedWindow(
             h_paned, orient=tk.VERTICAL, bg="#d0d0d0", sashwidth=5, sashrelief=tk.RAISED
         )
         h_paned.add(v_paned, minsize=320, width=380)
 
-        # 上：文章列表
+        # 上：日历模块
+        cal_frame = tk.Frame(v_paned, bg="white")
+        v_paned.add(cal_frame, minsize=200)
+
+        cal_header = tk.Frame(cal_frame, bg="white")
+        cal_header.pack(fill=tk.X, padx=8, pady=(6, 2))
+        tk.Label(
+            cal_header, text="📅 日历 · 资讯存档",
+            bg="white", font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color,
+        ).pack(side=tk.LEFT)
+
+        self._cal_info_label = tk.Label(
+            cal_header, text="", bg="white", font=("Microsoft YaHei", 8), fg="#888",
+        )
+        self._cal_info_label.pack(side=tk.RIGHT, padx=4)
+
+        if HAS_TKCALENDAR:
+            self._calendar = Calendar(
+                cal_frame, selectmode='day', locale='zh_CN',
+                year=datetime.now().year, month=datetime.now().month,
+                day=datetime.now().day,
+                font=("Microsoft YaHei", 9),
+                showweeknumbers=False,
+                borderwidth=0,
+                background='white', foreground='black',
+                headersbackground='#3498db', headersforeground='white',
+                selectbackground='#e74c3c', selectforeground='white',
+                normalbackground='white', normalforeground='#333',
+                weekendbackground='#fef9e7', weekendforeground='#c0392b',
+                othermonthbackground='#f5f5f5', othermonthforeground='#bbb',
+                othermonthwebackground='#f5f5f5', othermonthweforeground='#bbb',
+            )
+            self._calendar.pack(fill=tk.X, padx=8, pady=(0, 4))
+            self._calendar.bind("<<CalendarSelected>>", self._on_calendar_date_selected)
+            # 月份切换时刷新高亮
+            self._calendar.bind("<<CalendarMonthChanged>>", self._on_calendar_month_changed)
+        else:
+            tk.Label(
+                cal_frame, text="（需要安装 tkcalendar: pip install tkcalendar）",
+                bg="white", fg="#999", font=("Microsoft YaHei", 9),
+            ).pack(padx=8, pady=10)
+            self._calendar = None
+
+        # 中：文章列表
         list_frame = tk.Frame(v_paned, bg="white")
         v_paned.add(list_frame, minsize=120)
 
@@ -1188,7 +1384,7 @@ class CVEIntegratedGUI:
         )
         self.news_article_detail.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
 
-        # ── 右侧：简报 / 播客脚本 Notebook ──────────────────────────
+        # ── 右侧：简报 / 播客脚本 / 历史资讯 Notebook ──────────────
         right_frame = tk.Frame(h_paned, bg="white")
         h_paned.add(right_frame, minsize=420)
 
@@ -1253,6 +1449,13 @@ class CVEIntegratedGUI:
         )
         self.tts_stop_btn.pack(side=tk.LEFT, padx=4)
 
+        # 保存脚本按钮
+        tk.Button(
+            pod_tb, text="💾 保存脚本", command=self._save_podcast_script,
+            bg=self.primary_color, fg="white", font=("Microsoft YaHei", 9, "bold"),
+            padx=10, pady=2, relief=tk.FLAT, cursor="hand2",
+        ).pack(side=tk.RIGHT, padx=6)
+
         self.tts_status_label = tk.Label(
             pod_tb, text="", bg="#f5f0e0", font=("Microsoft YaHei", 8), fg="#666",
         )
@@ -1263,6 +1466,24 @@ class CVEIntegratedGUI:
         )
         self.news_podcast_area.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
+        # ── 历史资讯子标签页 ─────────────────────────────────────────
+        history_sub = tk.Frame(self.news_right_notebook, bg="#f0faf0")
+        self.news_right_notebook.add(history_sub, text="📅 历史资讯")
+
+        hist_tb = tk.Frame(history_sub, bg="#e0f0e0", pady=4)
+        hist_tb.pack(fill=tk.X, padx=4, pady=(4, 0))
+
+        self._history_date_label = tk.Label(
+            hist_tb, text="请在日历中选择日期查看历史资讯",
+            bg="#e0f0e0", font=("Microsoft YaHei", 9, "bold"), fg="#2c3e50",
+        )
+        self._history_date_label.pack(side=tk.LEFT, padx=8)
+
+        self._history_area = scrolledtext.ScrolledText(
+            history_sub, wrap=tk.WORD, font=("Microsoft YaHei", 10), bg="#f0faf0",
+        )
+        self._history_area.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
         # ── 底部状态栏 ───────────────────────────────────────────────
         self.news_status_label = tk.Label(
             self.news_frame, text="就绪 — 点击「采集新闻」获取今日科技资讯",
@@ -1272,6 +1493,10 @@ class CVEIntegratedGUI:
 
         # 异步加载可用 TTS 声音
         threading.Thread(target=self._load_sapi_voices, daemon=True).start()
+
+        # 初始化：刷新日历高亮 + 自动查询天气
+        self.root.after(500, self._refresh_calendar_tags)
+        self.root.after(800, self._weather_refresh)
 
     def _load_sapi_voices(self):
         """后台查询 SAPI 声音列表：自动注册 OneCore 中文男声，过滤非中文声音"""
@@ -1571,31 +1796,50 @@ foreach ($tokenName in $targets.Keys) {
         self.log("IT新闻简报生成完成")
 
     def _save_news_brief(self):
-        """保存简报到文件，方便回看"""
+        """保存简报到数据库和文件"""
         brief = self.news_brief_area.get(1.0, tk.END).strip()
         if not brief:
             messagebox.showwarning("提示", "简报内容为空，请先生成简报")
             return
-        # 保存目录
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 保存到数据库
+        try:
+            articles_json = json.dumps(
+                [{"title": a.get("title", ""), "source": a.get("source", ""),
+                  "url": a.get("url", "")} for a in self.news_articles],
+                ensure_ascii=False,
+            )
+            with self.db_lock:
+                self.conn.execute(
+                    "INSERT INTO news_briefs (brief_date, content, articles_json) VALUES (?, ?, ?)",
+                    (today, brief, articles_json),
+                )
+                self.conn.commit()
+            self.log(f"简报已保存到数据库（{today}）")
+        except Exception as e:
+            self.log(f"简报保存到数据库失败: {e}")
+
+        # 同时保存到文件
         save_dir = self.data_dir / "news_briefs"
         save_dir.mkdir(exist_ok=True)
         filename = save_dir / f"brief_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         try:
             with open(filename, "w", encoding="utf-8") as f:
-                f.write(f"IT新闻早晚报 — {datetime.now().strftime('%Y年%m月%d日 %H:%M')}\n")
+                f.write(f"IT新闻简报 — {datetime.now().strftime('%Y年%m月%d日 %H:%M')}\n")
                 f.write("=" * 60 + "\n\n")
                 f.write(brief)
                 f.write("\n\n" + "=" * 60 + "\n")
-                # 附上原始文章列表
                 f.write("【原始采集文章列表】\n")
                 for i, art in enumerate(self.news_articles, 1):
                     f.write(f"{i}. [{art['source']}] {art['title']}\n")
                     if art.get("url"):
                         f.write(f"   {art['url']}\n")
-            self.log(f"简报已保存：{filename}")
-            messagebox.showinfo("保存成功", f"简报已保存至：\n{filename}")
         except Exception as e:
-            messagebox.showerror("保存失败", f"写入文件失败：{e}")
+            self.log(f"简报保存到文件失败: {e}")
+
+        # 刷新日历高亮
+        self._refresh_calendar_tags()
+        messagebox.showinfo("保存成功", f"简报已保存至数据库和文件")
 
     def generate_podcast(self):
         """一键生成播客脚本（后台线程）"""
@@ -1767,6 +2011,417 @@ foreach ($tokenName in $targets.Keys) {
         self.tts_stop_btn.config(state=tk.DISABLED)
         self.tts_status_label.config(text="已停止")
 
+    # ==================== 天气功能 ====================
+
+    def _load_weather_config(self):
+        """加载天气配置（城市偏好）"""
+        config_path = self.data_dir / "news_config.json"
+        try:
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    self._weather_config = json.load(f)
+            else:
+                self._weather_config = {"city": "上海"}
+        except Exception:
+            self._weather_config = {"city": "上海"}
+
+    def _save_weather_config(self):
+        """保存天气配置"""
+        config_path = self.data_dir / "news_config.json"
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(self._weather_config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.log(f"保存天气配置失败: {e}")
+
+    def _on_weather_city_changed(self, event=None):
+        """城市选择变更回调"""
+        city = self._weather_city_var.get()
+        self._weather_config["city"] = city
+        self._save_weather_config()
+        # 清除坐标缓存，强制重新定位
+        for c in self.MAJOR_CITIES:
+            if c["name"] == city:
+                self._weather_city_coords = (c["lat"], c["lon"], city)
+                break
+        self._weather_daily_cache.clear()
+        self._weather_refresh()
+
+    def _weather_autolocate(self):
+        """通过 IP 自动定位当前城市"""
+        self._weather_info_label.config(text="正在自动定位...")
+        threading.Thread(target=self._autolocate_thread, daemon=True).start()
+
+    def _autolocate_thread(self):
+        """后台线程：IP 定位"""
+        try:
+            resp = urllib.request.urlopen("https://ipapi.co/json/", timeout=10)
+            data = json.loads(resp.read().decode())
+            city = data.get("city", "")
+            lat = data.get("latitude")
+            lon = data.get("longitude")
+            if city and lat and lon:
+                self._weather_city_coords = (float(lat), float(lon), city)
+                self._weather_config["city"] = city
+                self._weather_config["lat"] = float(lat)
+                self._weather_config["lon"] = float(lon)
+
+                def _update_ui():
+                    # 尝试在下拉框中匹配城市
+                    city_names = [c["name"] for c in self.MAJOR_CITIES]
+                    if city in city_names:
+                        self._weather_city_combo.set(city)
+                    else:
+                        # 非预置城市，添加到下拉框
+                        current_values = list(self._weather_city_combo["values"])
+                        if city not in current_values:
+                            current_values.insert(0, city)
+                            self._weather_city_combo["values"] = current_values
+                        self._weather_city_combo.set(city)
+                    self._save_weather_config()
+                    self._weather_daily_cache.clear()
+                    self._weather_refresh()
+
+                self.root.after(0, _update_ui)
+            else:
+                self.root.after(0, self._weather_info_label.config, {"text": "定位失败，请手动选择城市"})
+        except Exception as e:
+            self.root.after(0, self._weather_info_label.config, {"text": f"定位失败: {e}"})
+
+    def _weather_refresh(self):
+        """刷新天气数据（当前选中日期或今天）"""
+        target_date = datetime.now().strftime("%Y-%m-%d")
+        if HAS_TKCALENDAR and self._calendar:
+            try:
+                sel = self._calendar.get_date()
+                # tkcalendar 返回的日期格式依赖 locale，统一转换
+                if isinstance(sel, str):
+                    for fmt in ("%Y-%m-%d", "%m/%d/%y", "%Y/%m/%d", "%d/%m/%Y"):
+                        try:
+                            target_date = datetime.strptime(sel, fmt).strftime("%Y-%m-%d")
+                            break
+                        except ValueError:
+                            continue
+                elif isinstance(sel, (date_type, datetime)):
+                    target_date = sel.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+        self._weather_info_label.config(text="正在获取天气...")
+        threading.Thread(target=self._fetch_weather_thread, args=(target_date,), daemon=True).start()
+
+    def _get_city_coords(self):
+        """获取当前城市经纬度"""
+        # 优先使用缓存
+        if self._weather_city_coords:
+            return self._weather_city_coords
+
+        city = self._weather_city_var.get() if hasattr(self, '_weather_city_var') else self._weather_config.get("city", "上海")
+
+        # 从预置列表查找
+        for c in self.MAJOR_CITIES:
+            if c["name"] == city:
+                self._weather_city_coords = (c["lat"], c["lon"], city)
+                return self._weather_city_coords
+
+        # 从配置中读取自定义坐标
+        if "lat" in self._weather_config and "lon" in self._weather_config:
+            self._weather_city_coords = (
+                self._weather_config["lat"],
+                self._weather_config["lon"],
+                city,
+            )
+            return self._weather_city_coords
+
+        # 调用 Open-Meteo 地理编码
+        try:
+            geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1&language=zh&format=json"
+            resp = urllib.request.urlopen(geo_url, timeout=10)
+            geo_data = json.loads(resp.read().decode())
+            if geo_data.get("results"):
+                loc = geo_data["results"][0]
+                self._weather_city_coords = (loc["latitude"], loc["longitude"], loc.get("name", city))
+                return self._weather_city_coords
+        except Exception:
+            pass
+
+        # 默认上海
+        self._weather_city_coords = (31.2304, 121.4737, "上海")
+        return self._weather_city_coords
+
+    def _fetch_weather_thread(self, target_date: str):
+        """后台线程：获取天气数据（支持多日预报 + 历史）"""
+        try:
+            coords = self._get_city_coords()
+            lat, lon, city_name = coords
+
+            today = datetime.now().date()
+            target = datetime.strptime(target_date, "%Y-%m-%d").date()
+            diff = (target - today).days
+
+            # Open-Meteo 支持 past_days≤92, forecast_days≤16
+            if -92 <= diff <= 16:
+                if diff <= 0:
+                    past_days = min(abs(diff) + 1, 92)
+                    forecast_days = 1
+                else:
+                    past_days = 1
+                    forecast_days = min(diff + 1, 16)
+
+                url = (
+                    f"https://api.open-meteo.com/v1/forecast?"
+                    f"latitude={lat}&longitude={lon}"
+                    f"&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_sum"
+                    f"&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m"
+                    f"&past_days={past_days}&forecast_days={forecast_days}"
+                    f"&timezone=auto"
+                )
+                resp = urllib.request.urlopen(url, timeout=15)
+                data = json.loads(resp.read().decode())
+
+                # 缓存每日数据
+                daily = data.get("daily", {})
+                dates = daily.get("time", [])
+                t_max = daily.get("temperature_2m_max", [])
+                t_min = daily.get("temperature_2m_min", [])
+                w_codes = daily.get("weather_code", [])
+                precip = daily.get("precipitation_sum", [])
+
+                for i, d in enumerate(dates):
+                    self._weather_daily_cache[d] = {
+                        "temp_max": t_max[i] if i < len(t_max) else None,
+                        "temp_min": t_min[i] if i < len(t_min) else None,
+                        "weather_code": w_codes[i] if i < len(w_codes) else None,
+                        "precipitation": precip[i] if i < len(precip) else None,
+                    }
+
+                # 构建显示文本
+                if target_date in self._weather_daily_cache:
+                    wd = self._weather_daily_cache[target_date]
+                    wc = wd["weather_code"]
+                    icon = self.WEATHER_CODE_ICON.get(wc, '🌈')
+                    desc = self.WEATHER_CODE_DESC.get(wc, '未知')
+                    tmax = wd["temp_max"]
+                    tmin = wd["temp_min"]
+                    avg_temp = round((tmax + tmin) / 2) if tmax is not None and tmin is not None else None
+                    outfit = self._get_outfit_suggestion(avg_temp, desc) if avg_temp is not None else ""
+
+                    # 如果是今天，使用实时数据
+                    if diff == 0 and "current" in data:
+                        cur = data["current"]
+                        cur_temp = round(cur.get("temperature_2m", avg_temp or 0))
+                        cur_wc = cur.get("weather_code", wc)
+                        cur_hum = cur.get("relative_humidity_2m", "")
+                        cur_wind = round(cur.get("wind_speed_10m", 0), 1)
+                        icon = self.WEATHER_CODE_ICON.get(cur_wc, icon)
+                        desc = self.WEATHER_CODE_DESC.get(cur_wc, desc)
+                        outfit = self._get_outfit_suggestion(cur_temp, desc)
+                        info_text = (
+                            f"{icon} {city_name} · {cur_temp}°C · {desc} · "
+                            f"湿度{cur_hum}% · 风速{cur_wind}km/h   |   "
+                            f"穿搭建议：{outfit}"
+                        )
+                    else:
+                        date_label = target_date
+                        info_text = (
+                            f"{icon} {city_name}（{date_label}）· {tmin}~{tmax}°C · {desc}   |   "
+                            f"穿搭建议：{outfit}"
+                        )
+                    self.root.after(0, self._weather_info_label.config, {"text": info_text})
+                else:
+                    self.root.after(0, self._weather_info_label.config, {"text": f"暂无 {target_date} 天气数据"})
+            else:
+                self.root.after(0, self._weather_info_label.config, {"text": f"暂无 {target_date} 天气数据（超出预报范围）"})
+        except Exception as e:
+            self.root.after(0, self._weather_info_label.config, {"text": f"获取天气失败: {e}"})
+
+    def _get_outfit_suggestion(self, temp, description):
+        """根据温度和天气描述生成简短穿搭建议"""
+        if temp is None:
+            return ""
+        if temp <= 0:
+            base = "羽绒服、保暖内衣、围巾、手套、防滑靴"
+        elif temp <= 10:
+            base = "厚外套、毛衣、长裤、保暖鞋"
+        elif temp <= 20:
+            base = "风衣/夹克、长袖衬衫、薄毛衣"
+        elif temp <= 28:
+            base = "T恤、薄长裤/裙子、透气鞋"
+        else:
+            base = "短袖、短裤/连衣裙、防晒帽、太阳镜"
+        # 天气附加建议
+        extra = ""
+        if '雨' in description:
+            extra = " + 雨伞、防水鞋"
+        elif '雪' in description:
+            extra = " + 防滑靴、保暖外套"
+        elif '晴' in description and temp > 25:
+            extra = " + 防晒霜、遮阳帽"
+        elif '风' in description:
+            extra = " + 防风外套"
+        return base + extra
+
+    # ==================== 日历功能 ====================
+
+    def _on_calendar_date_selected(self, event=None):
+        """日历日期选中回调：更新天气 + 显示历史资讯"""
+        if not HAS_TKCALENDAR or not self._calendar:
+            return
+        sel = self._calendar.get_date()
+        if isinstance(sel, str):
+            for fmt in ("%Y-%m-%d", "%m/%d/%y", "%Y/%m/%d", "%d/%m/%Y"):
+                try:
+                    selected_date = datetime.strptime(sel, fmt).strftime("%Y-%m-%d")
+                    break
+                except ValueError:
+                    continue
+            else:
+                selected_date = sel
+        elif isinstance(sel, (date_type, datetime)):
+            selected_date = sel.strftime("%Y-%m-%d")
+        else:
+            selected_date = str(sel)
+
+        # 更新天气
+        self._weather_info_label.config(text=f"正在获取 {selected_date} 天气...")
+        threading.Thread(target=self._fetch_weather_thread, args=(selected_date,), daemon=True).start()
+
+        # 加载历史资讯
+        self._load_history_for_date(selected_date)
+
+    def _on_calendar_month_changed(self, event=None):
+        """日历月份切换回调：刷新高亮"""
+        self.root.after(100, self._refresh_calendar_tags)
+
+    def _refresh_calendar_tags(self):
+        """刷新日历中有数据日期的高亮标记"""
+        if not HAS_TKCALENDAR or not self._calendar:
+            return
+        try:
+            # 清除旧标记
+            self._calendar.calevent_remove('all')
+
+            # 查询所有有数据的日期
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                brief_dates = set()
+                script_dates = set()
+                cursor.execute("SELECT DISTINCT brief_date FROM news_briefs")
+                for row in cursor.fetchall():
+                    brief_dates.add(row[0])
+                cursor.execute("SELECT DISTINCT script_date FROM podcast_scripts")
+                for row in cursor.fetchall():
+                    script_dates.add(row[0])
+
+            all_dates = brief_dates | script_dates
+
+            # 添加标记事件
+            for d_str in all_dates:
+                try:
+                    d = datetime.strptime(d_str, "%Y-%m-%d").date()
+                    if d_str in brief_dates and d_str in script_dates:
+                        tag = "both"
+                    elif d_str in brief_dates:
+                        tag = "brief"
+                    else:
+                        tag = "script"
+                    self._calendar.calevent_create(d, "有数据", tag)
+                except ValueError:
+                    continue
+
+            # 设置标记样式
+            self._calendar.tag_config("brief", background="#27ae60", foreground="white")
+            self._calendar.tag_config("script", background="#f39c12", foreground="white")
+            self._calendar.tag_config("both", background="#8e44ad", foreground="white")
+
+            count = len(all_dates)
+            self._cal_info_label.config(text=f"共 {count} 天有存档" if count else "")
+
+        except Exception as e:
+            self.log(f"刷新日历标记失败: {e}")
+
+    def _load_history_for_date(self, date_str):
+        """加载指定日期的历史资讯（简报+脚本），显示在历史标签页"""
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT content, articles_json, created_at FROM news_briefs WHERE brief_date = ? ORDER BY created_at DESC",
+                    (date_str,),
+                )
+                briefs = cursor.fetchall()
+                cursor.execute(
+                    "SELECT content, created_at FROM podcast_scripts WHERE script_date = ? ORDER BY created_at DESC",
+                    (date_str,),
+                )
+                scripts = cursor.fetchall()
+
+            # 构建显示内容
+            lines = []
+            if briefs:
+                for i, (content, articles_json, created_at) in enumerate(briefs, 1):
+                    lines.append(f"{'='*50}")
+                    lines.append(f"📰 简报 #{i}（保存于 {created_at}）")
+                    lines.append(f"{'='*50}\n")
+                    lines.append(content)
+                    if articles_json:
+                        try:
+                            arts = json.loads(articles_json)
+                            if arts:
+                                lines.append(f"\n{'─'*40}")
+                                lines.append("【原始文章来源】")
+                                for j, a in enumerate(arts, 1):
+                                    lines.append(f"  {j}. [{a.get('source','')}] {a.get('title','')}")
+                                    if a.get('url'):
+                                        lines.append(f"     {a['url']}")
+                        except json.JSONDecodeError:
+                            pass
+                    lines.append("")
+            if scripts:
+                for i, (content, created_at) in enumerate(scripts, 1):
+                    lines.append(f"{'='*50}")
+                    lines.append(f"🎙️ 播客脚本 #{i}（保存于 {created_at}）")
+                    lines.append(f"{'='*50}\n")
+                    lines.append(content)
+                    lines.append("")
+
+            if not briefs and not scripts:
+                lines.append(f"📅 {date_str} 暂无保存的资讯数据")
+                lines.append("")
+                lines.append("提示：生成简报或播客脚本后，点击「保存简报」或「保存脚本」即可存档。")
+
+            self._history_area.delete(1.0, tk.END)
+            self._history_area.insert(tk.END, "\n".join(lines))
+            self._history_date_label.config(text=f"📅 {date_str} 的历史资讯")
+            # 切换到历史标签页
+            self.news_right_notebook.select(2)
+
+        except Exception as e:
+            self._history_area.delete(1.0, tk.END)
+            self._history_area.insert(tk.END, f"加载历史数据失败: {e}")
+
+    # ==================== 保存播客脚本 ====================
+
+    def _save_podcast_script(self):
+        """保存播客脚本到数据库"""
+        script = self.news_podcast_area.get(1.0, tk.END).strip()
+        if not script:
+            messagebox.showwarning("提示", "播客脚本为空，请先生成播客脚本")
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        try:
+            with self.db_lock:
+                self.conn.execute(
+                    "INSERT INTO podcast_scripts (script_date, content) VALUES (?, ?)",
+                    (today, script),
+                )
+                self.conn.commit()
+            self.log(f"播客脚本已保存到数据库（{today}）")
+            self._refresh_calendar_tags()
+            messagebox.showinfo("保存成功", "播客脚本已保存至数据库")
+        except Exception as e:
+            messagebox.showerror("保存失败", f"保存播客脚本失败: {e}")
+
     def create_nvd_view(self):
         """创建 NVD CVE 数据视图"""
         # 控制面板
@@ -1854,12 +2509,12 @@ foreach ($tokenName in $targets.Keys) {
         )
         load_db_btn.pack(side=tk.LEFT, padx=5)
 
-        # 加载本地数据按钮（从JSON文件）
-        load_btn = tk.Button(
+        # AI解决方案按钮
+        nvd_ai_btn = tk.Button(
             left_control,
-            text="📁 加载本地文件",
-            command=self.load_local_nvd_data,
-            bg=self.info_color,
+            text="🤖 AI解决方案",
+            command=self.nvd_ai_solution_click,
+            bg="#9b59b6",
             fg="white",
             font=("Microsoft YaHei", 10, "bold"),
             padx=15,
@@ -1867,7 +2522,7 @@ foreach ($tokenName in $targets.Keys) {
             relief=tk.FLAT,
             cursor="hand2"
         )
-        load_btn.pack(side=tk.LEFT, padx=5)
+        nvd_ai_btn.pack(side=tk.LEFT, padx=5)
 
         # 数据展示区域
         data_container = tk.Frame(self.nvd_frame, bg="white")
@@ -2153,7 +2808,7 @@ foreach ($tokenName in $targets.Keys) {
         tk.Label(search_frame, text="(支持 公告ID、CVE ID、标题、产品搜索；Ctrl/Shift 多选后可删除)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
 
         # 创建 Treeview 来展示 Dell 安全公告
-        columns = ("公告ID", "标题", "CVE IDs", "发布日期", "受影响产品数")
+        columns = ("公告ID", "公告影响等级", "标题", "CVE IDs", "发布日期")
 
         # 创建滚动条
         tree_scroll_y = tk.Scrollbar(data_container, orient=tk.VERTICAL)
@@ -2174,16 +2829,16 @@ foreach ($tokenName in $targets.Keys) {
 
         # 设置列标题和宽度
         self.dell_tree.heading("公告ID", text="公告 ID")
+        self.dell_tree.heading("公告影响等级", text="影响等级")
         self.dell_tree.heading("标题", text="标题")
         self.dell_tree.heading("CVE IDs", text="相关 CVE")
         self.dell_tree.heading("发布日期", text="发布日期")
-        self.dell_tree.heading("受影响产品数", text="受影响产品数")
 
         self.dell_tree.column("公告ID", width=150, minwidth=100)
+        self.dell_tree.column("公告影响等级", width=100, minwidth=70)
         self.dell_tree.column("标题", width=500, minwidth=300)
         self.dell_tree.column("CVE IDs", width=300, minwidth=200)
         self.dell_tree.column("发布日期", width=150, minwidth=100)
-        self.dell_tree.column("受影响产品数", width=120, minwidth=80)
 
         # 布局
         self.dell_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
@@ -2227,7 +2882,7 @@ foreach ($tokenName in $targets.Keys) {
         ai_solution_btn = tk.Button(
             info_frame,
             text="🤖 AI解决方案",
-            command=self.ai_solution_click,
+            command=self.matched_ai_solution_click,
             bg=self.info_color,
             fg="white",
             font=("Microsoft YaHei", 10, "bold"),
@@ -2242,8 +2897,43 @@ foreach ($tokenName in $targets.Keys) {
         data_container = tk.Frame(self.matched_frame, bg="white")
         data_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
+        # 搜索框
+        search_frame = tk.Frame(data_container, bg="white")
+        search_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(search_frame, text="搜索：", bg="white", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=(0, 5))
+        self.matched_search_var = tk.StringVar()
+        matched_search_entry = tk.Entry(search_frame, textvariable=self.matched_search_var, width=35, font=("Microsoft YaHei", 10))
+        matched_search_entry.pack(side=tk.LEFT, padx=(0, 5))
+
+        search_btn = tk.Button(
+            search_frame,
+            text="🔍 搜索",
+            command=self.filter_matched_data,
+            bg=self.info_color,
+            fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        search_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        matched_delete_btn = tk.Button(
+            search_frame,
+            text="🗑 删除选中",
+            command=self.delete_matched_selected,
+            bg=self.danger_color,
+            fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        matched_delete_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Label(search_frame, text="(支持 CVE编号、Dell公告ID 搜索；Ctrl/Shift 多选后可删除)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
+
         # 创建 Treeview 来展示关联数据
-        columns = ("CVE ID", "严重等级", "CVSS评分", "Dell公告", "产品型号", "解决方案")
+        columns = ("CVE ID", "严重等级", "CVSS评分", "Dell公告", "影响等级", "公告内容")
 
         # 创建滚动条
         tree_scroll_y = tk.Scrollbar(data_container, orient=tk.VERTICAL)
@@ -2267,15 +2957,15 @@ foreach ($tokenName in $targets.Keys) {
         self.matched_tree.heading("严重等级", text="严重等级")
         self.matched_tree.heading("CVSS评分", text="CVSS 评分")
         self.matched_tree.heading("Dell公告", text="Dell 公告 ID")
-        self.matched_tree.heading("产品型号", text="受影响产品")
-        self.matched_tree.heading("解决方案", text="解决方案预览")
+        self.matched_tree.heading("影响等级", text="影响等级")
+        self.matched_tree.heading("公告内容", text="公告内容")
 
         self.matched_tree.column("CVE ID", width=150, minwidth=100)
         self.matched_tree.column("严重等级", width=100, minwidth=80)
         self.matched_tree.column("CVSS评分", width=100, minwidth=80)
         self.matched_tree.column("Dell公告", width=150, minwidth=100)
-        self.matched_tree.column("产品型号", width=300, minwidth=200)
-        self.matched_tree.column("解决方案", width=400, minwidth=300)
+        self.matched_tree.column("影响等级", width=100, minwidth=80)
+        self.matched_tree.column("公告内容", width=500, minwidth=300)
 
         # 布局
         self.matched_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
@@ -2334,6 +3024,20 @@ foreach ($tokenName in $targets.Keys) {
             cursor="hand2"
         )
         clear_btn.pack(side=tk.RIGHT, padx=5)
+
+        delete_selected_btn = tk.Button(
+            info_frame,
+            text="🗑 删除选中",
+            command=self.delete_solution_selected,
+            bg="#e67e22",
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        delete_selected_btn.pack(side=tk.RIGHT, padx=5)
 
         # 历史记录展示区域
         data_container = tk.Frame(self.solution_frame, bg="white")
@@ -2406,83 +3110,308 @@ foreach ($tokenName in $targets.Keys) {
         self.load_ai_solution_history()
 
     def create_stats_view(self):
-        """创建统计视图"""
-        # 统计信息容器
-        stats_container = tk.Frame(self.stats_frame, bg="white")
-        stats_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        """创建统计视图（图表 + 详情列表）— 15.6寸屏幕布局"""
+        # 顶部可滚动容器
+        canvas = tk.Canvas(self.stats_frame, bg="white", highlightthickness=0)
+        scrollbar = tk.Scrollbar(self.stats_frame, orient=tk.VERTICAL, command=canvas.yview)
+        self.stats_scroll_frame = tk.Frame(canvas, bg="white")
 
-        # 统计卡片
+        self.stats_scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=self.stats_scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 鼠标滚轮绑定
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        content = self.stats_scroll_frame
+
+        # ── 第一行：统计卡片 ──
+        cards_frame = tk.Frame(content, bg="white")
+        cards_frame.pack(fill=tk.X, padx=15, pady=(15, 5))
+
         self.stats_cards = {}
-
-        # 创建统计卡片
         cards_info = [
-            ("NVD CVE总数", "0", self.primary_color),
-            ("Dell公告数", "0", self.info_color),
-            ("关联匹配数", "0", self.success_color),
-            ("严重", "0", "#b71c1c"),
-            ("高危", "0", "#e65100"),
-            ("中危", "0", "#f57f17"),
-            ("低危", "0", "#33691e")
+            ("NVD CVE总数", "0", self.primary_color, "📊"),
+            ("Dell公告数", "0", self.info_color, "🔔"),
+            ("关联匹配数", "0", self.success_color, "🔗"),
+            ("严重", "0", "#c0392b", "🔴"),
+            ("高危", "0", "#e67e22", "🟠"),
+            ("中危", "0", "#f1c40f", "🟡"),
+            ("低危", "0", "#27ae60", "🟢"),
         ]
 
-        for i, (title, value, color) in enumerate(cards_info):
-            card = self.create_stats_card(stats_container, title, value, color)
-            card.grid(row=i // 4, column=i % 4, padx=10, pady=10, sticky="nsew")
+        for i, (title, value, color, icon) in enumerate(cards_info):
+            card = self._create_stat_card(cards_frame, title, value, color, icon)
+            card.grid(row=0, column=i, padx=6, pady=5, sticky="nsew")
             self.stats_cards[title] = card
+        for i in range(len(cards_info)):
+            cards_frame.columnconfigure(i, weight=1)
 
-        # 配置列权重
-        for i in range(4):
-            stats_container.columnconfigure(i, weight=1)
+        # ── 第二行：图表区域（三列：CVE饼图 + Dell饼图 + 柱状图） ──
+        charts_frame = tk.Frame(content, bg="white")
+        charts_frame.pack(fill=tk.X, padx=15, pady=5)
+        charts_frame.columnconfigure(0, weight=1)
+        charts_frame.columnconfigure(1, weight=1)
+        charts_frame.columnconfigure(2, weight=1)
 
-        # 详细统计文本区域
-        detail_frame = tk.Frame(self.stats_frame, bg="white")
-        detail_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
-
-        tk.Label(
-            detail_frame,
-            text="详细统计报告",
-            bg="white",
-            font=("Microsoft YaHei", 12, "bold")
-        ).pack(anchor="w", pady=(10, 5))
-
-        self.stats_text = scrolledtext.ScrolledText(
-            detail_frame,
-            wrap=tk.WORD,
-            width=80,
-            height=15,
-            font=("Consolas", 10),
-            bg="#f8f9fa"
+        # 左：CVE严重等级饼图
+        self.chart_cve_pie_frame = tk.LabelFrame(
+            charts_frame, text="  CVE 严重等级分布  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
         )
-        self.stats_text.pack(fill=tk.BOTH, expand=True)
+        self.chart_cve_pie_frame.grid(row=0, column=0, padx=(0, 4), pady=5, sticky="nsew")
 
-    def create_stats_card(self, parent, title, value, color):
-        """创建统计卡片"""
-        card = tk.Frame(parent, bg="white", relief=tk.RAISED, borderwidth=1)
-
-        # 标题
-        title_label = tk.Label(
-            card,
-            text=title,
-            bg="white",
-            fg=color,
-            font=("Microsoft YaHei", 10)
+        # 中：Dell公告影响等级饼图
+        self.chart_dell_pie_frame = tk.LabelFrame(
+            charts_frame, text="  Dell 公告影响等级分布  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.info_color
         )
-        title_label.pack(pady=(10, 5))
+        self.chart_dell_pie_frame.grid(row=0, column=1, padx=4, pady=5, sticky="nsew")
 
-        # 数值
-        value_label = tk.Label(
-            card,
-            text=value,
-            bg="white",
-            fg=color,
-            font=("Microsoft YaHei", 24, "bold")
+        # 右：数据概览柱状图
+        self.chart_bar_frame = tk.LabelFrame(
+            charts_frame, text="  数据概览与分类统计  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
         )
-        value_label.pack(pady=(0, 10))
+        self.chart_bar_frame.grid(row=0, column=2, padx=(4, 0), pady=5, sticky="nsew")
 
-        # 保存值标签的引用
+        # ── 第三行：最新 CVE 前10 ──
+        cve_list_frame = tk.LabelFrame(
+            content, text="  最新 CVE 漏洞 (前10)  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
+        )
+        cve_list_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        cve_cols = ("CVE ID", "严重等级", "CVSS评分", "发布日期", "描述")
+        self.stats_cve_tree = ttk.Treeview(cve_list_frame, columns=cve_cols, show="headings", height=10)
+        for col in cve_cols:
+            self.stats_cve_tree.heading(col, text=col)
+        self.stats_cve_tree.column("CVE ID", width=150, minwidth=120)
+        self.stats_cve_tree.column("严重等级", width=80, minwidth=60)
+        self.stats_cve_tree.column("CVSS评分", width=80, minwidth=60)
+        self.stats_cve_tree.column("发布日期", width=110, minwidth=90)
+        self.stats_cve_tree.column("描述", width=500, minwidth=200)
+
+        cve_scroll = tk.Scrollbar(cve_list_frame, orient=tk.VERTICAL, command=self.stats_cve_tree.yview)
+        self.stats_cve_tree.configure(yscrollcommand=cve_scroll.set)
+        self.stats_cve_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
+        cve_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+
+        # 配色
+        self.stats_cve_tree.tag_configure("CRITICAL", foreground="#c0392b")
+        self.stats_cve_tree.tag_configure("HIGH", foreground="#e67e22")
+        self.stats_cve_tree.tag_configure("MEDIUM", foreground="#f39c12")
+        self.stats_cve_tree.tag_configure("LOW", foreground="#27ae60")
+
+        # ── 第四行：最新 Dell 安全公告 前10 ──
+        dell_list_frame = tk.LabelFrame(
+            content, text="  最新 Dell 安全公告 (前10)  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.info_color
+        )
+        dell_list_frame.pack(fill=tk.X, padx=15, pady=(5, 15))
+
+        dell_cols = ("公告ID", "影响等级", "标题", "CVE数量", "发布日期")
+        self.stats_dell_tree = ttk.Treeview(dell_list_frame, columns=dell_cols, show="headings", height=10)
+        for col in dell_cols:
+            self.stats_dell_tree.heading(col, text=col)
+        self.stats_dell_tree.column("公告ID", width=140, minwidth=110)
+        self.stats_dell_tree.column("影响等级", width=80, minwidth=60)
+        self.stats_dell_tree.column("标题", width=450, minwidth=200)
+        self.stats_dell_tree.column("CVE数量", width=80, minwidth=60)
+        self.stats_dell_tree.column("发布日期", width=110, minwidth=90)
+
+        dell_scroll = tk.Scrollbar(dell_list_frame, orient=tk.VERTICAL, command=self.stats_dell_tree.yview)
+        self.stats_dell_tree.configure(yscrollcommand=dell_scroll.set)
+        self.stats_dell_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
+        dell_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+
+        self.stats_dell_tree.tag_configure("Critical", foreground="#c0392b")
+        self.stats_dell_tree.tag_configure("High", foreground="#e67e22")
+        self.stats_dell_tree.tag_configure("Medium", foreground="#f39c12")
+        self.stats_dell_tree.tag_configure("Low", foreground="#27ae60")
+
+    def _create_stat_card(self, parent, title, value, color, icon=""):
+        """创建统计卡片（带图标和彩色左边框）"""
+        card = tk.Frame(parent, bg="white", relief=tk.GROOVE, borderwidth=1)
+
+        # 彩色左侧条
+        color_bar = tk.Frame(card, bg=color, width=5)
+        color_bar.pack(side=tk.LEFT, fill=tk.Y)
+
+        inner = tk.Frame(card, bg="white", padx=8, pady=6)
+        inner.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(inner, text=f"{icon} {title}", bg="white", fg="#666",
+                 font=("Microsoft YaHei", 9)).pack(anchor="w")
+
+        value_label = tk.Label(inner, text=value, bg="white", fg=color,
+                               font=("Microsoft YaHei", 22, "bold"))
+        value_label.pack(anchor="w")
+
         card.value_label = value_label
-
         return card
+
+    def _draw_charts(self, cve_severity, dell_severity, nvd_total, dell_total, matched_count):
+        """使用 matplotlib 绘制三张图表（CVE饼图、Dell饼图、柱状图）并嵌入 tkinter"""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
+
+            # 清空旧图表
+            for w in self.chart_cve_pie_frame.winfo_children():
+                w.destroy()
+            for w in self.chart_dell_pie_frame.winfo_children():
+                w.destroy()
+            for w in self.chart_bar_frame.winfo_children():
+                w.destroy()
+
+            # 15.6寸屏幕适配：每张图 ~450px 宽, ~380px 高
+            fig_w, fig_h, fig_dpi = 4.6, 3.8, 100
+
+            # ── CVE 严重等级饼图 ──
+            fig_cve = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
+            ax_cve = fig_cve.add_subplot(111)
+
+            cve_labels, cve_sizes, cve_colors = [], [], []
+            cve_level_map = [
+                ("Critical", cve_severity.get("CRITICAL", 0), "#c0392b"),
+                ("High", cve_severity.get("HIGH", 0), "#e67e22"),
+                ("Medium", cve_severity.get("MEDIUM", 0), "#f1c40f"),
+                ("Low", cve_severity.get("LOW", 0), "#27ae60"),
+            ]
+            for lbl, cnt, clr in cve_level_map:
+                if cnt > 0:
+                    cve_labels.append(f"{lbl}\n{cnt}")
+                    cve_sizes.append(cnt)
+                    cve_colors.append(clr)
+
+            if cve_sizes:
+                wedges, texts, autotexts = ax_cve.pie(
+                    cve_sizes, labels=cve_labels, colors=cve_colors, autopct='%1.0f%%',
+                    startangle=90, pctdistance=0.75,
+                    textprops={'fontsize': 10, 'fontfamily': 'Microsoft YaHei'}
+                )
+                for t in autotexts:
+                    t.set_fontsize(9)
+                    t.set_color('white')
+                    t.set_fontweight('bold')
+                ax_cve.set_title(f'CVE 总计: {sum(cve_sizes)}',
+                                 fontsize=11, fontfamily='Microsoft YaHei', fontweight='bold', pad=10)
+            else:
+                ax_cve.text(0.5, 0.5, '暂无CVE数据', ha='center', va='center',
+                            fontsize=13, fontfamily='Microsoft YaHei', color='#999')
+                ax_cve.set_xlim(0, 1)
+                ax_cve.set_ylim(0, 1)
+
+            ax_cve.set_aspect('equal')
+            fig_cve.tight_layout(pad=1.0)
+
+            canvas_cve = FigureCanvasTkAgg(fig_cve, master=self.chart_cve_pie_frame)
+            canvas_cve.draw()
+            canvas_cve.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            # ── Dell 公告影响等级饼图 ──
+            fig_dell = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
+            ax_dell = fig_dell.add_subplot(111)
+
+            dell_labels, dell_sizes, dell_colors = [], [], []
+            dell_level_map = [
+                ("Critical", dell_severity.get("Critical", 0), "#c0392b"),
+                ("High", dell_severity.get("High", 0), "#e67e22"),
+                ("Medium", dell_severity.get("Medium", 0), "#f1c40f"),
+                ("Low", dell_severity.get("Low", 0), "#27ae60"),
+            ]
+            for lbl, cnt, clr in dell_level_map:
+                if cnt > 0:
+                    dell_labels.append(f"{lbl}\n{cnt}")
+                    dell_sizes.append(cnt)
+                    dell_colors.append(clr)
+
+            if dell_sizes:
+                wedges, texts, autotexts = ax_dell.pie(
+                    dell_sizes, labels=dell_labels, colors=dell_colors, autopct='%1.0f%%',
+                    startangle=90, pctdistance=0.75,
+                    textprops={'fontsize': 10, 'fontfamily': 'Microsoft YaHei'}
+                )
+                for t in autotexts:
+                    t.set_fontsize(9)
+                    t.set_color('white')
+                    t.set_fontweight('bold')
+                ax_dell.set_title(f'Dell公告 总计: {sum(dell_sizes)}',
+                                  fontsize=11, fontfamily='Microsoft YaHei', fontweight='bold', pad=10)
+            else:
+                ax_dell.text(0.5, 0.5, '暂无Dell公告数据', ha='center', va='center',
+                             fontsize=13, fontfamily='Microsoft YaHei', color='#999')
+                ax_dell.set_xlim(0, 1)
+                ax_dell.set_ylim(0, 1)
+
+            ax_dell.set_aspect('equal')
+            fig_dell.tight_layout(pad=1.0)
+
+            canvas_dell = FigureCanvasTkAgg(fig_dell, master=self.chart_dell_pie_frame)
+            canvas_dell.draw()
+            canvas_dell.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            # ── 柱状图：数据概览 + 分类数量 ──
+            fig_bar = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
+            ax_bar = fig_bar.add_subplot(111)
+
+            # 合并 CVE 和 Dell 各等级数量
+            bar_labels = ['NVD\nCVE', 'Dell\n公告', '关联\n匹配',
+                          'Critical', 'High', 'Medium', 'Low']
+            cve_total_severity = sum(cve_severity.values())
+            dell_total_severity = sum(dell_severity.values())
+            bar_values = [
+                nvd_total, dell_total, matched_count,
+                cve_severity.get("CRITICAL", 0) + dell_severity.get("Critical", 0),
+                cve_severity.get("HIGH", 0) + dell_severity.get("High", 0),
+                cve_severity.get("MEDIUM", 0) + dell_severity.get("Medium", 0),
+                cve_severity.get("LOW", 0) + dell_severity.get("Low", 0),
+            ]
+            bar_colors = [
+                self.primary_color, self.info_color, self.success_color,
+                "#c0392b", "#e67e22", "#f1c40f", "#27ae60"
+            ]
+
+            bars = ax_bar.bar(bar_labels, bar_values, color=bar_colors, width=0.6, edgecolor='white')
+            for bar, val in zip(bars, bar_values):
+                if val > 0:
+                    ax_bar.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
+                                str(val), ha='center', va='bottom', fontsize=10,
+                                fontweight='bold', fontfamily='Microsoft YaHei')
+
+            ax_bar.set_ylabel('数量', fontsize=10, fontfamily='Microsoft YaHei')
+            ax_bar.set_title('数据分类统计', fontsize=11, fontfamily='Microsoft YaHei', fontweight='bold', pad=10)
+            ax_bar.spines['top'].set_visible(False)
+            ax_bar.spines['right'].set_visible(False)
+            ax_bar.tick_params(axis='x', labelsize=9)
+            ax_bar.tick_params(axis='y', labelsize=9)
+            for label in ax_bar.get_xticklabels():
+                label.set_fontfamily('Microsoft YaHei')
+            fig_bar.tight_layout(pad=1.0)
+
+            canvas_bar = FigureCanvasTkAgg(fig_bar, master=self.chart_bar_frame)
+            canvas_bar.draw()
+            canvas_bar.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        except ImportError:
+            for frame in (self.chart_cve_pie_frame, self.chart_dell_pie_frame, self.chart_bar_frame):
+                tk.Label(frame, text="需要 matplotlib\npip install matplotlib",
+                         bg="white", fg="#999", font=("Microsoft YaHei", 10)).pack(expand=True)
+        except Exception as e:
+            tk.Label(self.chart_cve_pie_frame, text=f"图表渲染失败:\n{e}",
+                     bg="white", fg="#c0392b", font=("Microsoft YaHei", 9)).pack(expand=True)
 
     def create_learn_view(self):
         """创建智能学习（费曼学习法）标签页内容"""
@@ -2540,21 +3469,64 @@ foreach ($tokenName in $targets.Keys) {
             command=self._on_learn_source_change
         )
         rb_file.pack(anchor="w", padx=8, pady=2)
+        rb_url = tk.Radiobutton(
+            data_frame, text="🌐 网页链接", variable=self.learn_source_var,
+            value="url", bg="white", font=("Microsoft YaHei", 9),
+            command=self._on_learn_source_change
+        )
+        rb_url.pack(anchor="w", padx=8, pady=2)
 
-        # 数据库子选项
+        # 网页链接子选项 — URL 输入 + 抓取按钮
+        self.learn_url_frame = tk.Frame(data_frame, bg="white")
+        # 默认隐藏，选中 url radio 时显示
+        tk.Label(
+            self.learn_url_frame, text="URL:", bg="white",
+            font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT)
+        self.learn_url_entry = tk.Entry(
+            self.learn_url_frame, font=("Microsoft YaHei", 9),
+            relief=tk.SOLID, bd=1, width=22
+        )
+        self.learn_url_entry.pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
+        self.learn_url_fetch_btn = tk.Button(
+            self.learn_url_frame, text="抓取",
+            command=self._fetch_learn_url,
+            bg=self.primary_color, fg="white",
+            font=("Microsoft YaHei", 8, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=6
+        )
+        self.learn_url_fetch_btn.pack(side=tk.RIGHT, padx=(2, 0))
+
+        # 数据库子选项 — 数据源 + 下一级菜单
         self.learn_db_type_frame = tk.Frame(data_frame, bg="white")
         self.learn_db_type_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
         tk.Label(
-            self.learn_db_type_frame, text="数据类型:", bg="white",
+            self.learn_db_type_frame, text="数据源:", bg="white",
             font=("Microsoft YaHei", 9)
         ).pack(side=tk.LEFT)
         self.learn_db_type_combo = ttk.Combobox(
             self.learn_db_type_frame,
-            values=["CVE漏洞数据", "Dell安全公告", "AI分析记录"],
+            values=["IT新闻简报", "Dell安全公告", "CVE漏洞数据", "AI分析记录", "学习对话记录"],
             state="readonly", width=13, font=("Microsoft YaHei", 9)
         )
         self.learn_db_type_combo.current(0)
         self.learn_db_type_combo.pack(side=tk.LEFT, padx=4)
+        self.learn_db_type_combo.bind("<<ComboboxSelected>>", self._on_learn_db_type_change)
+
+        # 下一级选择区域
+        self.learn_sub_frame = tk.Frame(data_frame, bg="white")
+        self.learn_sub_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
+        tk.Label(
+            self.learn_sub_frame, text="选择内容:", bg="white",
+            font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT)
+        self.learn_sub_combo = ttk.Combobox(
+            self.learn_sub_frame,
+            state="readonly", width=28, font=("Microsoft YaHei", 9)
+        )
+        self.learn_sub_combo.pack(side=tk.LEFT, padx=4)
+        # 初始化下一级菜单
+        self._refresh_learn_sub_items()
 
         load_btn = tk.Button(
             data_frame, text="⬇ 加载内容", command=self._load_learn_content,
@@ -2630,6 +3602,14 @@ foreach ($tokenName in $targets.Keys) {
             font=("Microsoft YaHei", 9),
             relief=tk.FLAT, cursor="hand2", pady=4
         ).pack(fill=tk.X)
+        self.learn_save_btn = tk.Button(
+            btn_frame, text="💾 保存对话",
+            command=self._save_learn_session,
+            bg=self.info_color, fg="white",
+            font=("Microsoft YaHei", 9),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_save_btn.pack(fill=tk.X, pady=(4, 0))
 
         # ── 右侧对话区域 ──────────────────────────────────────────────
         right_panel = tk.Frame(main_paned, bg="white")
@@ -2707,95 +3687,294 @@ foreach ($tokenName in $targets.Keys) {
         )
 
     def _on_learn_source_change(self):
-        """数据来源单选切换时显示/隐藏数据库子选项"""
-        if self.learn_source_var.get() == "db":
+        """数据来源单选切换时显示/隐藏子选项"""
+        src = self.learn_source_var.get()
+        if src == "db":
             self.learn_db_type_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
+            self.learn_sub_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
+            self.learn_url_frame.pack_forget()
+            self._refresh_learn_sub_items()
+        elif src == "url":
+            self.learn_db_type_frame.pack_forget()
+            self.learn_sub_frame.pack_forget()
+            self.learn_url_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
         else:
             self.learn_db_type_frame.pack_forget()
+            self.learn_sub_frame.pack_forget()
+            self.learn_url_frame.pack_forget()
+
+    def _on_learn_db_type_change(self, event=None):
+        """数据源下拉切换时刷新下一级菜单"""
+        self._refresh_learn_sub_items()
+
+    def _refresh_learn_sub_items(self):
+        """根据当前数据源类型刷新下一级选择菜单"""
+        db_type = self.learn_db_type_combo.get()
+        items = []
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                if db_type == "IT新闻简报":
+                    cursor.execute(
+                        "SELECT DISTINCT brief_date FROM news_briefs ORDER BY brief_date DESC LIMIT 120"
+                    )
+                    for (d,) in cursor.fetchall():
+                        items.append(d)
+                elif db_type == "Dell安全公告":
+                    cursor.execute(
+                        "SELECT dsa_id, title FROM dell_advisories ORDER BY published_date DESC LIMIT 200"
+                    )
+                    for dsa_id, title in cursor.fetchall():
+                        display = f"{dsa_id} - {(title or '')[:35]}"
+                        items.append(display)
+                elif db_type == "CVE漏洞数据":
+                    cursor.execute(
+                        "SELECT cve_id FROM cves ORDER BY published_date DESC LIMIT 200"
+                    )
+                    for (cve_id,) in cursor.fetchall():
+                        items.append(cve_id)
+                elif db_type == "AI分析记录":
+                    cursor.execute(
+                        "SELECT cve_id, dell_advisory_id, analysis_time FROM ai_solutions "
+                        "ORDER BY analysis_time DESC LIMIT 100"
+                    )
+                    for cve_id, dsa_id, ts in cursor.fetchall():
+                        ts_short = (ts or "")[:16]
+                        items.append(f"{cve_id} / {dsa_id or 'NA'} ({ts_short})")
+                elif db_type == "学习对话记录":
+                    cursor.execute(
+                        "SELECT id, topic, level, created_at FROM learn_sessions "
+                        "ORDER BY created_at DESC LIMIT 100"
+                    )
+                    for sid, topic, level, ts in cursor.fetchall():
+                        ts_short = (ts or "")[:16]
+                        items.append(f"#{sid} {(topic or '')[:20]} [{level or ''}] ({ts_short})")
+        except Exception as e:
+            self.log(f"刷新学习子菜单失败: {e}")
+
+        self.learn_sub_combo['values'] = items if items else ["(暂无数据)"]
+        if items:
+            self.learn_sub_combo.current(0)
+        else:
+            self.learn_sub_combo.set("(暂无数据)")
 
     def _load_learn_content(self):
         """加载学习内容到预览框"""
         source = self.learn_source_var.get()
         if source == "db":
             self._load_learn_from_db()
+        elif source == "url":
+            self._fetch_learn_url()
         else:
             self._load_learn_from_file()
 
     def _load_learn_from_db(self):
-        """从 SQLite 数据库加载内容"""
+        """从 SQLite 数据库加载选中的具体条目内容"""
         db_type = self.learn_db_type_combo.get()
+        sub_val = self.learn_sub_combo.get()
+        if not sub_val or sub_val == "(暂无数据)":
+            self._learn_set_preview(f"请先选择要加载的{db_type}条目。\n如果列表为空，请先在对应标签页采集数据。")
+            return
+
         try:
-            cursor = self.conn.cursor()
-            content_lines = []
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                content_lines = []
+                topic_hint = ""
 
-            if db_type == "CVE漏洞数据":
-                cursor.execute(
-                    "SELECT cve_id, data FROM cves ORDER BY published_date DESC LIMIT 20"
-                )
-                rows = cursor.fetchall()
-                if not rows:
-                    self._learn_set_preview("数据库中暂无 CVE 数据，请先采集。")
-                    return
-                for cve_id, data_str in rows:
-                    try:
-                        d = json.loads(data_str)
-                        desc = ""
-                        descs = d.get("descriptions", [])
-                        for item in descs:
-                            if item.get("lang") == "en":
-                                desc = item.get("value", "")[:120]
-                                break
-                        metrics = d.get("metrics", {})
-                        cvss = metrics.get("cvssMetricV31", metrics.get("cvssMetricV30", []))
-                        severity = ""
-                        if cvss:
-                            severity = cvss[0].get("cvssData", {}).get("baseSeverity", "")
-                        content_lines.append(
-                            f"[{cve_id}] 严重性:{severity}\n  {desc}"
-                        )
-                    except Exception:
-                        content_lines.append(f"[{cve_id}] 数据解析失败")
-                topic_hint = "CVE漏洞分析与安全修复"
-
-            elif db_type == "Dell安全公告":
-                cursor.execute(
-                    "SELECT dsa_id, title, cve_ids FROM dell_advisories ORDER BY published_date DESC LIMIT 20"
-                )
-                rows = cursor.fetchall()
-                if not rows:
-                    self._learn_set_preview("数据库中暂无 Dell 安全公告，请先采集。")
-                    return
-                for dsa_id, title, cve_ids in rows:
-                    content_lines.append(f"[{dsa_id}] {title}\n  关联CVE: {cve_ids or '无'}")
-                topic_hint = "Dell安全公告与漏洞管理"
-
-            elif db_type == "AI分析记录":
-                cursor.execute(
-                    "SELECT cve_id, dell_advisory_id, result, analysis_time FROM ai_solutions "
-                    "ORDER BY created_at DESC LIMIT 10"
-                )
-                rows = cursor.fetchall()
-                if not rows:
-                    self._learn_set_preview("数据库中暂无 AI 分析记录。")
-                    return
-                for cve_id, dsa_id, result, ts in rows:
-                    snippet = (result or "")[:150].replace("\n", " ")
-                    content_lines.append(
-                        f"[{ts[:16]}] {cve_id} / {dsa_id}\n  {snippet}..."
+                if db_type == "IT新闻简报":
+                    # sub_val 是日期字符串 如 "2026-03-07"
+                    date_str = sub_val.strip()
+                    cursor.execute(
+                        "SELECT content, articles_json FROM news_briefs WHERE brief_date = ? ORDER BY created_at DESC LIMIT 1",
+                        (date_str,)
                     )
-                topic_hint = "AI安全分析结果解读"
-            else:
-                return
+                    row = cursor.fetchone()
+                    if row:
+                        content, articles_json = row
+                        content_lines.append(f"【{date_str} IT新闻简报】\n")
+                        content_lines.append(content or "")
+                        if articles_json:
+                            try:
+                                arts = json.loads(articles_json)
+                                if arts:
+                                    content_lines.append(f"\n{'─'*40}\n【原始新闻来源 ({len(arts)} 篇)】")
+                                    for i, a in enumerate(arts, 1):
+                                        content_lines.append(
+                                            f"  {i}. [{a.get('source','')}] {a.get('title','')}"
+                                        )
+                            except json.JSONDecodeError:
+                                pass
+                    else:
+                        self._learn_set_preview(f"{date_str} 无新闻简报记录。")
+                        return
+                    topic_hint = f"IT新闻动态分析 ({date_str})"
 
-            self.learn_source_content = "\n\n".join(content_lines)
+                elif db_type == "Dell安全公告":
+                    # sub_val 格式 "DSA-xxxx-xxx - title..."
+                    dsa_id = sub_val.split(" - ")[0].strip()
+                    cursor.execute(
+                        "SELECT dsa_id, title, cve_ids, data, link FROM dell_advisories WHERE dsa_id = ?",
+                        (dsa_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        dsa_id, title, cve_ids, data_str, link = row
+                        content_lines.append(f"【Dell安全公告: {dsa_id}】")
+                        content_lines.append(f"标题: {title or 'N/A'}")
+                        content_lines.append(f"关联CVE: {cve_ids or '无'}")
+                        content_lines.append(f"链接: {link or 'N/A'}")
+                        if data_str:
+                            try:
+                                d = json.loads(data_str)
+                                impact = d.get('impact', '')
+                                summary = d.get('summary', '')
+                                solution = d.get('solution', '')
+                                products = d.get('affected_products', [])
+                                if impact:
+                                    content_lines.append(f"影响等级: {impact}")
+                                if products:
+                                    prod_strs = []
+                                    for p in products[:10]:
+                                        if isinstance(p, dict):
+                                            prod_strs.append(p.get('name', p.get('product', str(p))))
+                                        else:
+                                            prod_strs.append(str(p))
+                                    content_lines.append(f"受影响产品: {', '.join(prod_strs)}")
+                                if summary:
+                                    content_lines.append(f"\n【摘要】\n{summary[:3000]}")
+                                if solution:
+                                    content_lines.append(f"\n【解决方案】\n{solution[:3000]}")
+                            except json.JSONDecodeError:
+                                pass
+                    else:
+                        self._learn_set_preview(f"未找到公告 {dsa_id}。")
+                        return
+                    topic_hint = f"Dell安全公告分析 ({dsa_id})"
+
+                elif db_type == "CVE漏洞数据":
+                    # sub_val 是 CVE ID 如 "CVE-2026-1234"
+                    cve_id = sub_val.strip()
+                    cursor.execute(
+                        "SELECT data FROM cves WHERE cve_id = ?", (cve_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        try:
+                            d = json.loads(row[0])
+                            desc = ""
+                            descs = d.get("descriptions", [])
+                            for item in descs:
+                                if item.get("lang") == "en":
+                                    desc = item.get("value", "")
+                                    break
+                            metrics = d.get("metrics", {})
+                            cvss = metrics.get("cvssMetricV31", metrics.get("cvssMetricV30", []))
+                            severity, score, vector = "", "", ""
+                            if cvss:
+                                cvss_data = cvss[0].get("cvssData", {})
+                                severity = cvss_data.get("baseSeverity", "")
+                                score = cvss_data.get("baseScore", "")
+                                vector = cvss_data.get("vectorString", "")
+                            weaknesses = []
+                            for w in d.get("weaknesses", []):
+                                for wd in w.get("description", []):
+                                    if wd.get("lang") == "en":
+                                        weaknesses.append(wd.get("value", ""))
+                            refs = d.get("references", [])
+
+                            content_lines.append(f"【CVE漏洞: {cve_id}】")
+                            content_lines.append(f"严重等级: {severity}  CVSS评分: {score}")
+                            content_lines.append(f"CVSS向量: {vector}")
+                            if weaknesses:
+                                content_lines.append(f"CWE类型: {', '.join(weaknesses)}")
+                            content_lines.append(f"\n【描述】\n{desc}")
+                            if refs:
+                                content_lines.append(f"\n【参考链接】")
+                                for r in refs[:8]:
+                                    content_lines.append(f"  - {r.get('url', '')}")
+                        except json.JSONDecodeError:
+                            content_lines.append(f"[{cve_id}] 数据解析失败")
+                    else:
+                        self._learn_set_preview(f"未找到 {cve_id} 的数据。")
+                        return
+                    topic_hint = f"CVE漏洞分析 ({cve_id})"
+
+                elif db_type == "AI分析记录":
+                    # sub_val 格式 "CVE-xxx / DSA-xxx (2026-03-07 19:00)"
+                    parts = sub_val.split(" / ")
+                    cve_id = parts[0].strip() if parts else ""
+                    cursor.execute(
+                        "SELECT cve_id, dell_advisory_id, result, analysis_time, model_name FROM ai_solutions "
+                        "WHERE cve_id = ? ORDER BY analysis_time DESC LIMIT 1",
+                        (cve_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        cve_id, dsa_id, result, ts, model = row
+                        content_lines.append(f"【AI分析记录】")
+                        content_lines.append(f"CVE: {cve_id}  Dell公告: {dsa_id or 'NA'}")
+                        content_lines.append(f"模型: {model or 'N/A'}  时间: {ts}")
+                        content_lines.append(f"\n{'─'*40}\n{result or '无分析结果'}")
+                    else:
+                        self._learn_set_preview(f"未找到 {cve_id} 的AI分析记录。")
+                        return
+                    topic_hint = f"AI安全分析解读 ({cve_id})"
+
+                elif db_type == "学习对话记录":
+                    # sub_val 格式 "#123 主题名... [层次] (2026-03-07 19:00)"
+                    import re
+                    m = re.match(r'#(\d+)', sub_val)
+                    if not m:
+                        self._learn_set_preview("无法解析对话记录ID。")
+                        return
+                    session_id = int(m.group(1))
+                    cursor.execute(
+                        "SELECT topic, level, source_type, source_content, conversation, summary, created_at "
+                        "FROM learn_sessions WHERE id = ?",
+                        (session_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        topic, level, src_type, src_content, conv_json, summary, ts = row
+                        content_lines.append(f"【费曼学习对话记录 #{session_id}】")
+                        content_lines.append(f"主题: {topic or 'N/A'}")
+                        content_lines.append(f"层次: {level or 'N/A'}  数据源: {src_type or 'N/A'}")
+                        content_lines.append(f"时间: {ts}")
+                        if summary:
+                            content_lines.append(f"\n【学习摘要】\n{summary}")
+                        if conv_json:
+                            try:
+                                msgs = json.loads(conv_json)
+                                content_lines.append(f"\n{'─'*40}\n【对话内容 ({len(msgs)} 条消息)】")
+                                for msg in msgs:
+                                    role = msg.get('role', '')
+                                    text = msg.get('content', '')
+                                    if role == 'system':
+                                        continue
+                                    label = "👤 用户" if role == 'user' else "🤖 AI导师"
+                                    content_lines.append(f"\n{label}:\n{text}")
+                            except json.JSONDecodeError:
+                                content_lines.append(conv_json)
+                        if src_content:
+                            content_lines.append(f"\n{'─'*40}\n【原始参考资料（节选）】\n{src_content[:2000]}")
+                    else:
+                        self._learn_set_preview(f"未找到对话记录 #{session_id}。")
+                        return
+                    topic_hint = f"复习: {topic or '学习对话'}"
+
+                else:
+                    return
+
+            self.learn_source_content = "\n".join(content_lines)
             self._learn_set_preview(self.learn_source_content)
             # 自动填入建议主题
             current = self.learn_topic_entry.get().strip()
-            if not current or current == "CVE漏洞分析":
+            if not current or current.startswith(("CVE漏洞分析", "Dell安全公告", "IT新闻", "AI安全", "复习:")):
                 self.learn_topic_entry.delete(0, tk.END)
                 self.learn_topic_entry.insert(0, topic_hint)
             self.learn_status_label.config(
-                text=f"已从数据库加载 {len(content_lines)} 条{db_type}记录"
+                text=f"已加载: {db_type} — {sub_val[:40]}"
             )
         except Exception as e:
             self._learn_set_preview(f"加载失败: {e}")
@@ -2815,7 +3994,7 @@ foreach ($tokenName in $targets.Keys) {
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            self.learn_source_content = content[:8000]  # 最多8000字符作为上下文
+            self.learn_source_content = content[:16000]  # 最多16000字符作为上下文
             preview = content[:600] + ("\n..." if len(content) > 600 else "")
             self._learn_set_preview(preview)
             # 用文件名作为主题提示
@@ -2827,6 +4006,119 @@ foreach ($tokenName in $targets.Keys) {
             )
         except Exception as e:
             self._learn_set_preview(f"文件读取失败: {e}")
+
+    def _fetch_learn_url(self):
+        """从网页 URL 抓取内容用于学习（Exa API 优先，HTTP 回退）"""
+        url = self.learn_url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("提示", "请输入网页 URL。")
+            return
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+            self.learn_url_entry.delete(0, tk.END)
+            self.learn_url_entry.insert(0, url)
+
+        self.learn_url_fetch_btn.config(state=tk.DISABLED, text="抓取中...")
+        self.learn_status_label.config(text=f"正在抓取网页内容: {url[:60]}...")
+        self._learn_set_preview("正在抓取网页内容，请稍候...")
+
+        threading.Thread(
+            target=self._fetch_learn_url_thread,
+            args=(url,),
+            daemon=True
+        ).start()
+
+    def _fetch_learn_url_thread(self, url: str):
+        """后台线程：抓取网页内容"""
+        content = ""
+        source_label = ""
+
+        # 1. 优先使用 Exa API
+        exa_api_key = os.getenv("EXA_API_KEY")
+        if exa_api_key:
+            try:
+                import requests as req
+                response = req.post(
+                    "https://api.exa.ai/contents",
+                    headers={
+                        "accept": "application/json",
+                        "content-type": "application/json",
+                        "x-api-key": exa_api_key,
+                    },
+                    json={"ids": [url], "text": True},
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    results = response.json().get("results", [])
+                    if results:
+                        content = results[0].get("text", "")
+                        source_label = "Exa API"
+            except Exception as e:
+                self.root.after(0, self.log, f"Exa API 抓取失败，尝试 HTTP 回退: {e}")
+
+        # 2. HTTP + BeautifulSoup 回退
+        if not content:
+            try:
+                import requests as req
+                from bs4 import BeautifulSoup
+                resp = req.get(
+                    url,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                # 提取页面标题
+                title_tag = soup.find('title')
+                page_title = title_tag.get_text(strip=True) if title_tag else ""
+                # 清理噪声标签
+                for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                    tag.decompose()
+                content = soup.get_text(separator='\n', strip=True)
+                if page_title and not content.startswith(page_title):
+                    content = page_title + "\n\n" + content
+                source_label = "HTTP"
+            except Exception as e:
+                self.root.after(
+                    0, self._learn_fetch_url_done, "",
+                    f"网页抓取失败: {e}", url
+                )
+                return
+
+        self.root.after(0, self._learn_fetch_url_done, content, source_label, url)
+
+    def _learn_fetch_url_done(self, content: str, info: str, url: str):
+        """网页抓取完成回调（主线程）"""
+        self.learn_url_fetch_btn.config(state=tk.NORMAL, text="抓取")
+
+        if not content:
+            self._learn_set_preview(f"未能获取网页内容。\n{info}")
+            self.learn_status_label.config(text=f"抓取失败: {info}")
+            return
+
+        self.learn_source_content = content[:16000]
+        char_count = len(content)
+        preview = content[:800] + ("\n..." if char_count > 800 else "")
+        self._learn_set_preview(preview)
+
+        # 自动填入 URL 域名作为主题提示
+        current = self.learn_topic_entry.get().strip()
+        if not current or current in ("CVE漏洞分析",):
+            try:
+                from urllib.parse import urlparse
+                domain = urlparse(url).netloc
+                self.learn_topic_entry.delete(0, tk.END)
+                self.learn_topic_entry.insert(0, f"网页学习: {domain}")
+            except Exception:
+                pass
+
+        self.learn_status_label.config(
+            text=f"已加载网页 ({info}): {url[:50]}  ({char_count} 字符)"
+        )
+        self.log(f"网页内容已加载用于学习: {url} ({char_count} 字符, {info})")
 
     def _learn_set_preview(self, text: str):
         """更新内容预览框"""
@@ -2869,7 +4161,7 @@ foreach ($tokenName in $targets.Keys) {
         # 构造启动用户消息（含内容上下文）
         context_part = ""
         if self.learn_source_content:
-            snippet = self.learn_source_content[:2000]
+            snippet = self.learn_source_content[:6000]
             context_part = f"\n\n【参考资料（节选）】\n{snippet}"
 
         user_msg = (
@@ -2951,7 +4243,7 @@ foreach ($tokenName in $targets.Keys) {
                 model=model,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=1500,
+                max_tokens=2500,
             )
             reply = response.choices[0].message.content
 
@@ -2979,6 +4271,7 @@ foreach ($tokenName in $targets.Keys) {
         state = tk.NORMAL if enabled else tk.DISABLED
         self.learn_start_btn.config(state=state)
         self.learn_send_btn.config(state=state)
+        self.learn_save_btn.config(state=state)
 
     def _reset_learn_session(self):
         """重置费曼学习会话"""
@@ -2995,6 +4288,51 @@ foreach ($tokenName in $targets.Keys) {
         )
         self.learn_status_label.config(text="会话已重置")
         self._set_learn_buttons(True)
+
+    def _save_learn_session(self):
+        """保存当前费曼学习对话到数据库"""
+        if not self.learn_messages or len(self.learn_messages) < 2:
+            messagebox.showwarning("提示", "当前没有可保存的对话内容。\n请先开始一次学习会话。")
+            return
+
+        topic = getattr(self, 'learn_topic', '') or self.learn_topic_entry.get().strip() or "未命名主题"
+        level = self.learn_level_var.get()
+        source_type = self.learn_db_type_combo.get() if self.learn_source_var.get() == "db" else "本地文件"
+        source_content = getattr(self, 'learn_source_content', '') or ''
+
+        # 过滤 system 消息，只保存用户和 AI 的对话
+        save_msgs = [m for m in self.learn_messages if m.get('role') != 'system']
+        if not save_msgs:
+            messagebox.showwarning("提示", "对话内容为空，无法保存。")
+            return
+
+        # 生成摘要：取最后一条 AI 回复的前 200 字符
+        summary = ""
+        for m in reversed(self.learn_messages):
+            if m.get('role') == 'assistant':
+                summary = m.get('content', '')[:200]
+                break
+
+        conv_json = json.dumps(save_msgs, ensure_ascii=False)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "INSERT INTO learn_sessions (topic, level, source_type, source_content, conversation, summary, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (topic, level, source_type, source_content[:8000], conv_json, summary, ts)
+                )
+                self.conn.commit()
+                session_id = cursor.lastrowid
+
+            self.log(f"学习对话已保存: #{session_id} - {topic}")
+            self.learn_status_label.config(text=f"对话已保存: #{session_id} — {topic}")
+            messagebox.showinfo("保存成功", f"学习对话已保存到数据库。\n\n记录编号: #{session_id}\n主题: {topic}\n对话轮数: {len(save_msgs)} 条\n\n可在数据源「学习对话记录」中重新加载。")
+        except Exception as e:
+            self.log(f"保存学习对话失败: {e}")
+            messagebox.showerror("保存失败", f"保存对话时出错：\n{e}")
 
     def _get_learn_system_prompt(self, level: str) -> str:
         """根据学习层次返回对应的系统提示词"""
@@ -3339,12 +4677,13 @@ foreach ($tokenName in $targets.Keys) {
         """后台线程：抓取并解析单条Dell安全公告"""
         try:
             content = ""
+            self._last_fetched_html = ""
             exa_api_key = os.getenv("EXA_API_KEY")
             # 1. 优先使用Exa API
             if exa_api_key:
                 self.log_queue.put("使用Exa API获取页面内容...")
                 content = self._fetch_with_exa(url, exa_api_key)
-            # 2. Fallback：直接HTTP请求 + BeautifulSoup
+            # 2. Fallback：直接HTTP请求 + BeautifulSoup（同时保存HTML）
             if not content:
                 self.log_queue.put("回退：使用直接HTTP请求获取页面...")
                 content = self._fetch_with_requests(url)
@@ -3352,8 +4691,19 @@ foreach ($tokenName in $targets.Keys) {
                 self.root.after(0, self._fetch_done, None,
                                 "❌ 无法获取页面内容，请检查URL是否有效或网络连接")
                 return
+            # 如果 Exa 成功但没有 HTML，额外获取 HTML 用于表格解析
+            if not self._last_fetched_html:
+                try:
+                    import requests as req
+                    resp = req.get(url, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    }, timeout=30)
+                    if resp.status_code == 200:
+                        self._last_fetched_html = resp.text
+                except Exception:
+                    pass
             # 3. 解析内容构建advisory结构
-            advisory = self._parse_dell_page_content(url, content)
+            advisory = self._parse_dell_page_content(url, content, self._last_fetched_html)
             # 4. 保证DSA ID不为空
             if not advisory.get('dell_security_advisory'):
                 dsa_id = self._extract_dsa_id_from_url(url)
@@ -3401,7 +4751,7 @@ foreach ($tokenName in $targets.Keys) {
         return ""
 
     def _fetch_with_requests(self, url: str) -> str:
-        """直接HTTP请求 + BeautifulSoup 提取正文文本"""
+        """直接HTTP请求 + BeautifulSoup 提取正文文本（同时保存原始HTML用于表格解析）"""
         import requests as req
         from bs4 import BeautifulSoup
         try:
@@ -3415,6 +4765,7 @@ foreach ($tokenName in $targets.Keys) {
                 timeout=30,
             )
             response.raise_for_status()
+            self._last_fetched_html = response.text  # 保存原始HTML用于表格解析
             soup = BeautifulSoup(response.text, 'html.parser')
             for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
                 tag.decompose()
@@ -3433,7 +4784,7 @@ foreach ($tokenName in $targets.Keys) {
             return f"KB-{match.group(1)}"
         return ""
 
-    def _parse_dell_page_content(self, url: str, content: str) -> dict:
+    def _parse_dell_page_content(self, url: str, content: str, html: str = "") -> dict:
         """从页面文本内容提取Dell安全公告各字段"""
         scraper = DellSecurityScraper()
         # DSA ID
@@ -3452,8 +4803,8 @@ foreach ($tokenName in $targets.Keys) {
                     and len(line) < 300):
                 title = line
                 break
-        # 发布日期
-        published_date = datetime.now().isoformat()
+        # 发布日期（仅日期，不含时分）
+        published_date = datetime.now().strftime('%Y-%m-%d')
         date_patterns = [
             (r'(\w+ \d{1,2},?\s+\d{4})', ['%B %d, %Y', '%B %d %Y']),
             (r'(\d{4}-\d{2}-\d{2})',       ['%Y-%m-%d']),
@@ -3464,24 +4815,27 @@ foreach ($tokenName in $targets.Keys) {
             if m:
                 for fmt in fmts:
                     try:
-                        published_date = datetime.strptime(m.group(1), fmt).isoformat()
+                        published_date = datetime.strptime(m.group(1), fmt).strftime('%Y-%m-%d')
                         break
                     except ValueError:
                         continue
                 break
-        # 影响级别
+        # 影响级别（匹配 Dell 页面 Impact 区域及 severity 描述）
         impact = ""
-        impact_match = (
-            re.search(r'\b(Critical|High|Medium|Low)\b.*?[Ss]everity', content) or
-            re.search(r'[Ss]everity[:\s]*(Critical|High|Medium|Low)', content)
-        )
-        if impact_match:
-            impact = impact_match.group(1).capitalize()
-        # 产品和解决方案
-        products = scraper.extract_products_from_text(content)
-        solution = scraper.extract_solution_from_text(content)
-        # 摘要（前500字符，压缩空白）
-        summary = ' '.join(content.split())[:500]
+        impact_patterns = [
+            re.search(r'Impact\s*[\n:]\s*(Critical|High|Medium|Low)', content, re.IGNORECASE),
+            re.search(r'\b(Critical|High|Medium|Low)\b\s+severity', content, re.IGNORECASE),
+            re.search(r'[Ss]everity\s*[:\s]\s*(Critical|High|Medium|Low)', content, re.IGNORECASE),
+            re.search(r'CVSS.*?\b(Critical|High|Medium|Low)\b', content, re.IGNORECASE),
+        ]
+        for impact_match in impact_patterns:
+            if impact_match:
+                impact = impact_match.group(1).capitalize()
+                break
+        # 摘要：提取 "Summary" 区域内容
+        summary = scraper._extract_summary_section(content)
+        # 产品和解决方案：从 "Affected Products & Remediation" 表格提取
+        products, solution = scraper._extract_remediation(content, html)
         return {
             'dell_security_advisory': dsa_id,
             'title': title,
@@ -3582,11 +4936,17 @@ foreach ($tokenName in $targets.Keys) {
             }
             days = time_range_map.get(time_range, 30)
 
-            self.log_queue.put(f"正在采集最近 {days} 天的 Dell 安全公告...")
-            self.log_queue.put("尝试访问Dell官网获取真实数据...")
+            # 获取数据库中已存在的 DSA IDs，传给爬虫跳过已有公告
+            existing_dsa_ids = self.get_existing_dell_ids()
+            self.log_queue.put(f"数据库中已有 {len(existing_dsa_ids)} 条 Dell 安全公告")
+            self.log_queue.put(f"正在从 Dell 官网采集最近 {days} 天的新安全公告...")
 
-            # 传递days参数
-            items = await scraper.fetch_security_advisories(days=days)
+            # 使用 Exa / HTTP / Selenium 多策略采集，自动跳过已有公告
+            items = await scraper.fetch_security_advisories(
+                days=days,
+                existing_dsa_ids=existing_dsa_ids,
+                log_callback=lambda msg: self.log_queue.put(msg),
+            )
 
             if items:
                 self.log_queue.put(f"✓ 成功获取 {len(items)} 条 Dell 安全公告（{time_range}范围）")
@@ -4310,31 +5670,37 @@ foreach ($tokenName in $targets.Keys) {
         cve_ids = advisory.get("cve_ids", [])
         cve_ids_str = ", ".join(cve_ids) if cve_ids else "无"
 
-        # 格式化发布日期
+        # 格式化发布日期（仅显示日期，不含时分）
         published = advisory.get("published_date", "")
         if published:
             try:
                 # 尝试解析日期
                 from dateutil import parser
                 dt = parser.parse(published)
-                published = dt.strftime("%Y-%m-%d %H:%M")
+                published = dt.strftime("%Y-%m-%d")
             except (ValueError, TypeError, ImportError) as e:
                 # 日期解析失败或dateutil未安装，保持原样
                 pass
 
-        # 受影响产品数
-        affected_products = advisory.get("affected_products", [])
-        products_count = len(affected_products)
+        # 提取公告影响等级：优先 impact 字段，回退从 summary 中解析
+        severity_level = advisory.get("impact", "")
+        if not severity_level:
+            summary = advisory.get("summary", "")
+            match = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
+            if match:
+                severity_level = match.group(1).capitalize()
+            else:
+                severity_level = "N/A"
 
         self.dell_tree.insert(
             "",
             "end",
             values=(
                 advisory.get("dell_security_advisory", "N/A"),
+                severity_level,
                 advisory.get("title", ""),
                 cve_ids_str,
                 published,
-                products_count
             )
         )
 
@@ -4409,17 +5775,19 @@ foreach ($tokenName in $targets.Keys) {
                     if cve_id in cve_dict:
                         cve = cve_dict[cve_id]
 
-                        # 提取产品型号
-                        products = advisory.get("affected_products", [])
-                        product_names = [p.get("name", "") for p in products[:3]]
-                        products_str = ", ".join(product_names) if product_names else "详见公告"
+                        # 提取影响等级（来自 Dell 公告的 impact 字段）
+                        impact = advisory.get("impact", "")
+                        if not impact:
+                            summary = advisory.get("summary", "")
+                            impact_match = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
+                            impact = impact_match.group(1).capitalize() if impact_match else "N/A"
 
-                        # 提取解决方案预览
-                        solution = advisory.get("solution", "")
-                        if len(solution) > 100:
-                            solution = solution[:100] + "..."
-                        if not solution:
-                            solution = "详见公告详情"
+                        # 公告内容（Dell 公告的标题）
+                        dell_title = advisory.get("title", "")
+                        if len(dell_title) > 150:
+                            dell_title = dell_title[:150] + "..."
+                        if not dell_title:
+                            dell_title = "详见公告详情"
 
                         severity = cve.get("cvss_severity", "未知")
                         tag = severity if severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else ""
@@ -4430,12 +5798,15 @@ foreach ($tokenName in $targets.Keys) {
                                 severity,
                                 cve.get("cvss_score", "N/A"),
                                 advisory.get("dell_security_advisory", "N/A"),
-                                products_str,
-                                solution
+                                impact,
+                                dell_title
                             ),
                             "tag": tag
                         })
                         matched_count += 1
+
+            # 缓存所有匹配项用于搜索过滤
+            self.matched_items_cache = matched_items
 
             # 只显示前 500 条（性能优化）
             max_display = 500
@@ -4538,17 +5909,19 @@ foreach ($tokenName in $targets.Keys) {
                     if cve_id in cve_dict:
                         cve = cve_dict[cve_id]
 
-                        # 提取产品型号
-                        products = advisory.get("affected_products", [])
-                        product_names = [p.get("name", "") for p in products[:3]]
-                        products_str = ", ".join(product_names) if product_names else "详见公告"
+                        # 提取影响等级（来自 Dell 公告的 impact 字段）
+                        impact = advisory.get("impact", "")
+                        if not impact:
+                            summary = advisory.get("summary", "")
+                            impact_match = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
+                            impact = impact_match.group(1).capitalize() if impact_match else "N/A"
 
-                        # 提取解决方案预览
-                        solution = advisory.get("solution", "")
-                        if len(solution) > 100:
-                            solution = solution[:100] + "..."
-                        if not solution:
-                            solution = "详见公告详情"
+                        # 公告内容（Dell 公告的标题）
+                        dell_title = advisory.get("title", "")
+                        if len(dell_title) > 150:
+                            dell_title = dell_title[:150] + "..."
+                        if not dell_title:
+                            dell_title = "详见公告详情"
 
                         severity = cve.get("cvss_severity", "未知")
                         tag = severity if severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else ""
@@ -4559,12 +5932,15 @@ foreach ($tokenName in $targets.Keys) {
                                 severity,
                                 cve.get("cvss_score", "N/A"),
                                 advisory.get("dell_security_advisory", "N/A"),
-                                products_str,
-                                solution
+                                impact,
+                                dell_title
                             ),
                             "tag": tag
                         })
                         matched_count += 1
+
+            # 缓存所有匹配项用于搜索过滤
+            self.matched_items_cache = matched_items
 
             # 批量插入到树视图（减少 GUI 更新次数）
             # 如果数据太多，只显示前 1000 条
@@ -4598,6 +5974,103 @@ foreach ($tokenName in $targets.Keys) {
             self.log(f"详细错误信息: {traceback.format_exc()}")
 
     # ==================== 搜索过滤功能 ====================
+
+    def filter_matched_data(self, *args):
+        """过滤关联数据（支持 CVE编号、Dell公告ID 搜索）"""
+        search_term = self.matched_search_var.get().strip()
+        search_upper = search_term.upper()
+
+        # 清空树视图
+        for item in self.matched_tree.get_children():
+            self.matched_tree.delete(item)
+
+        # 如果搜索框为空，显示所有缓存数据
+        if not search_term:
+            for item_data in self.matched_items_cache:
+                self.matched_tree.insert("", "end", values=item_data["values"], tags=(item_data["tag"],))
+            return
+
+        # 在缓存中搜索（CVE ID 在 index 0，Dell公告 在 index 3）
+        matched = []
+        for item_data in self.matched_items_cache:
+            values = item_data["values"]
+            cve_id = str(values[0]).upper() if values[0] else ""
+            dell_id = str(values[3]).upper() if values[3] else ""
+            if search_upper in cve_id or search_upper in dell_id:
+                matched.append(item_data)
+
+        for item_data in matched:
+            self.matched_tree.insert("", "end", values=item_data["values"], tags=(item_data["tag"],))
+
+        self.log(f"关联数据搜索 '{search_term}'：找到 {len(matched)} 条匹配记录")
+
+    def delete_matched_selected(self):
+        """删除关联列表中选中的记录（从 Dell 公告中移除对应 CVE 关联）"""
+        selected = self.matched_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先选择要删除的记录（支持 Ctrl/Shift 多选）")
+            return
+
+        count = len(selected)
+        if not messagebox.askyesno(
+            "确认删除",
+            f"确定要删除选中的 {count} 条关联记录吗？\n"
+            f"注意：这将从对应的 Dell 安全公告中移除关联的 CVE ID。"
+        ):
+            return
+
+        # 收集要删除的 (cve_id, dell_id) 对
+        pairs_to_delete = []
+        for iid in selected:
+            values = self.matched_tree.item(iid, 'values')
+            if values:
+                pairs_to_delete.append((str(values[0]), str(values[3])))
+
+        # 从数据库的 Dell 公告中移除 CVE 关联
+        try:
+            cursor = self.conn.cursor()
+            for cve_id, dell_id in pairs_to_delete:
+                cursor.execute("SELECT data FROM dell_advisories WHERE dsa_id = ?", (dell_id,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    data = json.loads(row[0])
+                    cve_ids = data.get("cve_ids", [])
+                    if cve_id in cve_ids:
+                        cve_ids.remove(cve_id)
+                        data["cve_ids"] = cve_ids
+                        new_cve_str = ", ".join(cve_ids)
+                        cursor.execute(
+                            "UPDATE dell_advisories SET cve_ids = ?, data = ? WHERE dsa_id = ?",
+                            (new_cve_str, json.dumps(data, ensure_ascii=False), dell_id)
+                        )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            messagebox.showerror("删除失败", f"数据库操作失败：{e}")
+            return
+
+        # 同步更新内存中的 dell_advisories
+        pairs_set = set(pairs_to_delete)
+        for advisory in self.dell_advisories:
+            dsa_id = advisory.get("dell_security_advisory", "")
+            cve_ids = advisory.get("cve_ids", [])
+            for cve_id, dell_id in pairs_set:
+                if dsa_id == dell_id and cve_id in cve_ids:
+                    cve_ids.remove(cve_id)
+
+        # 从缓存中移除
+        self.matched_items_cache = [
+            item for item in self.matched_items_cache
+            if (str(item["values"][0]), str(item["values"][3])) not in pairs_set
+        ]
+
+        # 从树视图中移除
+        for iid in selected:
+            self.matched_tree.delete(iid)
+
+        preview = ', '.join(f"{p[0]}-{p[1]}" for p in pairs_to_delete[:3])
+        suffix = '...' if count > 3 else ''
+        self.log(f"已删除 {count} 条关联记录：{preview}{suffix}")
+        self.update_stats()
 
     def filter_nvd_data(self, *args):
         """过滤 NVD 数据（优化：支持从数据库搜索）"""
@@ -4978,110 +6451,228 @@ Dell 安全公告详细信息
 
     # ==================== AI解决方案功能 ====================
 
-    def ai_solution_click(self):
-        """AI解决方案按钮点击事件"""
+    def nvd_ai_solution_click(self):
+        """NVD标签页 AI解决方案按钮点击事件"""
         try:
-            # 获取当前选中的关联数据
-            selection = self.matched_tree.selection()
-
+            selection = self.nvd_tree.selection()
             if not selection:
-                messagebox.showwarning("提示", "请先选择要分析的CVE-Dell关联数据")
+                messagebox.showwarning("提示", "请先选择要分析的 CVE 数据")
                 return
 
-            # 收集所有选中的数据用于AI分析
-            selected_data = []
-            for item_id in selection:
-                item = self.matched_tree.item(item_id)
-                values = item['values']
-                cve_id = values[0]
-                severity = values[1]
-                cvss_score = values[2]
-                advisory_id = values[3]
-                affected_product = values[4]
+            # 获取选中的 CVE ID
+            item = self.nvd_tree.item(selection[0])
+            cve_id = item['values'][0]
 
-                selected_data.append({
-                    'cve_id': cve_id,
-                    'severity': severity,
-                    'cvss_score': cvss_score,
-                    'advisory_id': advisory_id,
-                    'affected_product': affected_product
-                })
-
-            # 如果选中多个，只处理第一个（可后续扩展）
-            data = selected_data[0]
-            cve_id = data['cve_id']
-            advisory_id = data['advisory_id']
-
-            # 查找详细数据
+            # 从内存中查找详细数据
             cve_detail = None
-            dell_detail = None
-
             for cve in self.cve_data:
                 if cve.get('cve_id') == cve_id:
                     cve_detail = cve
                     break
 
-            for advisory in self.dell_advisories:
-                if advisory.get('dell_security_advisory') == advisory_id:
-                    dell_detail = advisory
-                    break
-
+            # 内存中未找到，从数据库查询
             if not cve_detail:
-                # 尝试从数据库查询
                 try:
-                    with self.db_lock:
-                        cursor = self.db_conn.cursor()
-                        cursor.execute(
-                            "SELECT * FROM cves WHERE cve_id = ?",
-                            (cve_id,)
-                        )
-                        row = cursor.fetchone()
-                        if row:
-                            # 将数据库行转换为字典
-                            cols = [desc[0] for desc in cursor.description]
-                            cve_detail = dict(zip(cols, row))
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT data FROM cves WHERE cve_id = ?", (cve_id,))
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        cve_detail = json.loads(row[0])
                 except Exception as e:
                     self.log(f"从数据库查询CVE数据失败: {str(e)}")
 
-            if not dell_detail:
-                # 尝试从数据库查询
-                try:
-                    with self.db_lock:
-                        cursor = self.db_conn.cursor()
-                        # 注意：数据库列名是dsa_id，不是dell_security_advisory
-                        cursor.execute(
-                            "SELECT * FROM dell_advisories WHERE dsa_id = ?",
-                            (advisory_id,)
-                        )
-                        row = cursor.fetchone()
-                        if row:
-                            cols = [desc[0] for desc in cursor.description]
-                            dell_detail = dict(zip(cols, row))
-                except Exception as e:
-                    self.log(f"从数据库查询Dell公告数据失败: {str(e)}")
+            if not cve_detail:
+                messagebox.showerror("错误", f"无法找到 {cve_id} 的详细数据")
+                return
 
-            if cve_detail and dell_detail:
-                # 在后台线程中调用AI分析
-                self.log(f"正在调用AI分析: {cve_id} - {advisory_id}...")
-                threading.Thread(
-                    target=self._call_ai_solution_thread,
-                    args=(cve_detail, dell_detail),
-                    daemon=True
-                ).start()
-            else:
-                messagebox.showerror("错误", "无法找到完整的CVE或Dell公告数据")
+            self.log(f"正在调用AI分析: {cve_id}...")
+            threading.Thread(
+                target=self._call_nvd_ai_solution_thread,
+                args=(cve_detail,),
+                daemon=True
+            ).start()
 
         except Exception as e:
             error_msg = f"AI解决方案处理失败: {str(e)}"
             self.log(error_msg)
             messagebox.showerror("错误", error_msg)
 
+    def matched_ai_solution_click(self):
+        """CVE-Dell关联标签页 AI解决方案按钮点击事件"""
+        try:
+            selection = self.matched_tree.selection()
+            if not selection:
+                messagebox.showwarning("提示", "请先选择要分析的关联数据")
+                return
+
+            # matched_tree 列: CVE ID, 严重等级, CVSS, Dell公告ID, 影响等级, 公告内容
+            item = self.matched_tree.item(selection[0])
+            cve_id = item['values'][0]
+            advisory_id = item['values'][3] if len(item['values']) > 3 else None
+
+            # 从内存中查找CVE详细数据
+            cve_detail = None
+            for cve in self.cve_data:
+                if cve.get('cve_id') == cve_id:
+                    cve_detail = cve
+                    break
+
+            # 内存中未找到，从数据库查询
+            if not cve_detail:
+                try:
+                    with self.db_lock:
+                        cursor = self.db_conn.cursor()
+                        cursor.execute("SELECT data FROM cves WHERE cve_id = ?", (cve_id,))
+                        row = cursor.fetchone()
+                        if row and row[0]:
+                            cve_detail = json.loads(row[0])
+                except Exception as e:
+                    self.log(f"从数据库查询CVE数据失败: {str(e)}")
+
+            if not cve_detail:
+                messagebox.showerror("错误", f"无法找到 {cve_id} 的详细数据")
+                return
+
+            # 查找Dell公告详细数据
+            dell_detail = None
+            if advisory_id and advisory_id not in ("N/A", "NA"):
+                for advisory in self.dell_advisories:
+                    if advisory.get('dell_security_advisory') == advisory_id:
+                        dell_detail = advisory
+                        break
+                if not dell_detail:
+                    try:
+                        with self.db_lock:
+                            cursor = self.db_conn.cursor()
+                            cursor.execute("SELECT * FROM dell_advisories WHERE dsa_id = ?", (advisory_id,))
+                            row = cursor.fetchone()
+                            if row:
+                                cols = [desc[0] for desc in cursor.description]
+                                dell_detail = dict(zip(cols, row))
+                    except Exception as e:
+                        self.log(f"从数据库查询Dell公告数据失败: {str(e)}")
+
+            if dell_detail:
+                # 有Dell公告数据，使用CVE+Dell联合分析
+                self.log(f"正在调用AI分析（关联数据）: {cve_id} - {advisory_id}...")
+                threading.Thread(
+                    target=self._call_ai_solution_thread,
+                    args=(cve_detail, dell_detail),
+                    daemon=True
+                ).start()
+            else:
+                # 无Dell公告数据，仅分析CVE
+                self.log(f"正在调用AI分析（仅CVE）: {cve_id}...")
+                threading.Thread(
+                    target=self._call_nvd_ai_solution_thread,
+                    args=(cve_detail,),
+                    daemon=True
+                ).start()
+
+        except Exception as e:
+            error_msg = f"AI解决方案处理失败: {str(e)}"
+            self.log(error_msg)
+            messagebox.showerror("错误", error_msg)
+
+    def _call_nvd_ai_solution_thread(self, cve_data):
+        """在后台线程中调用AI分析CVE数据（无需Dell公告）"""
+        try:
+            model_name = os.getenv("QWEN_MODEL", "qwen3.5-plus")
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+            if not api_key:
+                raise ValueError(
+                    "Qwen API密钥未设置。\n"
+                    "请在 .env 文件中设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY。"
+                )
+
+            # 构建CVE专用提示词
+            description = cve_data.get('description', '无详细描述')
+            if len(description) > 800:
+                description = description[:800] + "..."
+
+            references = cve_data.get('references', [])
+            ref_urls = "\n".join([f"  - {r.get('url', '')}" for r in references[:5]]) if references else "  无"
+
+            weaknesses = cve_data.get('weaknesses', [])
+            weakness_str = ", ".join(weaknesses) if weaknesses else "未知"
+
+            products = cve_data.get('affected_products', [])
+            products_list = []
+            for p in products[:10]:
+                vendor = p.get('vendor', '')
+                product = p.get('product', '')
+                version = p.get('version', '*')
+                if vendor and product:
+                    products_list.append(f"  - {vendor} / {product} (版本: {version})")
+            products_str = "\n".join(products_list) if products_list else "  未列出"
+
+            prompt = f"""请为以下CVE漏洞提供专业的安全解决方案分析：
+
+【CVE信息】
+- CVE编号: {cve_data.get('cve_id', 'N/A')}
+- 严重等级: {cve_data.get('cvss_severity', '未知')}
+- CVSS评分: {cve_data.get('cvss_score', 'N/A')}
+- CVSS向量: {cve_data.get('cvss_vector', 'N/A')}
+- 发布日期: {cve_data.get('published_date', 'N/A')}
+- 漏洞状态: {cve_data.get('vuln_status', 'N/A')}
+- CWE类型: {weakness_str}
+
+【漏洞描述】
+{description}
+
+【受影响产品】
+{products_str}
+
+【参考链接】
+{ref_urls}
+
+【分析要求】
+请提供以下内容：
+1. 漏洞详细分析：漏洞原理、攻击向量、利用条件和影响范围
+2. 受影响产品和版本范围的详细说明
+3. 推荐的修复方案（补丁、升级版本等）
+4. 临时缓解措施（在补丁未就绪时的应急方案）
+5. 网络层面的监控和检测建议
+6. 相关参考资源
+
+请以专业、结构清晰的格式组织答案。"""
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=120)
+            analysis_date = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": f"你是一个企业级安全顾问，专业提供CVE漏洞分析和解决方案建议。当前分析日期: {analysis_date}。请在报告中使用此日期作为分析日期。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+
+            solution_result = response.choices[0].message.content
+
+            # 构造空的 dell_advisory_data 以复用显示逻辑
+            empty_dell = {"dell_security_advisory": "NA", "title": ""}
+            self.root.after(0, self._show_ai_solution_result, solution_result, cve_data, empty_dell)
+
+        except ImportError:
+            err = "openai库未安装。请运行: pip install openai"
+            self.root.after(0, self.log, err)
+            self.root.after(0, messagebox.showerror, "错误", err)
+        except Exception as e:
+            error_msg = f"AI解决方案分析失败: {str(e)}"
+            self.root.after(0, self.log, error_msg)
+            self.root.after(0, messagebox.showerror, "错误", error_msg)
+
     def _call_ai_solution_thread(self, cve_data, dell_advisory_data):
         """在后台线程中调用AI分析"""
         try:
             # 读取环境变量配置
             # 模型名称：从QWEN_MODEL环境变量读取，默认为qwen-max-latest
-            model_name = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            model_name = os.getenv("QWEN_MODEL", "qwen3.5-plus")
 
             # API密钥：优先读取QWEN_API_KEY，回退到DASHSCOPE_API_KEY
             api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
@@ -5123,12 +6714,13 @@ Qwen API密钥未设置。
                     base_url=base_url
                 )
 
+                analysis_date = datetime.now().strftime("%Y年%m月%d日 %H:%M")
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {
                             "role": "system",
-                            "content": "你是一个企业级安全顾问，专业提供CVE漏洞分析和解决方案建议"
+                            "content": f"你是一个企业级安全顾问，专业提供CVE漏洞分析和解决方案建议。当前分析日期: {analysis_date}。请在报告中使用此日期作为分析日期。"
                         },
                         {
                             "role": "user",
@@ -5167,6 +6759,15 @@ Qwen API密钥未设置。
         # 兼容两种Dell公告ID字段名
         advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id', 'N/A')
 
+        # 处理 affected_products（可能是 dict 列表或 str 列表）
+        raw_products = dell_advisory_data.get('affected_products', [])
+        prod_names = []
+        for p in raw_products:
+            if isinstance(p, dict):
+                prod_names.append(p.get('name', p.get('product', str(p))))
+            else:
+                prod_names.append(str(p))
+
         prompt = f"""
 请为以下CVE漏洞和Dell安全公告提供专业的安全解决方案分析：
 
@@ -5181,7 +6782,7 @@ Qwen API密钥未设置。
 - 公告编号: {advisory_id}
 - 标题: {dell_advisory_data.get('title', 'N/A')}
 - 发布日期: {dell_advisory_data.get('published_date', 'N/A')}
-- 影响产品: {', '.join([p.get('name', 'N/A') for p in dell_advisory_data.get('affected_products', [])])}
+- 影响产品: {', '.join(prod_names)}
 
 【分析要求】
 请提供以下内容：
@@ -5197,38 +6798,76 @@ Qwen API密钥未设置。
         return prompt
 
     def _show_ai_solution_result(self, result, cve_data, dell_advisory_data):
-        """显示AI分析结果"""
+        """弹框显示AI分析结果，用户可选择保存到解决方案标签页"""
         try:
-            # 保存到数据库
-            self.save_ai_solution_to_db(cve_data, dell_advisory_data, result, "成功")
+            cve_id = cve_data.get('cve_id', 'N/A')
+            advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id') or 'N/A'
 
-            # 刷新解决方案列表
-            self.load_ai_solution_history()
+            # 创建弹框
+            dialog = tk.Toplevel(self.root)
+            dialog.title(f"AI解决方案 - {cve_id}")
+            dialog.geometry("900x650")
+            dialog.transient(self.root)
+            dialog.grab_set()
 
-            # 在详细结果区域显示
-            if hasattr(self, 'solution_detail_text'):
-                self.solution_detail_text.config(state=tk.NORMAL)
-                self.solution_detail_text.delete(1.0, tk.END)
+            # 标题
+            header_text = f"CVE编号: {cve_id}"
+            if advisory_id and advisory_id not in ("N/A", "NA"):
+                header_text += f"  |  Dell公告: {advisory_id}"
+            header_text += f"  |  分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-                # 兼容两种Dell公告ID字段名
-                advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id')
+            tk.Label(
+                dialog, text=header_text,
+                font=("Microsoft YaHei", 10, "bold"),
+                bg="#f0f0f0", padx=10, pady=8
+            ).pack(fill=tk.X)
 
-                header = f"""
-【AI解决方案分析】
-CVE编号: {cve_data.get('cve_id')} | 公告ID: {advisory_id}
-分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-{'=' * 80}
+            # 结果文本区域
+            text_frame = tk.Frame(dialog)
+            text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-"""
-                self.solution_detail_text.insert(tk.END, header)
-                self.solution_detail_text.insert(tk.END, result)
-                self.solution_detail_text.config(state=tk.DISABLED)
+            result_text = scrolledtext.ScrolledText(
+                text_frame, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa"
+            )
+            result_text.pack(fill=tk.BOTH, expand=True)
+            result_text.insert(tk.END, result)
+            result_text.config(state=tk.DISABLED)
 
-            # 切换到解决方案标签页
-            # 使用保存的标签页ID而不是尝试从tabs列表中查找
-            self.notebook.select(self.solution_tab_id)
+            # 底部按钮区域
+            btn_frame = tk.Frame(dialog, bg="white", pady=10)
+            btn_frame.pack(fill=tk.X, padx=10)
 
-            self.log(f"AI分析完成: {cve_data.get('cve_id')}")
+            def save_and_close():
+                self.save_ai_solution_to_db(cve_data, dell_advisory_data, result, "成功")
+                self.load_ai_solution_history()
+                # 在详细结果区域也显示
+                if hasattr(self, 'solution_detail_text'):
+                    self.solution_detail_text.config(state=tk.NORMAL)
+                    self.solution_detail_text.delete(1.0, tk.END)
+                    self.solution_detail_text.insert(tk.END, f"【AI解决方案分析】\n{header_text}\n{'=' * 80}\n\n")
+                    self.solution_detail_text.insert(tk.END, result)
+                    self.solution_detail_text.config(state=tk.DISABLED)
+                self.log(f"AI分析结果已保存: {cve_id}")
+                dialog.destroy()
+                self.notebook.select(self.solution_tab_id)
+
+            save_btn = tk.Button(
+                btn_frame, text="💾 保存到解决方案", command=save_and_close,
+                bg=self.success_color, fg="white",
+                font=("Microsoft YaHei", 11, "bold"),
+                padx=20, pady=6, relief=tk.FLAT, cursor="hand2"
+            )
+            save_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+            close_btn = tk.Button(
+                btn_frame, text="关闭", command=dialog.destroy,
+                bg="#95a5a6", fg="white",
+                font=("Microsoft YaHei", 11, "bold"),
+                padx=20, pady=6, relief=tk.FLAT, cursor="hand2"
+            )
+            close_btn.pack(side=tk.LEFT)
+
+            self.log(f"AI分析完成: {cve_id}")
 
         except Exception as e:
             error_msg = f"显示分析结果失败: {str(e)}"
@@ -5253,7 +6892,7 @@ CVE编号: {cve_data.get('cve_id')} | 公告ID: {advisory_id}
                         cve_data.get('cve_id'),
                         advisory_id,
                         datetime.now().isoformat(),
-                        os.getenv("qwen3-max-2026-01-23", "qwen-max-latest"),
+                        os.getenv("QWEN_MODEL", "qwen3.5-plus"),
                         "",  # 提示词可选
                         result[:10000],  # 限制长度
                         status
@@ -5418,6 +7057,59 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
             self.log(error_msg)
             messagebox.showerror("错误", error_msg)
 
+    def delete_solution_selected(self):
+        """删除解决方案列表中选中的记录（支持多选）"""
+        selected = self.solution_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先选择要删除的记录（支持 Ctrl/Shift 多选）")
+            return
+
+        count = len(selected)
+        if not messagebox.askyesno(
+            "确认删除",
+            f"确定要删除选中的 {count} 条AI解决方案记录吗？"
+        ):
+            return
+
+        # 收集要删除的记录标识（时间戳 + CVE ID + Dell公告ID）
+        items_to_delete = []
+        for iid in selected:
+            values = self.solution_tree.item(iid, 'values')
+            if values:
+                items_to_delete.append({
+                    'time': str(values[0]),
+                    'cve_id': str(values[1]),
+                    'advisory_id': str(values[2])
+                })
+
+        try:
+            with self.db_lock:
+                cursor = self.db_conn.cursor()
+                for item in items_to_delete:
+                    cursor.execute(
+                        "DELETE FROM ai_solutions WHERE cve_id = ? AND dell_advisory_id = ? AND analysis_time LIKE ?",
+                        (item['cve_id'], item['advisory_id'], f"%{item['time'][:10]}%")
+                    )
+                self.db_conn.commit()
+        except sqlite3.Error as e:
+            messagebox.showerror("删除失败", f"数据库操作失败：{e}")
+            return
+
+        # 从内存中移除
+        delete_keys = {(d['cve_id'], d['advisory_id'], d['time']) for d in items_to_delete}
+        self.solution_history = [
+            h for h in self.solution_history
+            if (h['cve_id'], h.get('advisory_id', ''), h.get('time', '')) not in delete_keys
+        ]
+
+        # 从树视图中移除
+        for iid in selected:
+            self.solution_tree.delete(iid)
+
+        preview = ', '.join(d['cve_id'] for d in items_to_delete[:5])
+        suffix = '...' if count > 5 else ''
+        self.log(f"已删除 {count} 条AI解决方案记录：{preview}{suffix}")
+
     def on_matched_item_double_click(self, event):
         """处理关联项目双击事件"""
         selection = self.matched_tree.selection()
@@ -5512,91 +7204,139 @@ CVE 描述:
     # ==================== 统计更新功能 ====================
 
     def update_stats(self):
-        """更新统计信息（优化版，使用哈希表加速）"""
-        # ✅ 修复：从数据库获取实际总数（而非内存列表）
+        """更新统计信息（图表 + 详情列表）"""
         nvd_total = self.get_cve_count_from_db()
         dell_total = self.get_dell_count_from_db()
-
-        # ✅ 修复：从数据库计算关联匹配数（不依赖内存中的cve_data）
-        # 这样即使CVE数据未加载到内存，也能显示正确的关联数
         matched_count = self.get_matched_count_from_db()
 
-        # 统计各严重等级
-        severity_count = {
-            "CRITICAL": 0,
-            "HIGH": 0,
-            "MEDIUM": 0,
-            "LOW": 0
-        }
+        # ── CVE 严重等级统计 ──
+        cve_severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        if self.cve_data:
+            for cve in self.cve_data:
+                severity = cve.get("cvss_severity", "")
+                if severity in cve_severity:
+                    cve_severity[severity] += 1
+        else:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM cves ORDER BY published_date DESC LIMIT 500")
+                for (raw,) in cursor.fetchall():
+                    try:
+                        d = json.loads(raw)
+                        s = d.get("cvss_severity", "")
+                        if s in cve_severity:
+                            cve_severity[s] += 1
+                    except:
+                        continue
+            except:
+                pass
 
-        for cve in self.cve_data:
-            severity = cve.get("cvss_severity", "")
-            if severity in severity_count:
-                severity_count[severity] += 1
+        # ── Dell 公告影响等级统计 ──
+        dell_severity = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+        dell_source = self.dell_advisories if self.dell_advisories else []
+        if not dell_source:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC LIMIT 500")
+                for (raw,) in cursor.fetchall():
+                    try:
+                        dell_source.append(json.loads(raw))
+                    except:
+                        continue
+            except:
+                pass
+        for adv in dell_source:
+            impact = adv.get('impact', '')
+            if not impact:
+                summary = adv.get('summary', '')
+                m = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
+                impact = m.group(1).capitalize() if m else ''
+            if impact in dell_severity:
+                dell_severity[impact] += 1
 
-        # 更新统计卡片
+        # 更新卡片数值
         self.stats_cards["NVD CVE总数"].value_label.config(text=str(nvd_total))
         self.stats_cards["Dell公告数"].value_label.config(text=str(dell_total))
         self.stats_cards["关联匹配数"].value_label.config(text=str(matched_count))
-        self.stats_cards["严重"].value_label.config(text=str(severity_count["CRITICAL"]))
-        self.stats_cards["高危"].value_label.config(text=str(severity_count["HIGH"]))
-        self.stats_cards["中危"].value_label.config(text=str(severity_count["MEDIUM"]))
-        self.stats_cards["低危"].value_label.config(text=str(severity_count["LOW"]))
+        self.stats_cards["严重"].value_label.config(text=str(cve_severity["CRITICAL"]))
+        self.stats_cards["高危"].value_label.config(text=str(cve_severity["HIGH"]))
+        self.stats_cards["中危"].value_label.config(text=str(cve_severity["MEDIUM"]))
+        self.stats_cards["低危"].value_label.config(text=str(cve_severity["LOW"]))
 
         # 更新底部状态栏
         self.cve_count_label.config(
             text=f"NVD CVE: {nvd_total} | Dell 公告: {dell_total} | 关联: {matched_count}"
         )
 
-        # 生成详细统计报告
-        stats_text = f"""
-{'=' * 80}
-CVE 漏洞监控系统 - 统计报告
-{'=' * 80}
+        # 绘制图表（CVE饼图 + Dell饼图 + 柱状图）
+        self._draw_charts(cve_severity, dell_severity, nvd_total, dell_total, matched_count)
 
-生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        # ── 填充最新 CVE 前10 ──
+        for item in self.stats_cve_tree.get_children():
+            self.stats_cve_tree.delete(item)
 
-【数据概览】
-NVD CVE 总数: {nvd_total}
-Dell 安全公告数: {dell_total}
-关联匹配数: {matched_count}
-匹配率: {(matched_count / nvd_total * 100) if nvd_total > 0 else 0:.2f}%
+        top_cves = []
+        if self.cve_data:
+            top_cves = self.cve_data[:10]
+        else:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM cves ORDER BY published_date DESC LIMIT 10")
+                for (raw,) in cursor.fetchall():
+                    try:
+                        top_cves.append(json.loads(raw))
+                    except:
+                        continue
+            except:
+                pass
 
-【严重等级分布】
-CRITICAL (严重): {severity_count['CRITICAL']} 个 ({severity_count['CRITICAL'] / nvd_total * 100 if nvd_total > 0 else 0:.1f}%)
-HIGH     (高危): {severity_count['HIGH']} 个 ({severity_count['HIGH'] / nvd_total * 100 if nvd_total > 0 else 0:.1f}%)
-MEDIUM   (中危): {severity_count['MEDIUM']} 个 ({severity_count['MEDIUM'] / nvd_total * 100 if nvd_total > 0 else 0:.1f}%)
-LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_total * 100 if nvd_total > 0 else 0:.1f}%)
-
-【最新 CVE (前10个)】
-"""
-
-        for cve in self.cve_data[:10]:
+        for cve in top_cves:
             cve_id = cve.get('cve_id', 'N/A')
-            severity = cve.get('cvss_severity', '未知')
+            severity = cve.get('cvss_severity', 'N/A') or 'N/A'
             score = cve.get('cvss_score', 'N/A')
+            score_str = str(score) if score is not None else 'N/A'
+            pub_date = cve.get('published_date', 'N/A') or 'N/A'
+            if pub_date and len(pub_date) > 10:
+                pub_date = pub_date[:10]
+            desc = (cve.get('description', '') or '')[:120]
+            tag = severity if severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW") else ""
+            self.stats_cve_tree.insert("", tk.END,
+                values=(cve_id, severity, score_str, pub_date, desc), tags=(tag,))
 
-            # 检查是否有 Dell 公告
-            has_dell = any(cve_id in advisory.get('cve_ids', []) for advisory in self.dell_advisories)
-            dell_mark = "[Dell]" if has_dell else ""
+        # ── 填充最新 Dell 安全公告 前10 ──
+        for item in self.stats_dell_tree.get_children():
+            self.stats_dell_tree.delete(item)
 
-            # 处理 None 值
-            severity_str = str(severity) if severity else "N/A"
-            score_str = str(score) if score is not None else "N/A"
-            stats_text += f"  - {cve_id:20} | {severity_str:8} | 评分: {score_str} {dell_mark}\n"
-
+        top_dells = []
         if self.dell_advisories:
-            stats_text += f"\n【最新 Dell 安全公告 (前5个)】\n"
-            for advisory in self.dell_advisories[:5]:
-                advisory_id = advisory.get('dell_security_advisory', 'N/A')
-                title = advisory.get('title', 'N/A')
-                cve_count = len(advisory.get('cve_ids', []))
-                stats_text += f"  - {advisory_id:20} | {title[:40]}... | {cve_count} CVE\n"
+            top_dells = self.dell_advisories[:10]
+        else:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC LIMIT 10")
+                for (raw,) in cursor.fetchall():
+                    try:
+                        top_dells.append(json.loads(raw))
+                    except:
+                        continue
+            except:
+                pass
 
-        stats_text += f"\n{'=' * 80}\n"
-
-        self.stats_text.delete(1.0, tk.END)
-        self.stats_text.insert(tk.END, stats_text)
+        for adv in top_dells:
+            dsa_id = adv.get('dell_security_advisory', 'N/A')
+            impact = adv.get('impact', '')
+            if not impact:
+                summary = adv.get('summary', '')
+                m = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
+                impact = m.group(1).capitalize() if m else 'N/A'
+            title = adv.get('title', 'N/A') or 'N/A'
+            cve_count = len(adv.get('cve_ids', []))
+            pub_date = adv.get('published_date', 'N/A') or 'N/A'
+            if pub_date and len(pub_date) > 10:
+                pub_date = pub_date[:10]
+            tag = impact if impact in ("Critical", "High", "Medium", "Low") else ""
+            self.stats_dell_tree.insert("", tk.END,
+                values=(dsa_id, impact, title, cve_count, pub_date), tags=(tag,))
 
     # ==================== 队列检查和日志功能 ====================
 

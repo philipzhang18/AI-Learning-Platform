@@ -111,6 +111,10 @@ credentials.json
 # Git temporary files
 *.orig
 *.rej
+*.backup
+
+# Windows artifacts
+nul
 
 # Jupyter
 .ipynb_checkpoints/

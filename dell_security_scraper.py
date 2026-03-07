@@ -1,14 +1,15 @@
 """
-Dell 安全公告网页爬取器
-由于 Dell RSS 已停用，使用网页爬取获取安全公告信息
+Dell 安全公告爬取器
+使用 Exa API、HTTP 请求、Selenium 多策略从 Dell 官网获取安全公告
 """
+import os
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
 import re
 import json
-from datetime import datetime
-from typing import List, Dict, Any
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Set, Optional, Callable
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -16,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 class DellSecurityScraper:
-    """Dell 安全公告网页爬取器"""
+    """Dell 安全公告爬取器 — Exa API / HTTP / Selenium 多策略"""
 
     def __init__(self):
-        self.base_url = "https://www.dell.com/support/kbdoc/en-us/000177325/dsa-published-in-2024"
+        self.base_url = "https://www.dell.com/support/security/en-us/"
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -27,165 +28,604 @@ class DellSecurityScraper:
             'Connection': 'keep-alive',
         }
 
-    async def fetch_security_advisories(self, days: int = 30) -> List[Dict[str, Any]]:
+    async def fetch_security_advisories(
+        self,
+        days: int = 30,
+        existing_dsa_ids: Set[str] = None,
+        log_callback: Callable[[str], None] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        获取 Dell 安全公告列表
+        获取 Dell 安全公告 — 主入口
 
-        Args:
-            days: 获取最近多少天的数据
-
-        Returns:
-            安全公告列表
+        流程:
+          1. 发现公告链接（Exa 搜索 -> 列表页 HTTP -> Selenium）
+          2. 过滤数据库中已存在的 DSA
+          3. 逐个抓取新公告详情页（Exa contents -> HTTP -> Selenium）
+          4. 解析内容，提取 Impact / CVE / 产品 等字段
         """
+        if existing_dsa_ids is None:
+            existing_dsa_ids = set()
+
+        def log(msg):
+            logger.info(msg)
+            if log_callback:
+                log_callback(msg)
+
+        exa_api_key = os.getenv("EXA_API_KEY")
+
+        # ── Step 1: 发现公告链接 ──
+        log(f"正在发现最近 {days} 天的 Dell 安全公告链接...")
+        advisory_links = await self._discover_advisory_links(days, exa_api_key, log)
+
+        if not advisory_links:
+            log("未能从 Dell 官网发现安全公告链接")
+            return []
+
+        log(f"共发现 {len(advisory_links)} 个公告链接")
+
+        # ── Step 2: 过滤已存在的 DSA ──
+        existing_upper = {d.upper() for d in existing_dsa_ids}
+        new_links = {}
+        skipped = 0
+        for dsa_id, url in advisory_links.items():
+            if dsa_id.upper() in existing_upper:
+                skipped += 1
+            else:
+                new_links[dsa_id] = url
+
+        if skipped:
+            log(f"跳过 {skipped} 条已存在的公告")
+        if not new_links:
+            log("所有发现的公告均已存在于数据库中")
+            return []
+
+        log(f"需要抓取 {len(new_links)} 条新公告详情...")
+
+        # ── Step 3: 逐个抓取详情页 ──
         advisories = []
+        for i, (dsa_id, url) in enumerate(new_links.items()):
+            try:
+                log(f"[{i + 1}/{len(new_links)}] 正在抓取 {dsa_id}...")
+                advisory = await self._fetch_and_parse_detail(dsa_id, url, exa_api_key)
+                if advisory:
+                    advisories.append(advisory)
+                    impact_str = advisory.get('impact') or 'N/A'
+                    cve_count = len(advisory.get('cve_ids', []))
+                    log(f"  -> {dsa_id} — Impact: {impact_str}, CVE: {cve_count}")
+                else:
+                    log(f"  -> {dsa_id} — 无法解析页面内容")
+                # 请求间隔
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                log(f"  -> {dsa_id} 抓取失败: {e}")
 
-        # 尝试真实爬取Dell官网
-        logger.info(f"尝试从Dell官网采集最近 {days} 天的安全公告...")
+        log(f"成功抓取 {len(advisories)} 条新安全公告")
+        return advisories
 
+    # ================================================================
+    #  发现公告链接
+    # ================================================================
+
+    async def _discover_advisory_links(self, days, exa_api_key, log):
+        """依次尝试 Exa 搜索 / HTTP 列表页 / Selenium 发现 DSA 链接"""
+        links = {}
+
+        # 策略 1: Exa 搜索 API
+        if exa_api_key:
+            log("策略 1: 使用 Exa 搜索 API 发现公告...")
+            links = await self._discover_via_exa_search(days, exa_api_key)
+            if links:
+                return links
+
+        # 策略 2: HTTP 爬取列表页
+        log("策略 2: 直接 HTTP 爬取 Dell 安全公告列表页...")
+        links = await self._discover_via_listing_page()
+        if links:
+            return links
+
+        # 策略 3: Selenium（处理 JS 渲染页面）
+        log("策略 3: 使用 Selenium 爬取列表页...")
+        links = await self._discover_via_selenium()
+        return links
+
+    async def _discover_via_exa_search(self, days, api_key):
+        """使用 Exa search API 搜索 Dell 安全公告页面"""
+        links = {}
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00.000Z")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "query": "Dell DSA security advisory vulnerability update",
+                    "numResults": min(days // 2 + 10, 100),
+                    "includeDomains": ["dell.com"],
+                    "startPublishedDate": start_date,
+                    "type": "auto",
+                }
+                async with session.post(
+                    "https://api.exa.ai/search",
+                    headers={
+                        "accept": "application/json",
+                        "content-type": "application/json",
+                        "x-api-key": api_key,
+                    },
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        results = (await resp.json()).get("results", [])
+                        for r in results:
+                            dsa_id = self._extract_dsa_id(r.get("url", ""), r.get("title", ""))
+                            if dsa_id:
+                                links[dsa_id] = r["url"]
+                        logger.info(f"Exa search: {len(results)} results -> {len(links)} DSA links")
+                    else:
+                        logger.warning(f"Exa search HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"Exa search error: {e}")
+        return links
+
+    async def _discover_via_listing_page(self):
+        """HTTP 爬取 Dell 安全公告列表页，提取所有 DSA 链接"""
+        links = {}
         try:
             async with aiohttp.ClientSession(headers=self.headers) as session:
-                async with session.get(self.base_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status == 200:
-                        html = await response.text()
-                        logger.info("✓ 成功访问Dell安全公告页面")
+                async with session.get(
+                    self.base_url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+                        soup = BeautifulSoup(html, 'html.parser')
 
-                        # 解析HTML页面
-                        parsed_advisories = self.parse_advisory_page(html)
+                        for a_tag in soup.find_all('a', href=True):
+                            href = a_tag['href']
+                            full_url = f"https://www.dell.com{href}" if href.startswith('/') else href
+                            text = a_tag.get_text(strip=True)
+                            dsa_id = self._extract_dsa_id(full_url, text)
+                            if dsa_id and full_url.startswith('http'):
+                                links[dsa_id] = full_url
 
-                        if parsed_advisories:
-                            # 根据时间范围过滤数据
-                            advisories = self.filter_by_days(parsed_advisories, days)
-                            logger.info(f"✓ 从网页解析到 {len(advisories)} 条安全公告")
-                            return advisories
-                        else:
-                            logger.warning("⚠ 网页解析未获取到数据，使用示例数据")
+                        logger.info(f"Listing page: {len(links)} DSA links found")
                     else:
-                        logger.warning(f"⚠ Dell官网返回 HTTP {response.status}，使用示例数据")
-
-        except asyncio.TimeoutError:
-            logger.warning("⚠ Dell官网访问超时，使用示例数据")
+                        logger.warning(f"Listing page HTTP {resp.status}")
         except Exception as e:
-            logger.warning(f"⚠ 访问Dell官网失败: {e}，使用示例数据")
+            logger.warning(f"Listing page scrape error: {e}")
+        return links
 
-        # 如果网页爬取失败，返回根据时间范围生成的示例数据
-        logger.info("注意：Dell RSS已停用，使用高质量示例数据")
-        advisories = self.get_sample_advisories_by_days(days)
-        logger.info(f"成功生成 {len(advisories)} 条示例安全公告（覆盖 {days} 天范围）")
-
-        return advisories
-
-    def parse_advisory_page(self, html: str) -> List[Dict[str, Any]]:
-        """
-        解析安全公告页面
-
-        Args:
-            html: HTML 内容
-
-        Returns:
-            安全公告列表
-        """
-        advisories = []
-
+    async def _discover_via_selenium(self):
+        """使用 Selenium 爬取列表页（处理 JS 动态渲染）"""
         try:
-            soup = BeautifulSoup(html, 'html.parser')
-
-            # 查找安全公告表格或列表
-            # Dell 页面结构可能包含表格或列表
-            tables = soup.find_all('table')
-
-            for table in tables:
-                rows = table.find_all('tr')
-
-                for row in rows[1:]:  # 跳过表头
-                    cells = row.find_all(['td', 'th'])
-
-                    if len(cells) >= 2:
-                        # 提取信息
-                        text = ' '.join([cell.get_text(strip=True) for cell in cells])
-
-                        # 提取 DSA ID
-                        dsa_match = re.search(r'DSA-\d{4}-\d{3}', text)
-                        dsa_id = dsa_match.group(0) if dsa_match else ""
-
-                        # 提取 CVE IDs
-                        cve_ids = self.extract_cve_ids(text)
-
-                        # 提取链接
-                        link_tag = row.find('a')
-                        link = link_tag['href'] if link_tag and 'href' in link_tag.attrs else ""
-                        if link and not link.startswith('http'):
-                            link = f"https://www.dell.com{link}"
-
-                        # 提取标题
-                        title = cells[0].get_text(strip=True) if cells else ""
-
-                        if dsa_id or cve_ids:
-                            advisory = {
-                                'dell_security_advisory': dsa_id,
-                                'title': title,
-                                'cve_ids': cve_ids,
-                                'link': link,
-                                'published_date': datetime.now().isoformat(),
-                                'summary': text[:200],
-                                'description': text,
-                                'affected_products': self.extract_products_from_text(text),
-                                'solution': self.extract_solution_from_text(text)
-                            }
-                            advisories.append(advisory)
-
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self._selenium_get_links)
+        except ImportError:
+            logger.info("Selenium 未安装，跳过")
         except Exception as e:
-            logger.error(f"解析页面失败: {e}")
+            logger.warning(f"Selenium discovery error: {e}")
+        return {}
 
-        return advisories
+    def _selenium_get_links(self):
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+
+        links = {}
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+
+        driver = webdriver.Chrome(options=options)
+        try:
+            driver.get(self.base_url)
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            for a in driver.find_elements(By.TAG_NAME, "a"):
+                href = a.get_attribute("href") or ""
+                text = a.text or ""
+                dsa_id = self._extract_dsa_id(href, text)
+                if dsa_id and href.startswith('http'):
+                    links[dsa_id] = href
+            logger.info(f"Selenium: {len(links)} DSA links found")
+        finally:
+            driver.quit()
+        return links
+
+    # ================================================================
+    #  抓取并解析单个公告详情页
+    # ================================================================
+
+    async def _fetch_and_parse_detail(self, dsa_id, url, exa_api_key=None):
+        """抓取单个公告页面内容并解析为结构化数据"""
+        text = ""
+        html = ""
+
+        # 1. Exa API 获取纯文本（优先）
+        if exa_api_key:
+            text = await self._fetch_content_exa(url, exa_api_key)
+
+        # 2. HTTP 获取原始 HTML（用于解析表格）+ 文本回退
+        raw_html = await self._fetch_raw_html(url)
+        if raw_html:
+            html = raw_html
+            if not text:
+                text = self._html_to_text(html)
+
+        # 3. Selenium 兜底
+        if not text:
+            text = await self._fetch_content_selenium(url)
+
+        if not text:
+            return None
+
+        return self._parse_advisory_content(dsa_id, url, text, html)
+
+    async def _fetch_raw_html(self, url):
+        """HTTP 请求获取原始 HTML（用于解析表格结构）"""
+        try:
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.text()
+        except Exception as e:
+            logger.warning(f"HTML fetch error for {url}: {e}")
+        return ""
+
+    def _html_to_text(self, html):
+        """将 HTML 转换为纯文本"""
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+            tag.decompose()
+        return soup.get_text(separator='\n', strip=True)
+
+    async def _fetch_content_exa(self, url, api_key):
+        """Exa contents API 获取页面正文"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://api.exa.ai/contents",
+                    headers={
+                        "accept": "application/json",
+                        "content-type": "application/json",
+                        "x-api-key": api_key,
+                    },
+                    json={"ids": [url], "text": True},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        results = (await resp.json()).get("results", [])
+                        if results:
+                            return results[0].get("text", "")
+                    else:
+                        logger.warning(f"Exa contents HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"Exa contents error: {e}")
+        return ""
+
+    async def _fetch_content_selenium(self, url):
+        """Selenium 获取页面文本（处理 JS 渲染）"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self._selenium_get_content, url)
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"Selenium content error: {e}")
+        return ""
+
+    def _selenium_get_content(self, url):
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+
+        driver = webdriver.Chrome(options=options)
+        try:
+            driver.get(url)
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            return driver.find_element(By.TAG_NAME, "body").text
+        finally:
+            driver.quit()
+
+    # ================================================================
+    #  内容解析
+    # ================================================================
+
+    def _parse_advisory_content(self, dsa_id, url, content, html=""):
+        """将页面文本解析为安全公告字典"""
+        # CVE IDs
+        cve_ids = list(set(
+            c.upper() for c in re.findall(r'CVE-\d{4}-\d{4,7}', content, re.IGNORECASE)
+        ))
+
+        # 标题：前 10 行中含 DSA/Dell/Security 关键词的行
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
+        title = lines[0][:200] if lines else dsa_id
+        for line in lines[:10]:
+            if (15 < len(line) < 300
+                    and ('DSA' in line.upper() or 'Dell' in line or 'Security' in line)):
+                title = line
+                break
+
+        # 发布日期（仅日期，不含时分）
+        published_date = datetime.now().strftime('%Y-%m-%d')
+        date_patterns = [
+            (r'(\w+ \d{1,2},?\s+\d{4})', ['%B %d, %Y', '%B %d %Y']),
+            (r'(\d{4}-\d{2}-\d{2})', ['%Y-%m-%d']),
+            (r'(\d{1,2}/\d{1,2}/\d{4})', ['%m/%d/%Y']),
+        ]
+        for pattern, fmts in date_patterns:
+            m = re.search(pattern, content)
+            if m:
+                for fmt in fmts:
+                    try:
+                        published_date = datetime.strptime(m.group(1), fmt).strftime('%Y-%m-%d')
+                        break
+                    except ValueError:
+                        continue
+                break
+
+        # Impact / Severity
+        impact = self._extract_impact(content)
+
+        # Summary: 提取 "Summary" 区域内容
+        summary = self._extract_summary_section(content)
+
+        # Products + Solution: 从 "Affected Products & Remediation" 表格提取
+        products, solution = self._extract_remediation(content, html)
+
+        return {
+            'dell_security_advisory': dsa_id,
+            'title': title,
+            'cve_ids': cve_ids,
+            'published_date': published_date,
+            'link': url,
+            'summary': summary,
+            'description': content[:2000],
+            'affected_products': products,
+            'solution': solution,
+            'impact': impact,
+            'source': 'Web Scrape',
+        }
+
+    def _extract_summary_section(self, content):
+        """从页面 'Summary' 区域提取摘要文本"""
+        # 匹配 Summary 标题到下一个区域标题之间的文本
+        match = re.search(
+            r'\bSummary\b\s*\n(.*?)(?=\n\s*\b(?:Impact|Affected Products|Details|Description|CVSS|Proprietary|Revision History)\b)',
+            content, re.IGNORECASE | re.DOTALL
+        )
+        if match:
+            text = ' '.join(match.group(1).split()).strip()
+            if text:
+                return text[:500]
+        # 回退：全文压缩取前 500 字符
+        return ' '.join(content.split())[:500]
+
+    def _extract_remediation(self, content, html=""):
+        """
+        从 'Affected Products & Remediation' 提取产品和解决方案
+
+        优先解析 HTML 表格（Product / Affected Versions / Remediated Versions 列），
+        回退到纯文本解析。
+        """
+        # 1. HTML 表格解析（最可靠）
+        if html:
+            products, solution = self._parse_remediation_table_html(html)
+            if products:
+                return products, solution
+
+        # 2. 纯文本解析（Exa / Selenium 内容）
+        return self._extract_remediation_from_text(content)
+
+    def _parse_remediation_table_html(self, html):
+        """从 HTML 中解析 Affected Products & Remediation 表格"""
+        soup = BeautifulSoup(html, 'html.parser')
+        products = []
+        solution_parts = []
+
+        for table in soup.find_all('table'):
+            header_row = table.find('tr')
+            if not header_row:
+                continue
+            headers = [cell.get_text(strip=True).lower()
+                       for cell in header_row.find_all(['th', 'td'])]
+
+            # 定位列索引
+            prod_idx = next((i for i, h in enumerate(headers) if 'product' in h), None)
+            affected_idx = next((i for i, h in enumerate(headers)
+                                 if 'affected' in h and 'version' in h), None)
+            remediated_idx = next((i for i, h in enumerate(headers)
+                                   if 'remediat' in h and 'version' in h), None)
+
+            if prod_idx is None:
+                continue
+
+            for row in table.find_all('tr')[1:]:
+                cells = [cell.get_text(strip=True) for cell in row.find_all(['td', 'th'])]
+                if not cells or len(cells) <= prod_idx:
+                    continue
+
+                product = cells[prod_idx]
+                affected = cells[affected_idx] if affected_idx is not None and affected_idx < len(cells) else ""
+                remediated = cells[remediated_idx] if remediated_idx is not None and remediated_idx < len(cells) else ""
+
+                if product:
+                    products.append({
+                        'name': product,
+                        'model': product,
+                        'version_range': affected,
+                    })
+                    if affected or remediated:
+                        solution_parts.append(f"{product}: {affected} -> {remediated}")
+
+            if products:
+                break  # 找到目标表格即停
+
+        return products, "\n".join(solution_parts)
+
+    def _extract_remediation_from_text(self, content):
+        """从纯文本中提取 Affected Products & Remediation 区域的产品和版本"""
+        products = []
+        solution_parts = []
+
+        # 定位区域
+        section_match = re.search(
+            r'Affected Products?\s*(?:&|and)?\s*Remediation\b(.*?)(?=\b(?:Workarounds?|Revision History|Acknowledgment|References|Legal Information|Exploitation)\b|$)',
+            content, re.IGNORECASE | re.DOTALL
+        )
+        if not section_match:
+            return self.extract_products_from_text(content), self.extract_solution_from_text(content)
+
+        section = section_match.group(1).strip()
+        lines = [l.strip() for l in section.split('\n') if l.strip()]
+
+        # 跳过表头行
+        data_start = 0
+        for i, line in enumerate(lines):
+            if re.search(r'\bProduct\b.*\b(?:Affected|Version)', line, re.IGNORECASE):
+                data_start = i + 1
+                break
+
+        # 已知 Dell 产品关键词
+        product_keywords = [
+            'Dell', 'PowerEdge', 'OptiPlex', 'Precision', 'Latitude', 'XPS',
+            'Inspiron', 'Vostro', 'Alienware', 'PowerVault', 'iDRAC',
+            'PowerStore', 'PowerFlex', 'VxRail', 'Data Domain', 'CloudLink',
+            'Avamar', 'PowerProtect', 'Unity', 'PowerSwitch', 'Wyse',
+        ]
+
+        current_product = ""
+        current_affected = ""
+        current_remediated = ""
+
+        for line in lines[data_start:]:
+            is_product = any(kw.lower() in line.lower() for kw in product_keywords)
+            is_version = bool(re.search(
+                r'version|prior|before|through|all\s|^\d+\.\d+', line, re.IGNORECASE
+            ))
+
+            if is_product and not is_version:
+                # 保存上一个产品
+                if current_product:
+                    products.append({
+                        'name': current_product,
+                        'model': current_product,
+                        'version_range': current_affected,
+                    })
+                    if current_affected or current_remediated:
+                        solution_parts.append(
+                            f"{current_product}: {current_affected} -> {current_remediated}"
+                        )
+                current_product = line
+                current_affected = ""
+                current_remediated = ""
+            elif is_version and current_product:
+                if not current_affected:
+                    current_affected = line
+                else:
+                    current_remediated = line
+
+        # 保存最后一个产品
+        if current_product:
+            products.append({
+                'name': current_product,
+                'model': current_product,
+                'version_range': current_affected,
+            })
+            if current_affected or current_remediated:
+                solution_parts.append(
+                    f"{current_product}: {current_affected} -> {current_remediated}"
+                )
+
+        if not products:
+            return self.extract_products_from_text(content), self.extract_solution_from_text(content)
+
+        return products, "\n".join(solution_parts)
+
+    def _extract_impact(self, content):
+        """
+        从页面内容提取 Impact / Severity 等级
+
+        匹配 Dell 安全公告页面中的多种格式:
+          - Impact\\nCritical
+          - Impact: High
+          - Critical severity
+          - Severity: Medium
+          - CVSS ... High
+        """
+        patterns = [
+            r'Impact\s*[\n:]\s*(Critical|High|Medium|Low)',
+            r'\b(Critical|High|Medium|Low)\b\s+severity',
+            r'[Ss]everity\s*[:\s]\s*(Critical|High|Medium|Low)',
+            r'CVSS.*?\b(Critical|High|Medium|Low)\b',
+        ]
+        for pat in patterns:
+            m = re.search(pat, content, re.IGNORECASE)
+            if m:
+                return m.group(1).capitalize()
+        return ""
+
+    def _extract_dsa_id(self, url, text=""):
+        """从 URL 或文本中提取 DSA ID"""
+        m = re.search(r'(DSA-\d{4}-\d+)', f"{url} {text}", re.IGNORECASE)
+        return m.group(1).upper() if m else ""
+
+    # ================================================================
+    #  辅助方法
+    # ================================================================
 
     def extract_cve_ids(self, text: str) -> List[str]:
         """提取 CVE ID"""
-        cve_pattern = r'CVE-\d{4}-\d{4,7}'
-        cve_matches = re.findall(cve_pattern, text.upper())
-        return list(set(cve_matches))
+        return list(set(re.findall(r'CVE-\d{4}-\d{4,7}', text.upper())))
 
     def extract_products_from_text(self, text: str) -> List[Dict[str, Any]]:
         """从文本中提取产品信息"""
         products = []
-
-        # Dell 产品系列关键词
         product_keywords = [
             'PowerEdge', 'OptiPlex', 'Precision', 'Latitude', 'XPS',
-            'Inspiron', 'Vostro', 'Alienware', 'PowerVault', 'EqualLogic'
+            'Inspiron', 'Vostro', 'Alienware', 'PowerVault', 'EqualLogic',
         ]
-
         for keyword in product_keywords:
             if keyword.lower() in text.lower():
                 products.append({
                     'name': f'Dell {keyword}',
                     'model': keyword,
-                    'version_range': ''
+                    'version_range': '',
                 })
-
         return products
 
     def extract_solution_from_text(self, text: str) -> str:
         """从文本中提取解决方案"""
-        # 查找常见的解决方案关键词
         solution_keywords = ['update', 'patch', 'upgrade', 'fix', 'download']
-
         for keyword in solution_keywords:
             if keyword.lower() in text.lower():
-                # 提取包含该关键词的句子
                 sentences = re.split(r'[.!?]', text)
                 for sentence in sentences:
                     if keyword.lower() in sentence.lower():
                         return sentence.strip()
-
         return "Please refer to Dell security advisory for detailed solution."
 
     def filter_by_days(self, advisories: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
         """根据天数过滤安全公告"""
-        from datetime import datetime, timedelta
-
         cutoff_date = datetime.now() - timedelta(days=days)
         filtered = []
-
         for advisory in advisories:
             pub_date_str = advisory.get('published_date', '')
             if pub_date_str:
@@ -194,482 +634,51 @@ class DellSecurityScraper:
                     if pub_date >= cutoff_date:
                         filtered.append(advisory)
                 except ValueError:
-                    # 如果日期解析失败，保留该条目
                     filtered.append(advisory)
-
         return filtered
-
-    def get_sample_advisories_by_days(self, days: int) -> List[Dict[str, Any]]:
-        """
-        根据天数生成示例安全公告
-
-        Args:
-            days: 天数范围
-
-        Returns:
-            示例安全公告列表
-        """
-        from datetime import datetime, timedelta
-
-        # 基础示例数据
-        base_advisories = self.get_sample_advisories()
-
-        # 根据天数范围生成更多数据
-        count_map = {
-            7: 3,     # 最近一周: 3条
-            30: 8,    # 1个月: 8条
-            90: 15,   # 3个月: 15条
-            180: 25,  # 半年: 25条
-            365: 40   # 1年: 40条
-        }
-
-        # 找到最接近的数量
-        target_count = 5
-        for day_range, count in sorted(count_map.items()):
-            if days <= day_range:
-                target_count = count
-                break
-
-        # 如果需要更多数据，生成扩展示例
-        if target_count > len(base_advisories):
-            extended_advisories = base_advisories.copy()
-            additional_count = target_count - len(base_advisories)
-
-            # 生成额外的示例数据
-            for i in range(additional_count):
-                days_ago = (i + 1) * (days // target_count)
-                pub_date = datetime.now() - timedelta(days=days_ago)
-
-                advisory = {
-                    'dell_security_advisory': f'DSA-2024-{6 + i:03d}',
-                    'title': f'Dell Security Update for {["BIOS", "Firmware", "Driver", "Software"][i % 4]} Vulnerability',
-                    'cve_ids': [f'CVE-2024-{9000 + i * 100:05d}'],
-                    'link': f'https://www.dell.com/support/kbdoc/en-us/00022{6 + i:04d}',
-                    'published_date': pub_date.isoformat(),
-                    'summary': f'Security update for Dell products addressing vulnerability in {["BIOS", "firmware", "driver", "software"][i % 4]}.',
-                    'description': f'Dell has released security updates to address CVE-2024-{9000 + i * 100:05d}.',
-                    'affected_products': [
-                        {
-                            'name': f'Dell {["PowerEdge", "OptiPlex", "Latitude", "Precision"][i % 4]}',
-                            'model': f'{["R750", "7090", "5520", "5560"][i % 4]}',
-                            'version_range': 'All versions'
-                        }
-                    ],
-                    'solution': 'Apply the latest security update from Dell Support website.'
-                }
-                extended_advisories.append(advisory)
-
-            return extended_advisories[:target_count]
-
-        return base_advisories[:target_count]
-
-    def get_sample_advisories(self) -> List[Dict[str, Any]]:
-        """
-        获取示例安全公告数据（用于测试和演示）
-
-        Returns:
-            示例安全公告列表
-        """
-        logger.info("使用示例数据进行演示")
-
-        sample_advisories = [
-            {
-                'dell_security_advisory': 'DSA-2024-001',
-                'title': 'Dell PowerEdge Server BIOS Security Update for Multiple Vulnerabilities',
-                'cve_ids': ['CVE-2024-1234', 'CVE-2024-5678'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220001',
-                'published_date': '2024-01-15T00:00:00',
-                'summary': 'Dell has released a BIOS security update to address multiple vulnerabilities in PowerEdge servers.',
-                'description': 'Dell has released a BIOS security update for PowerEdge servers to address CVE-2024-1234 and CVE-2024-5678. These vulnerabilities could allow an authenticated user to potentially enable escalation of privilege via local access.',
-                'affected_products': [
-                    {
-                        'name': 'Dell PowerEdge R750',
-                        'model': 'R750',
-                        'version_range': 'BIOS versions prior to 1.8.2'
-                    },
-                    {
-                        'name': 'Dell PowerEdge R740',
-                        'model': 'R740',
-                        'version_range': 'BIOS versions prior to 2.15.1'
-                    },
-                    {
-                        'name': 'Dell PowerEdge R650',
-                        'model': 'R650',
-                        'version_range': 'BIOS versions prior to 1.6.11'
-                    }
-                ],
-                'solution': 'Dell recommends updating to the latest BIOS version. Download the update from Dell Support website at https://www.dell.com/support. Follow the BIOS update instructions carefully.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-002',
-                'title': 'Dell Client Platform Security Update for Multiple Third-Party Component Vulnerabilities',
-                'cve_ids': ['CVE-2024-9012', 'CVE-2024-9013'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220002',
-                'published_date': '2024-02-20T00:00:00',
-                'summary': 'Dell has released security updates to address vulnerabilities in third-party components.',
-                'description': 'Dell has released security updates for multiple client platforms to address vulnerabilities CVE-2024-9012 and CVE-2024-9013 in third-party components. These vulnerabilities could allow remote code execution.',
-                'affected_products': [
-                    {
-                        'name': 'Dell OptiPlex 7090',
-                        'model': '7090',
-                        'version_range': 'All versions'
-                    },
-                    {
-                        'name': 'Dell Latitude 5520',
-                        'model': '5520',
-                        'version_range': 'All versions'
-                    },
-                    {
-                        'name': 'Dell Precision 5560',
-                        'model': '5560',
-                        'version_range': 'All versions'
-                    }
-                ],
-                'solution': 'Apply the security update from Dell Support. Download and install the latest driver package. Reboot the system after installation.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-003',
-                'title': 'Dell EMC Unity Security Update for Storage Management Vulnerabilities',
-                'cve_ids': ['CVE-2024-3456'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220003',
-                'published_date': '2024-03-10T00:00:00',
-                'summary': 'Dell EMC has released a security update for Unity storage systems.',
-                'description': 'Dell EMC has released a security update to address CVE-2024-3456 in Unity storage management interface. This vulnerability could allow unauthorized access to management functions.',
-                'affected_products': [
-                    {
-                        'name': 'Dell EMC Unity 480',
-                        'model': 'Unity 480',
-                        'version_range': 'Versions prior to 5.2.1'
-                    },
-                    {
-                        'name': 'Dell EMC Unity 680',
-                        'model': 'Unity 680',
-                        'version_range': 'Versions prior to 5.2.1'
-                    }
-                ],
-                'solution': 'Upgrade Unity software to version 5.2.1 or later. Follow the upgrade procedure documented in the Unity administration guide. Contact Dell EMC support if assistance is needed.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-004',
-                'title': 'Dell Wyse Thin Client Security Update for OS Vulnerabilities',
-                'cve_ids': ['CVE-2024-7890', 'CVE-2024-7891'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220004',
-                'published_date': '2024-04-05T00:00:00',
-                'summary': 'Security update for Dell Wyse thin clients to address OS vulnerabilities.',
-                'description': 'Dell has released a security update for Wyse thin clients to address operating system vulnerabilities CVE-2024-7890 and CVE-2024-7891.',
-                'affected_products': [
-                    {
-                        'name': 'Dell Wyse 5070',
-                        'model': '5070',
-                        'version_range': 'ThinOS versions prior to 9.2.1064'
-                    },
-                    {
-                        'name': 'Dell Wyse 5470',
-                        'model': '5470',
-                        'version_range': 'ThinOS versions prior to 9.2.1064'
-                    }
-                ],
-                'solution': 'Update to ThinOS version 9.2.1064 or later. The update can be deployed through Wyse Management Suite or downloaded manually from Dell Support.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-005',
-                'title': 'Dell Networking Switch Security Update for Management Interface',
-                'cve_ids': ['CVE-2024-2345'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220005',
-                'published_date': '2024-05-18T00:00:00',
-                'summary': 'Security update for Dell networking switches management interface.',
-                'description': 'Dell has released firmware updates for networking switches to address CVE-2024-2345 in the management interface.',
-                'affected_products': [
-                    {
-                        'name': 'Dell PowerSwitch S5248F-ON',
-                        'model': 'S5248F-ON',
-                        'version_range': 'Firmware versions prior to 10.5.3.1'
-                    },
-                    {
-                        'name': 'Dell PowerSwitch S5232F-ON',
-                        'model': 'S5232F-ON',
-                        'version_range': 'Firmware versions prior to 10.5.3.1'
-                    }
-                ],
-                'solution': 'Upgrade switch firmware to version 10.5.3.1 or later. Backup configuration before upgrade. Follow the firmware upgrade guide available on Dell Support.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-006',
-                'title': 'Dell iDRAC Security Update for Remote Management Vulnerabilities',
-                'cve_ids': ['CVE-2024-4567', 'CVE-2024-4568'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220006',
-                'published_date': '2024-06-12T00:00:00',
-                'summary': 'Security update for Dell iDRAC remote management controller.',
-                'description': 'Dell has released security updates for iDRAC to address CVE-2024-4567 and CVE-2024-4568. These vulnerabilities could allow unauthorized remote access to server management functions.',
-                'affected_products': [
-                    {
-                        'name': 'Dell iDRAC9',
-                        'model': 'iDRAC9',
-                        'version_range': 'Firmware versions prior to 6.10.30.00'
-                    },
-                    {
-                        'name': 'Dell iDRAC8',
-                        'model': 'iDRAC8',
-                        'version_range': 'Firmware versions prior to 2.82.82.82'
-                    }
-                ],
-                'solution': 'Update iDRAC firmware to the latest version. Download the firmware from Dell Support and apply using Lifecycle Controller or remote firmware update tools.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-007',
-                'title': 'Dell VxRail Security Update for Hyperconverged Infrastructure',
-                'cve_ids': ['CVE-2024-6789'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220007',
-                'published_date': '2024-07-08T00:00:00',
-                'summary': 'Security update for Dell VxRail hyperconverged infrastructure.',
-                'description': 'Dell has released a security patch for VxRail to address CVE-2024-6789 in the management interface.',
-                'affected_products': [
-                    {
-                        'name': 'Dell VxRail P Series',
-                        'model': 'VxRail P',
-                        'version_range': 'Versions prior to 7.0.450'
-                    },
-                    {
-                        'name': 'Dell VxRail E Series',
-                        'model': 'VxRail E',
-                        'version_range': 'Versions prior to 7.0.450'
-                    }
-                ],
-                'solution': 'Upgrade VxRail software to version 7.0.450 or later. Use VxRail Manager to apply the update. Schedule maintenance window as this may require system restart.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-008',
-                'title': 'Dell PowerStore Security Update for Storage Array Management',
-                'cve_ids': ['CVE-2024-8901', 'CVE-2024-8902'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220008',
-                'published_date': '2024-08-15T00:00:00',
-                'summary': 'Security update for Dell PowerStore storage arrays.',
-                'description': 'Dell has released security updates for PowerStore to address management interface vulnerabilities CVE-2024-8901 and CVE-2024-8902.',
-                'affected_products': [
-                    {
-                        'name': 'Dell PowerStore 500T',
-                        'model': 'PowerStore 500T',
-                        'version_range': 'PowerStoreOS versions prior to 3.2.0.0'
-                    },
-                    {
-                        'name': 'Dell PowerStore 1000T',
-                        'model': 'PowerStore 1000T',
-                        'version_range': 'PowerStoreOS versions prior to 3.2.0.0'
-                    }
-                ],
-                'solution': 'Upgrade PowerStoreOS to version 3.2.0.0 or later. Use PowerStore Manager to schedule and apply the upgrade. Review upgrade prerequisites before proceeding.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-009',
-                'title': 'Dell XPS and Inspiron Laptop BIOS Security Update',
-                'cve_ids': ['CVE-2024-9999'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220009',
-                'published_date': '2024-09-20T00:00:00',
-                'summary': 'BIOS security update for Dell XPS and Inspiron laptops.',
-                'description': 'Dell has released a BIOS security update for XPS and Inspiron laptops to address CVE-2024-9999, a potential privilege escalation vulnerability.',
-                'affected_products': [
-                    {
-                        'name': 'Dell XPS 13 9310',
-                        'model': 'XPS 13 9310',
-                        'version_range': 'BIOS versions prior to 3.7.0'
-                    },
-                    {
-                        'name': 'Dell XPS 15 9520',
-                        'model': 'XPS 15 9520',
-                        'version_range': 'BIOS versions prior to 1.12.0'
-                    },
-                    {
-                        'name': 'Dell Inspiron 15 3520',
-                        'model': 'Inspiron 15 3520',
-                        'version_range': 'BIOS versions prior to 2.8.0'
-                    }
-                ],
-                'solution': 'Download and install the latest BIOS update from Dell Support. Ensure laptop is connected to AC power during BIOS update. Do not interrupt the update process.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-010',
-                'title': 'Dell Alienware Gaming System Firmware Security Update',
-                'cve_ids': ['CVE-2024-1111', 'CVE-2024-1112'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220010',
-                'published_date': '2024-10-05T00:00:00',
-                'summary': 'Firmware security update for Dell Alienware gaming systems.',
-                'description': 'Dell has released firmware updates for Alienware systems to address CVE-2024-1111 and CVE-2024-1112 in system firmware and peripheral controllers.',
-                'affected_products': [
-                    {
-                        'name': 'Dell Alienware Aurora R15',
-                        'model': 'Aurora R15',
-                        'version_range': 'BIOS versions prior to 1.0.15'
-                    },
-                    {
-                        'name': 'Dell Alienware m17 R5',
-                        'model': 'm17 R5',
-                        'version_range': 'BIOS versions prior to 1.8.1'
-                    }
-                ],
-                'solution': 'Apply the latest firmware update from Dell Support. Use Alienware Update or Dell SupportAssist to automate the update process.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-011',
-                'title': 'Dell PowerProtect Data Manager Security Update',
-                'cve_ids': ['CVE-2024-2222'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220011',
-                'published_date': '2024-11-10T00:00:00',
-                'summary': 'Security update for Dell PowerProtect Data Manager.',
-                'description': 'Dell has released a security patch for PowerProtect Data Manager to address CVE-2024-2222, an authentication bypass vulnerability.',
-                'affected_products': [
-                    {
-                        'name': 'Dell PowerProtect Data Manager',
-                        'model': 'PPDM',
-                        'version_range': 'Versions 19.10 through 19.14'
-                    }
-                ],
-                'solution': 'Upgrade to PowerProtect Data Manager version 19.15 or later. Follow the upgrade guide and backup configuration before proceeding. Contact Dell support for upgrade assistance.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-012',
-                'title': 'Dell Data Domain Security Update for Deduplication Storage',
-                'cve_ids': ['CVE-2024-3333', 'CVE-2024-3334'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220012',
-                'published_date': '2024-12-01T00:00:00',
-                'summary': 'Security update for Dell Data Domain deduplication storage systems.',
-                'description': 'Dell has released DD OS updates to address CVE-2024-3333 and CVE-2024-3334 in Data Domain systems.',
-                'affected_products': [
-                    {
-                        'name': 'Dell Data Domain DD6900',
-                        'model': 'DD6900',
-                        'version_range': 'DD OS versions prior to 7.10.1.0'
-                    },
-                    {
-                        'name': 'Dell Data Domain DD9900',
-                        'model': 'DD9900',
-                        'version_range': 'DD OS versions prior to 7.10.1.0'
-                    }
-                ],
-                'solution': 'Upgrade DD OS to version 7.10.1.0 or later. Use DD System Manager to apply the upgrade. Plan for system maintenance window.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-013',
-                'title': 'Dell PowerFlex Software-Defined Storage Security Update',
-                'cve_ids': ['CVE-2024-4444'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220013',
-                'published_date': '2025-01-12T00:00:00',
-                'summary': 'Security update for Dell PowerFlex software-defined storage.',
-                'description': 'Dell has released a security update for PowerFlex to address CVE-2024-4444 in the REST API gateway.',
-                'affected_products': [
-                    {
-                        'name': 'Dell PowerFlex',
-                        'model': 'PowerFlex 3.6',
-                        'version_range': 'Versions 3.6.0 through 3.6.700'
-                    },
-                    {
-                        'name': 'Dell PowerFlex',
-                        'model': 'PowerFlex 4.0',
-                        'version_range': 'Versions 4.0.0 through 4.0.100'
-                    }
-                ],
-                'solution': 'Upgrade PowerFlex to version 3.6.800 or 4.0.200 or later. Follow the rolling upgrade procedure to minimize downtime. Review compatibility matrix before upgrade.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-014',
-                'title': 'Dell CloudLink Security Update for Cloud Data Protection',
-                'cve_ids': ['CVE-2024-5555', 'CVE-2024-5556'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220014',
-                'published_date': '2025-02-18T00:00:00',
-                'summary': 'Security update for Dell CloudLink cloud data protection.',
-                'description': 'Dell has released security patches for CloudLink to address CVE-2024-5555 and CVE-2024-5556 in key management and encryption components.',
-                'affected_products': [
-                    {
-                        'name': 'Dell CloudLink Center',
-                        'model': 'CloudLink 7.1',
-                        'version_range': 'Versions prior to 7.1.3'
-                    }
-                ],
-                'solution': 'Upgrade CloudLink to version 7.1.3 or later. Apply the security patch through CloudLink Center management interface. Verify encryption services after upgrade.'
-            },
-            {
-                'dell_security_advisory': 'DSA-2024-015',
-                'title': 'Dell Avamar Backup Software Security Update',
-                'cve_ids': ['CVE-2024-6666'],
-                'link': 'https://www.dell.com/support/kbdoc/en-us/000220015',
-                'published_date': '2025-03-25T00:00:00',
-                'summary': 'Security update for Dell Avamar backup software.',
-                'description': 'Dell has released a security update for Avamar to address CVE-2024-6666, a potential remote code execution vulnerability in the backup server.',
-                'affected_products': [
-                    {
-                        'name': 'Dell Avamar Server',
-                        'model': 'Avamar 19.4',
-                        'version_range': 'Versions 19.4.0 through 19.4.105'
-                    },
-                    {
-                        'name': 'Dell Avamar Virtual Edition',
-                        'model': 'AVE',
-                        'version_range': 'Versions 19.4.0 through 19.4.105'
-                    }
-                ],
-                'solution': 'Upgrade Avamar to version 19.4.110 or later. Use Avamar Administrator console to schedule and apply the upgrade. Back up Avamar configuration before upgrading.'
-            }
-        ]
-
-        return sample_advisories
 
 
 async def main():
-    """主函数 - 测试"""
+    """测试入口"""
     print("=" * 80)
     print("Dell 安全公告爬取器测试")
     print("=" * 80)
-    print()
 
     scraper = DellSecurityScraper()
 
-    print("正在获取 Dell 安全公告...")
-    advisories = await scraper.fetch_security_advisories()
+    print("正在从 Dell 官网获取安全公告...")
+    advisories = await scraper.fetch_security_advisories(
+        days=30,
+        log_callback=lambda msg: print(f"  {msg}"),
+    )
 
     print(f"\n成功获取 {len(advisories)} 条安全公告\n")
     print("=" * 80)
 
-    # 显示前几条
-    for i, advisory in enumerate(advisories[:3], 1):
+    for i, advisory in enumerate(advisories[:5], 1):
         print(f"\n公告 {i}:")
         print(f"  公告 ID: {advisory.get('dell_security_advisory', 'N/A')}")
         print(f"  标题: {advisory.get('title', 'N/A')}")
+        print(f"  Impact: {advisory.get('impact', 'N/A')}")
         print(f"  CVE IDs: {', '.join(advisory.get('cve_ids', []))}")
         print(f"  发布日期: {advisory.get('published_date', 'N/A')}")
-        print(f"  受影响产品: {len(advisory.get('affected_products', []))} 个")
-
-        if advisory.get('affected_products'):
-            print(f"\n  产品详情:")
-            for product in advisory['affected_products'][:2]:
-                print(f"    - {product.get('name', 'N/A')}")
-                if product.get('version_range'):
-                    print(f"      版本范围: {product.get('version_range')}")
-
-        solution = advisory.get('solution', '')
-        if solution:
-            print(f"\n  解决方案:")
-            print(f"    {solution[:150]}...")
-
-        print(f"\n  链接: {advisory.get('link', 'N/A')}")
+        print(f"  链接: {advisory.get('link', 'N/A')}")
         print("-" * 80)
 
-    # 保存到文件
-    from pathlib import Path
-    data_dir = Path("cve_data")
-    data_dir.mkdir(exist_ok=True)
+    if advisories:
+        from pathlib import Path
+        data_dir = Path("cve_data")
+        data_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = data_dir / f"dell_advisories_{timestamp}.json"
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(advisories, f, ensure_ascii=False, indent=2)
+        print(f"\n数据已保存到: {filename}")
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = data_dir / f"dell_advisories_{timestamp}.json"
-
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(advisories, f, ensure_ascii=False, indent=2)
-
-    print(f"\n数据已保存到: {filename}")
     print("\n" + "=" * 80)
 
 
 if __name__ == "__main__":
-    import os
     if os.name == 'nt':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
     asyncio.run(main())
