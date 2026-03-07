@@ -541,7 +541,6 @@ if __name__ == "__main__":
     else:
         print("[ERROR] Redis connection failed")
         print("Please ensure Redis server is running:")
-        print("  - Docker: docker-compose up -d redis")
-        print("  - or start local Redis service")
+        print("  - WSL: sudo service redis-server start")
 
     manager.close()

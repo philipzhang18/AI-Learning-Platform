@@ -65,6 +65,18 @@ class CVEIntegratedGUI:
         self.is_collecting = False
         self.is_collecting_dell = False
 
+        # IT新闻早晚报数据
+        self.news_articles = []          # 采集到的新闻文章列表
+        self.is_collecting_news = False  # 新闻采集状态标志
+        self.news_brief_text = ""        # 当前生成的简报文本
+        self._tts_process = None         # TTS 播放子进程句柄
+
+        # 智能学习数据
+        self.learn_messages = []         # 费曼对话历史
+        self.learn_topic = ""            # 当前学习主题
+        self.learn_source_content = ""   # 加载的内容上下文
+        self.is_learn_generating = False # AI生成状态标志
+
         # 数据目录
         self.data_dir = Path("cve_data")
         self.data_dir.mkdir(exist_ok=True)
@@ -972,6 +984,10 @@ class CVEIntegratedGUI:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+        # 0. IT新闻早晚报标签页（放在最前面）
+        self.news_frame = tk.Frame(self.notebook, bg="white")
+        self.news_tab_id = self.notebook.add(self.news_frame, text="📰 IT新闻早晚报")
+
         # 1. NVD CVE 数据标签页
         self.nvd_frame = tk.Frame(self.notebook, bg="white")
         self.nvd_tab_id = self.notebook.add(self.nvd_frame, text="📊 NVD CVE 数据")
@@ -992,16 +1008,22 @@ class CVEIntegratedGUI:
         self.stats_frame = tk.Frame(self.notebook, bg="white")
         self.stats_tab_id = self.notebook.add(self.stats_frame, text="📈 统计分析")
 
-        # 6. 日志标签页
+        # 6. 智能学习标签页（位于统计分析和操作日志之间）
+        self.learn_frame = tk.Frame(self.notebook, bg="white")
+        self.learn_tab_id = self.notebook.add(self.learn_frame, text="🧠 智能学习")
+
+        # 7. 日志标签页
         self.log_frame = tk.Frame(self.notebook, bg="white")
         self.log_tab_id = self.notebook.add(self.log_frame, text="📝 操作日志")
 
         # 创建各个标签页的内容
+        self.create_news_view()
         self.create_nvd_view()
         self.create_dell_view()
         self.create_matched_view()
         self.create_solution_view()
         self.create_stats_view()
+        self.create_learn_view()
         self.create_log_view()
 
         # 底部状态栏
@@ -1054,6 +1076,696 @@ class CVEIntegratedGUI:
         )
         self.progress_text.pack(side=tk.RIGHT, padx=(5, 0))
         self.progress_text.pack_forget()  # Hide by default
+
+    # ==================== IT新闻早晚报 ====================
+
+    # IT新闻 RSS 源配置
+    IT_NEWS_RSS_FEEDS = [
+        {"name": "TechCrunch",       "url": "https://techcrunch.com/feed/"},
+        {"name": "The Verge",        "url": "https://www.theverge.com/rss/index.xml"},
+        {"name": "Ars Technica",     "url": "https://feeds.arstechnica.com/arstechnica/index"},
+        {"name": "Hacker News",      "url": "https://hnrss.org/frontpage"},
+        {"name": "ZDNet",            "url": "https://www.zdnet.com/news/rss.xml"},
+        {"name": "InfoQ",            "url": "https://feed.infoq.com/"},
+        {"name": "MIT Tech Review",  "url": "https://www.technologyreview.com/feed/"},
+        {"name": "Wired",            "url": "https://www.wired.com/feed/rss"},
+    ]
+
+    def create_news_view(self):
+        """创建 IT新闻早晚报 标签页内容"""
+        # ── 顶部控制栏 ──────────────────────────────────────────────
+        ctrl = tk.Frame(self.news_frame, bg="white", pady=8)
+        ctrl.pack(fill=tk.X, padx=10)
+
+        tk.Label(
+            ctrl,
+            text="IT新闻早晚报 — 每日自动采集科技资讯，AI生成500字简报",
+            bg="white",
+            font=("Microsoft YaHei", 11, "bold"),
+            fg=self.primary_color,
+        ).pack(side=tk.LEFT)
+
+        btn_frame = tk.Frame(ctrl, bg="white")
+        btn_frame.pack(side=tk.RIGHT)
+
+        self.news_collect_btn = tk.Button(
+            btn_frame, text="🔄 采集新闻", command=self.collect_it_news,
+            bg=self.info_color, fg="white", font=("Microsoft YaHei", 10, "bold"),
+            padx=12, pady=4, relief=tk.FLAT, cursor="hand2",
+        )
+        self.news_collect_btn.pack(side=tk.LEFT, padx=4)
+
+        self.news_brief_btn = tk.Button(
+            btn_frame, text="📝 生成简报", command=self.generate_news_brief,
+            bg=self.success_color, fg="white", font=("Microsoft YaHei", 10, "bold"),
+            padx=12, pady=4, relief=tk.FLAT, cursor="hand2",
+        )
+        self.news_brief_btn.pack(side=tk.LEFT, padx=4)
+
+        self.news_podcast_btn = tk.Button(
+            btn_frame, text="🎙️ 生成播客", command=self.generate_podcast,
+            bg=self.warning_color, fg="white", font=("Microsoft YaHei", 10, "bold"),
+            padx=12, pady=4, relief=tk.FLAT, cursor="hand2",
+        )
+        self.news_podcast_btn.pack(side=tk.LEFT, padx=4)
+
+        # ── 水平分割：左=文章区  右=简报/播客 ──────────────────────
+        h_paned = tk.PanedWindow(
+            self.news_frame, orient=tk.HORIZONTAL, bg="#d0d0d0", sashwidth=5, sashrelief=tk.RAISED
+        )
+        h_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 4))
+
+        # ── 左侧：文章列表（上）+ 文章详情（下）竖向排列 ──────────
+        v_paned = tk.PanedWindow(
+            h_paned, orient=tk.VERTICAL, bg="#d0d0d0", sashwidth=5, sashrelief=tk.RAISED
+        )
+        h_paned.add(v_paned, minsize=320, width=380)
+
+        # 上：文章列表
+        list_frame = tk.Frame(v_paned, bg="white")
+        v_paned.add(list_frame, minsize=120)
+
+        tk.Label(
+            list_frame, text="今日文章列表",
+            bg="white", font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color,
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+
+        list_inner = tk.Frame(list_frame, bg="white")
+        list_inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+
+        list_scroll_y = tk.Scrollbar(list_inner, orient=tk.VERTICAL)
+        list_scroll_x = tk.Scrollbar(list_inner, orient=tk.HORIZONTAL)
+        self.news_listbox = tk.Listbox(
+            list_inner,
+            yscrollcommand=list_scroll_y.set,
+            xscrollcommand=list_scroll_x.set,
+            font=("Microsoft YaHei", 9),
+            selectmode=tk.SINGLE,
+            activestyle="dotbox",
+            wrap=None,              # 不自动换行，让水平滚动条生效
+        )
+        list_scroll_y.config(command=self.news_listbox.yview)
+        list_scroll_x.config(command=self.news_listbox.xview)
+        self.news_listbox.grid(row=0, column=0, sticky="nsew")
+        list_scroll_y.grid(row=0, column=1, sticky="ns")
+        list_scroll_x.grid(row=1, column=0, sticky="ew")
+        list_inner.rowconfigure(0, weight=1)
+        list_inner.columnconfigure(0, weight=1)
+        self.news_listbox.bind("<<ListboxSelect>>", self._on_news_article_select)
+
+        # 下：文章详情
+        detail_frame = tk.Frame(v_paned, bg="white")
+        v_paned.add(detail_frame, minsize=100)
+
+        tk.Label(
+            detail_frame, text="文章详情",
+            bg="white", font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color,
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+
+        self.news_article_detail = scrolledtext.ScrolledText(
+            detail_frame, wrap=tk.WORD,
+            font=("Microsoft YaHei", 9), bg="#f8f9fa", state=tk.DISABLED,
+        )
+        self.news_article_detail.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 6))
+
+        # ── 右侧：简报 / 播客脚本 Notebook ──────────────────────────
+        right_frame = tk.Frame(h_paned, bg="white")
+        h_paned.add(right_frame, minsize=420)
+
+        self.news_right_notebook = ttk.Notebook(right_frame)
+        self.news_right_notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # ── 简报子标签页 ─────────────────────────────────────────────
+        brief_sub = tk.Frame(self.news_right_notebook, bg="white")
+        self.news_right_notebook.add(brief_sub, text="📰 每日简报")
+
+        # 简报工具栏
+        brief_tb = tk.Frame(brief_sub, bg="#f0f4f8", pady=4)
+        brief_tb.pack(fill=tk.X, padx=4, pady=(4, 0))
+
+        self.news_brief_info = tk.Label(
+            brief_tb, text="尚未生成简报",
+            bg="#f0f4f8", font=("Microsoft YaHei", 9), fg="#555",
+        )
+        self.news_brief_info.pack(side=tk.LEFT, padx=8)
+
+        tk.Button(
+            brief_tb, text="💾 保存简报", command=self._save_news_brief,
+            bg=self.primary_color, fg="white", font=("Microsoft YaHei", 9, "bold"),
+            padx=10, pady=2, relief=tk.FLAT, cursor="hand2",
+        ).pack(side=tk.RIGHT, padx=6)
+
+        self.news_brief_area = scrolledtext.ScrolledText(
+            brief_sub, wrap=tk.WORD, font=("Microsoft YaHei", 10), bg="white",
+        )
+        self.news_brief_area.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # ── 播客脚本子标签页 ─────────────────────────────────────────
+        podcast_sub = tk.Frame(self.news_right_notebook, bg="#fffdf0")
+        self.news_right_notebook.add(podcast_sub, text="🎙️ 播客脚本")
+
+        # 播客工具栏
+        pod_tb = tk.Frame(podcast_sub, bg="#f5f0e0", pady=4)
+        pod_tb.pack(fill=tk.X, padx=4, pady=(4, 0))
+
+        tk.Label(
+            pod_tb, text="声音：", bg="#f5f0e0", font=("Microsoft YaHei", 9),
+        ).pack(side=tk.LEFT, padx=(8, 2))
+
+        self.tts_voice_var = tk.StringVar()
+        self.tts_voice_combo = ttk.Combobox(
+            pod_tb, textvariable=self.tts_voice_var,
+            state="readonly", width=28, font=("Microsoft YaHei", 9),
+        )
+        self.tts_voice_combo.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.tts_play_btn = tk.Button(
+            pod_tb, text="▶ 播放", command=self._play_podcast_tts,
+            bg=self.success_color, fg="white", font=("Microsoft YaHei", 9, "bold"),
+            padx=10, pady=2, relief=tk.FLAT, cursor="hand2",
+        )
+        self.tts_play_btn.pack(side=tk.LEFT, padx=4)
+
+        self.tts_stop_btn = tk.Button(
+            pod_tb, text="⏹ 停止", command=self._stop_podcast_tts,
+            bg=self.danger_color, fg="white", font=("Microsoft YaHei", 9, "bold"),
+            padx=10, pady=2, relief=tk.FLAT, cursor="hand2", state=tk.DISABLED,
+        )
+        self.tts_stop_btn.pack(side=tk.LEFT, padx=4)
+
+        self.tts_status_label = tk.Label(
+            pod_tb, text="", bg="#f5f0e0", font=("Microsoft YaHei", 8), fg="#666",
+        )
+        self.tts_status_label.pack(side=tk.LEFT, padx=8)
+
+        self.news_podcast_area = scrolledtext.ScrolledText(
+            podcast_sub, wrap=tk.WORD, font=("Microsoft YaHei", 10), bg="#fffdf0",
+        )
+        self.news_podcast_area.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # ── 底部状态栏 ───────────────────────────────────────────────
+        self.news_status_label = tk.Label(
+            self.news_frame, text="就绪 — 点击「采集新闻」获取今日科技资讯",
+            bg="white", fg="#666", font=("Microsoft YaHei", 9), anchor="w",
+        )
+        self.news_status_label.pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        # 异步加载可用 TTS 声音
+        threading.Thread(target=self._load_sapi_voices, daemon=True).start()
+
+    def _load_sapi_voices(self):
+        """后台查询 SAPI 声音列表：自动注册 OneCore 中文男声，过滤非中文声音"""
+        try:
+            import subprocess
+
+            # ── 第一步：将 OneCore 中文声音（如 Kangkang）注册到 SAPI5 HKLM ──
+            #   OneCore 声音在 Speech_OneCore 注册表下，SAPI5 .NET 只读 Speech 下
+            #   通过复制注册表项（需要管理员权限，应用通常有权限）实现对齐
+            reg_script = r"""
+Add-Type -AssemblyName System.Speech
+$srcBase = 'HKLM:\SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens'
+$dstBase = 'HKLM:\SOFTWARE\Microsoft\Speech\Voices\Tokens'
+$voiceDataDir = 'C:\Windows\Speech_OneCore\Engines\TTS\zh-CN'
+
+# 需要注册的 OneCore 中文声音（含正确 VoicePath 修正）
+$targets = @{
+    'MSTTS_V110_zhCN_KangkangM' = 'M2052Kangkang'
+    'MSTTS_V110_zhCN_YaoyaoM'   = 'M2052Yaoyao'
+}
+
+foreach ($tokenName in $targets.Keys) {
+    $src = "$srcBase\$tokenName"
+    $dst = "$dstBase\$tokenName"
+    if (-not (Test-Path $src)) { continue }
+    if (Test-Path $dst) { continue }   # 已存在则跳过
+    try {
+        New-Item -Path $dst -Force | Out-Null
+        $props = Get-ItemProperty $src
+        $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
+            Set-ItemProperty -Path $dst -Name $_.Name -Value $_.Value
+        }
+        # 修正 VoicePath 为实际的 Kangkang / Yaoyao 文件
+        $correctPath = Join-Path $voiceDataDir $targets[$tokenName]
+        Set-ItemProperty -Path $dst -Name 'VoicePath' -Value $correctPath
+        # 添加 SpLexicon（SAPI5 桌面声音必需）
+        Set-ItemProperty -Path $dst -Name '(default)' -Value (($props.'(default)') -replace ' - Chinese.*', ' Desktop - Chinese (Simplified)')
+
+        # 复制 Attributes 子键
+        $attrSrc = "$src\Attributes"
+        $attrDst = "$dst\Attributes"
+        if (Test-Path $attrSrc) {
+            New-Item -Path $attrDst -Force | Out-Null
+            $ap = Get-ItemProperty $attrSrc
+            $ap.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
+                Set-ItemProperty -Path $attrDst -Name $_.Name -Value $_.Value
+            }
+            # SpLexicon 使 SAPI5 正确工作
+            Set-ItemProperty -Path $attrDst -Name 'SpLexicon' -Value '{0655E396-25D0-11D3-9C26-00C04F8EF87C}'
+            $oldName = (Get-ItemProperty $attrDst).Name
+            Set-ItemProperty -Path $attrDst -Name 'Name' -Value "$oldName Desktop"
+        }
+        Write-Output "REGISTERED:$tokenName"
+    } catch {
+        Write-Output "SKIP_ERROR:$tokenName:$_"
+    }
+}
+"""
+            # 写 ps1 到临时文件执行，避免命令行转义问题
+            import tempfile, os as _os
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8-sig", suffix=".ps1", delete=False, dir=str(self.data_dir)
+            )
+            tmp.write(reg_script)
+            tmp.close()
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
+                capture_output=True, timeout=15,
+            )
+            _os.remove(tmp.name)
+
+            # ── 第二步：读取 SAPI5 已安装声音，仅保留中文声音 ──────────
+            list_script = (
+                "Add-Type -AssemblyName System.Speech; "
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                "$s.GetInstalledVoices() | Where-Object {$_.Enabled} | ForEach-Object { "
+                "  $v = $_.VoiceInfo; "
+                "  Write-Output ($v.Name + '|' + $v.Gender + '|' + $v.Culture.Name) "
+                "}"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", list_script],
+                capture_output=True, timeout=15,
+            )
+            output = result.stdout.decode("utf-8", errors="replace").strip()
+
+            gender_map = {"Male": "男声", "Female": "女声", "NotSet": ""}
+            lang_map = {"zh": "中文", "en": "英语"}
+
+            voices = []
+            for line in output.splitlines():
+                parts = line.strip().split("|")
+                if len(parts) < 3:
+                    continue
+                name, gender, culture = parts[0], parts[1], parts[2]
+                # 只保留中文声音（跳过 Zira 等英文语音，它们无法正确朗读中文）
+                if not culture.startswith("zh"):
+                    continue
+                lang_label = lang_map.get(culture[:2], culture)
+                gender_label = gender_map.get(gender, gender)
+                label = f"{gender_label} ({lang_label}) — {name}"
+                voices.append((label, name))
+
+            if not voices:
+                # 降级：保留全部声音
+                for line in output.splitlines():
+                    parts = line.strip().split("|")
+                    if len(parts) < 3:
+                        continue
+                    name, gender, culture = parts[0], parts[1], parts[2]
+                    lang_label = lang_map.get(culture[:2], culture)
+                    gender_label = gender_map.get(gender, gender)
+                    voices.append((f"{gender_label} ({lang_label}) — {name}", name))
+
+            if not voices:
+                voices = [("默认声音", "")]
+
+            def _update():
+                labels = [v[0] for v in voices]
+                self.tts_voice_combo["values"] = labels
+                self.tts_voice_combo.current(0)
+                self._tts_voice_names = [v[1] for v in voices]
+
+            self.root.after(0, _update)
+
+        except Exception as e:
+            self.root.after(0, self.log, f"加载 TTS 声音失败: {e}")
+            self.root.after(0, lambda: self.tts_voice_combo.config(values=["默认声音"]))
+            self._tts_voice_names = [""]
+
+    def _on_news_article_select(self, event):
+        """点击文章列表时，在详情区显示摘要与出处"""
+        sel = self.news_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx >= len(self.news_articles):
+            return
+        art = self.news_articles[idx]
+        detail = (
+            f"标题：{art.get('title', '')}\n"
+            f"来源：{art.get('source', '')}\n"
+            f"时间：{art.get('published', '')}\n"
+            f"链接：{art.get('url', '')}\n\n"
+            f"{art.get('summary', '')}"
+        )
+        self.news_article_detail.config(state=tk.NORMAL)
+        self.news_article_detail.delete(1.0, tk.END)
+        self.news_article_detail.insert(tk.END, detail)
+        self.news_article_detail.config(state=tk.DISABLED)
+
+    def collect_it_news(self):
+        """采集IT新闻（后台线程）"""
+        if self.is_collecting_news:
+            messagebox.showinfo("提示", "新闻采集正在进行中，请稍候...")
+            return
+        self.is_collecting_news = True
+        self.news_collect_btn.config(state=tk.DISABLED, text="采集中...")
+        self.news_status_label.config(text="正在采集 IT 新闻，请稍候...")
+        threading.Thread(target=self._collect_news_thread, daemon=True).start()
+
+    def _collect_news_thread(self):
+        """后台线程：从 RSS 源抓取文章"""
+        import html as html_mod
+        import re as _re
+        try:
+            all_articles = []
+            for feed_info in self.IT_NEWS_RSS_FEEDS:
+                try:
+                    feed = feedparser.parse(feed_info["url"])
+                    for entry in feed.entries[:8]:
+                        raw_summary = ""
+                        if hasattr(entry, "summary"):
+                            raw_summary = entry.summary
+                        elif hasattr(entry, "description"):
+                            raw_summary = entry.description
+                        clean_summary = _re.sub(r"<[^>]+>", "", raw_summary)
+                        clean_summary = html_mod.unescape(clean_summary).strip()[:300]
+
+                        published = ""
+                        if hasattr(entry, "published"):
+                            published = entry.published
+                        elif hasattr(entry, "updated"):
+                            published = entry.updated
+
+                        all_articles.append({
+                            "title": entry.get("title", ""),
+                            "url": entry.get("link", ""),
+                            "source": feed_info["name"],
+                            "published": published,
+                            "summary": clean_summary,
+                        })
+                except Exception as e:
+                    self.root.after(0, self.log, f"采集 {feed_info['name']} 失败: {e}")
+
+            seen = set()
+            unique = []
+            for a in all_articles:
+                key = a["url"] or a["title"]
+                if key and key not in seen:
+                    seen.add(key)
+                    unique.append(a)
+            self.news_articles = unique[:50]
+
+            self.root.after(0, self._update_news_listbox)
+        except Exception as e:
+            self.root.after(0, self.log, f"新闻采集异常: {e}")
+        finally:
+            self.is_collecting_news = False
+            self.root.after(0, self.news_collect_btn.config, {"state": tk.NORMAL, "text": "🔄 采集新闻"})
+
+    def _update_news_listbox(self):
+        """将采集结果刷新到列表"""
+        self.news_listbox.delete(0, tk.END)
+        for art in self.news_articles:
+            label = f"[{art['source']}]  {art['title']}"
+            self.news_listbox.insert(tk.END, label)
+        count = len(self.news_articles)
+        self.news_status_label.config(
+            text=f"已采集 {count} 篇文章 — 点击「生成简报」获得 AI 摘要"
+        )
+        self.log(f"新闻采集完成：共 {count} 篇")
+
+    def generate_news_brief(self):
+        """调用 AI 生成每日简报（后台线程）"""
+        if not self.news_articles:
+            messagebox.showwarning("提示", "请先点击「采集新闻」获取今日资讯")
+            return
+        self.news_brief_btn.config(state=tk.DISABLED, text="生成中...")
+        self.news_status_label.config(text="AI 正在生成每日简报...")
+        threading.Thread(target=self._generate_brief_thread, daemon=True).start()
+
+    def _generate_brief_thread(self):
+        """后台线程：调用 Qwen 生成 500 字简报，来源列出文章名+链接"""
+        try:
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                msg = "未设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY，无法调用 AI"
+                self.root.after(0, messagebox.showerror, "配置错误", msg)
+                return
+
+            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+            today = datetime.now().strftime("%Y年%m月%d日")
+            article_lines = []
+            for i, art in enumerate(self.news_articles[:20], 1):
+                line = f"{i}. 【{art['source']}】{art['title']}"
+                if art.get("url"):
+                    line += f"\n   链接：{art['url']}"
+                if art.get("summary"):
+                    line += f"\n   摘要：{art['summary'][:150]}"
+                article_lines.append(line)
+            articles_text = "\n".join(article_lines)
+
+            prompt = f"""今天是 {today}。以下是从各大科技媒体采集到的 IT 新闻（含标题、链接、摘要）：
+
+{articles_text}
+
+请根据以上内容，为技术人员撰写一份今日 IT 科技简报，要求：
+1. 总字数约 500 字（中文）
+2. 按重要性筛选 5～8 条值得关注的新闻，每条新闻后面用括号标注出处媒体名
+3. 语言简洁专业，突出新闻的核心价值和影响
+4. 简报正文之后，单独用"---\n【参考来源】"分隔，列出所有引用文章的：媒体名、文章标题、链接
+5. 直接输出简报正文，不要加额外说明
+"""
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一位专业的 IT 科技编辑，擅长将科技新闻提炼成简洁有力的日报简报。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.6,
+                max_tokens=1500,
+            )
+            brief = response.choices[0].message.content.strip()
+            self.news_brief_text = brief
+
+            self.root.after(0, self._show_news_brief, brief)
+        except Exception as e:
+            self.root.after(0, self.log, f"生成简报失败: {e}")
+            self.root.after(0, messagebox.showerror, "错误", f"生成简报失败：{e}")
+        finally:
+            self.root.after(0, self.news_brief_btn.config, {"state": tk.NORMAL, "text": "📝 生成简报"})
+
+    def _show_news_brief(self, brief):
+        """在简报区域显示内容并切换到简报子标签"""
+        self.news_brief_area.delete(1.0, tk.END)
+        self.news_brief_area.insert(tk.END, brief)
+        self.news_right_notebook.select(0)
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.news_status_label.config(text=f"简报生成完成 — {ts}")
+        self.news_brief_info.config(text=f"生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')}，共 {len(brief)} 字")
+        self.log("IT新闻简报生成完成")
+
+    def _save_news_brief(self):
+        """保存简报到文件，方便回看"""
+        brief = self.news_brief_area.get(1.0, tk.END).strip()
+        if not brief:
+            messagebox.showwarning("提示", "简报内容为空，请先生成简报")
+            return
+        # 保存目录
+        save_dir = self.data_dir / "news_briefs"
+        save_dir.mkdir(exist_ok=True)
+        filename = save_dir / f"brief_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"IT新闻早晚报 — {datetime.now().strftime('%Y年%m月%d日 %H:%M')}\n")
+                f.write("=" * 60 + "\n\n")
+                f.write(brief)
+                f.write("\n\n" + "=" * 60 + "\n")
+                # 附上原始文章列表
+                f.write("【原始采集文章列表】\n")
+                for i, art in enumerate(self.news_articles, 1):
+                    f.write(f"{i}. [{art['source']}] {art['title']}\n")
+                    if art.get("url"):
+                        f.write(f"   {art['url']}\n")
+            self.log(f"简报已保存：{filename}")
+            messagebox.showinfo("保存成功", f"简报已保存至：\n{filename}")
+        except Exception as e:
+            messagebox.showerror("保存失败", f"写入文件失败：{e}")
+
+    def generate_podcast(self):
+        """一键生成播客脚本（后台线程）"""
+        if not self.news_brief_text and not self.news_articles:
+            messagebox.showwarning("提示", "请先生成简报，再一键生成播客脚本")
+            return
+        self.news_podcast_btn.config(state=tk.DISABLED, text="生成中...")
+        self.news_status_label.config(text="AI 正在生成播客脚本...")
+        threading.Thread(target=self._generate_podcast_thread, daemon=True).start()
+
+    def _generate_podcast_thread(self):
+        """后台线程：将简报转换为播客口播脚本"""
+        try:
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                msg = "未设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY，无法调用 AI"
+                self.root.after(0, messagebox.showerror, "配置错误", msg)
+                return
+
+            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+            today = datetime.now().strftime("%Y年%m月%d日")
+            source_content = self.news_brief_text if self.news_brief_text else "\n".join(
+                f"【{a['source']}】{a['title']}" for a in self.news_articles[:15]
+            )
+
+            prompt = f"""请根据以下 {today} 的 IT 科技简报内容，创作一段适合播客节目的口播脚本：
+
+{source_content}
+
+脚本要求：
+1. 风格轻松专业，像真实播客主持人在讲述，有开场白和结束语
+2. 将新闻内容用更口语化的方式表达，避免生硬的书面语
+3. 在每条新闻之间加入自然的过渡语句
+4. 全程约 600～800 字，适合 3～5 分钟的音频播出
+5. 在提到新闻时保留来源媒体名（如"TechCrunch 报道..."）
+6. 直接输出脚本正文，不要加说明
+"""
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一位经验丰富的科技播客主持人，擅长用生动有趣的方式讲解科技新闻。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.75,
+                max_tokens=1500,
+            )
+            script = response.choices[0].message.content.strip()
+
+            self.root.after(0, self._show_podcast_script, script)
+        except Exception as e:
+            self.root.after(0, self.log, f"生成播客脚本失败: {e}")
+            self.root.after(0, messagebox.showerror, "错误", f"生成播客脚本失败：{e}")
+        finally:
+            self.root.after(0, self.news_podcast_btn.config, {"state": tk.NORMAL, "text": "🎙️ 生成播客"})
+
+    def _show_podcast_script(self, script):
+        """在播客区域显示脚本并切换到播客子标签"""
+        self.news_podcast_area.delete(1.0, tk.END)
+        self.news_podcast_area.insert(tk.END, script)
+        self.news_right_notebook.select(1)
+        self.news_status_label.config(text=f"播客脚本生成完成 — {datetime.now().strftime('%H:%M:%S')}")
+        self.tts_status_label.config(text="脚本已就绪，可点击播放")
+        self.log("IT新闻播客脚本生成完成")
+
+    def _play_podcast_tts(self):
+        """使用 Windows SAPI 朗读播客脚本"""
+        script = self.news_podcast_area.get(1.0, tk.END).strip()
+        if not script:
+            messagebox.showwarning("提示", "播客脚本为空，请先生成播客脚本")
+            return
+        if self._tts_process and self._tts_process.poll() is None:
+            messagebox.showinfo("提示", "正在播放中，请先点击停止")
+            return
+
+        # 获取选中的声音名称
+        voice_name = ""
+        try:
+            idx = self.tts_voice_combo.current()
+            voices = getattr(self, "_tts_voice_names", [""])
+            if 0 <= idx < len(voices):
+                voice_name = voices[idx]
+        except Exception:
+            pass
+
+        self.tts_play_btn.config(state=tk.DISABLED)
+        self.tts_stop_btn.config(state=tk.NORMAL)
+        self.tts_status_label.config(text="播放中...")
+        threading.Thread(target=self._tts_thread, args=(script, voice_name), daemon=True).start()
+
+    def _tts_thread(self, text: str, voice_name: str):
+        """后台线程：将文本写入临时文件，调用 PowerShell SAPI 朗读播客脚本"""
+        import subprocess, tempfile
+        txt_path = None
+        ps1_path = None
+        try:
+            # 文本临时文件（UTF-8，PowerShell 从文件读取避免命令行转义）
+            txt = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", suffix=".txt",
+                delete=False, dir=str(self.data_dir)
+            )
+            txt.write(text)
+            txt.close()
+            txt_path = txt.name
+            ps_txt = txt_path.replace("\\", "\\\\")
+
+            # 构建 PowerShell 脚本内容（UTF-8 BOM 使 PS5 正确识别）
+            select_voice_line = (
+                f'$s.SelectVoice("{voice_name}");' if voice_name else ""
+            )
+            ps_content = (
+                "Add-Type -AssemblyName System.Speech\n"
+                "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+                f"{select_voice_line}\n"
+                f'$t = [System.IO.File]::ReadAllText("{ps_txt}", [System.Text.Encoding]::UTF8)\n'
+                "$s.Speak($t)\n"
+            )
+            # 写 ps1（UTF-8 BOM，PowerShell 5 需要 BOM 才能正确读中文字符串）
+            ps1 = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8-sig", suffix=".ps1",
+                delete=False, dir=str(self.data_dir)
+            )
+            ps1.write(ps_content)
+            ps1.close()
+            ps1_path = ps1.name
+
+            self._tts_process = subprocess.Popen(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self._tts_process.wait()
+        except Exception as e:
+            self.root.after(0, self.log, f"TTS 播放失败: {e}")
+        finally:
+            import os as _os
+            for p in (txt_path, ps1_path):
+                try:
+                    if p:
+                        _os.remove(p)
+                except Exception:
+                    pass
+            self._tts_process = None
+            self.root.after(0, self._tts_finished)
+
+    def _tts_finished(self):
+        """TTS 播放结束，恢复按钮状态"""
+        self.tts_play_btn.config(state=tk.NORMAL)
+        self.tts_stop_btn.config(state=tk.DISABLED)
+        self.tts_status_label.config(text="播放已结束")
+
+    def _stop_podcast_tts(self):
+        """停止 TTS 播放"""
+        if self._tts_process and self._tts_process.poll() is None:
+            try:
+                self._tts_process.terminate()
+                # 同时终止子进程树（PowerShell 可能启动子进程）
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(self._tts_process.pid)],
+                    capture_output=True,
+                )
+            except Exception as e:
+                self.log(f"停止 TTS 失败: {e}")
+        self.tts_play_btn.config(state=tk.NORMAL)
+        self.tts_stop_btn.config(state=tk.DISABLED)
+        self.tts_status_label.config(text="已停止")
 
     def create_nvd_view(self):
         """创建 NVD CVE 数据视图"""
@@ -1183,7 +1895,20 @@ class CVEIntegratedGUI:
         )
         search_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        tk.Label(search_frame, text="(支持 CVE ID、描述、严重等级搜索，自动从数据库查询全部数据)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
+        # 删除选中按钮
+        nvd_delete_btn = tk.Button(
+            search_frame,
+            text="🗑 删除选中",
+            command=self.delete_nvd_selected,
+            bg=self.danger_color,
+            fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        nvd_delete_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Label(search_frame, text="(支持 CVE ID、描述、严重等级搜索，自动从数据库查询全部数据；Ctrl/Shift 多选后可删除)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
 
         # 创建 Treeview 来展示 CVE 数据
         columns = ("CVE ID", "严重等级", "CVSS评分", "发布日期", "描述", "来源")
@@ -1335,6 +2060,57 @@ class CVEIntegratedGUI:
         )
         load_csv_btn.pack(side=tk.LEFT, padx=5)
 
+        # URL单条抓取区域
+        url_fetch_frame = tk.LabelFrame(
+            self.dell_frame,
+            text="🔗 单条网页抓取",
+            bg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            fg=self.primary_color,
+            padx=10, pady=8
+        )
+        url_fetch_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
+
+        url_input_row = tk.Frame(url_fetch_frame, bg="white")
+        url_input_row.pack(fill=tk.X)
+
+        tk.Label(
+            url_input_row, text="公告URL：",
+            bg="white", font=("Microsoft YaHei", 10)
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        self.dell_url_entry = tk.Entry(
+            url_input_row,
+            width=70,
+            font=("Microsoft YaHei", 10),
+        )
+        self.dell_url_entry.insert(0, "https://www.dell.com/support/kbdoc/en-us/...")
+        self.dell_url_entry.pack(side=tk.LEFT, padx=(0, 10), fill=tk.X, expand=True)
+
+        self.dell_fetch_btn = tk.Button(
+            url_input_row,
+            text="⬇ 抓取并入库",
+            command=self.fetch_dell_advisory_from_url,
+            bg=self.primary_color,
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=12, pady=4,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        self.dell_fetch_btn.pack(side=tk.LEFT)
+
+        self.dell_fetch_status = tk.Label(
+            url_fetch_frame,
+            text="输入Dell安全公告页面URL后点击抓取，内容将自动解析并存入数据库（优先使用Exa API，失败时回退至直接请求）",
+            bg="white",
+            fg="gray",
+            font=("Microsoft YaHei", 9),
+            wraplength=900,
+            justify=tk.LEFT
+        )
+        self.dell_fetch_status.pack(anchor=tk.W, pady=(4, 0))
+
         # 数据展示区域
         data_container = tk.Frame(self.dell_frame, bg="white")
         data_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
@@ -1361,7 +2137,20 @@ class CVEIntegratedGUI:
         )
         search_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        tk.Label(search_frame, text="(支持 公告ID、CVE ID、标题、产品搜索)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
+        # 删除选中按钮
+        dell_delete_btn = tk.Button(
+            search_frame,
+            text="🗑 删除选中",
+            command=self.delete_dell_selected,
+            bg=self.danger_color,
+            fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        dell_delete_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Label(search_frame, text="(支持 公告ID、CVE ID、标题、产品搜索；Ctrl/Shift 多选后可删除)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
 
         # 创建 Treeview 来展示 Dell 安全公告
         columns = ("公告ID", "标题", "CVE IDs", "发布日期", "受影响产品数")
@@ -1695,6 +2484,556 @@ class CVEIntegratedGUI:
 
         return card
 
+    def create_learn_view(self):
+        """创建智能学习（费曼学习法）标签页内容"""
+        # ── 顶部说明栏 ────────────────────────────────────────────────
+        top_bar = tk.Frame(self.learn_frame, bg="#e8f4fd", pady=8)
+        top_bar.pack(fill=tk.X, padx=10, pady=(8, 0))
+        tk.Label(
+            top_bar,
+            text="🧠 智能费曼学习助手  ·  通过费曼教学法深化对CVE/安全知识的理解",
+            bg="#e8f4fd",
+            fg=self.primary_color,
+            font=("Microsoft YaHei", 10, "bold"),
+        ).pack(side=tk.LEFT, padx=8)
+
+        # ── 主体水平分栏 ──────────────────────────────────────────────
+        main_paned = tk.PanedWindow(
+            self.learn_frame, orient=tk.HORIZONTAL,
+            sashrelief=tk.RAISED, sashwidth=5, bg="#cccccc"
+        )
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+
+        # ── 左侧控制面板 ──────────────────────────────────────────────
+        left_outer = tk.Frame(main_paned, bg="white")
+        main_paned.add(left_outer, width=300, minsize=220)
+
+        left_canvas = tk.Canvas(left_outer, bg="white", highlightthickness=0)
+        left_scroll = tk.Scrollbar(left_outer, orient=tk.VERTICAL, command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=left_scroll.set)
+        left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        left_panel = tk.Frame(left_canvas, bg="white")
+        left_canvas.create_window((0, 0), window=left_panel, anchor="nw")
+        left_panel.bind(
+            "<Configure>",
+            lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+        )
+
+        # 1. 学习内容来源
+        data_frame = tk.LabelFrame(
+            left_panel, text="📚 学习内容来源", bg="white",
+            font=("Microsoft YaHei", 9, "bold"), fg=self.primary_color
+        )
+        data_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        self.learn_source_var = tk.StringVar(value="db")
+        rb_db = tk.Radiobutton(
+            data_frame, text="🗄️ 从数据库选取", variable=self.learn_source_var,
+            value="db", bg="white", font=("Microsoft YaHei", 9),
+            command=self._on_learn_source_change
+        )
+        rb_db.pack(anchor="w", padx=8, pady=2)
+        rb_file = tk.Radiobutton(
+            data_frame, text="📁 上传本地文件", variable=self.learn_source_var,
+            value="file", bg="white", font=("Microsoft YaHei", 9),
+            command=self._on_learn_source_change
+        )
+        rb_file.pack(anchor="w", padx=8, pady=2)
+
+        # 数据库子选项
+        self.learn_db_type_frame = tk.Frame(data_frame, bg="white")
+        self.learn_db_type_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
+        tk.Label(
+            self.learn_db_type_frame, text="数据类型:", bg="white",
+            font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT)
+        self.learn_db_type_combo = ttk.Combobox(
+            self.learn_db_type_frame,
+            values=["CVE漏洞数据", "Dell安全公告", "AI分析记录"],
+            state="readonly", width=13, font=("Microsoft YaHei", 9)
+        )
+        self.learn_db_type_combo.current(0)
+        self.learn_db_type_combo.pack(side=tk.LEFT, padx=4)
+
+        load_btn = tk.Button(
+            data_frame, text="⬇ 加载内容", command=self._load_learn_content,
+            bg=self.info_color, fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=3
+        )
+        load_btn.pack(fill=tk.X, padx=8, pady=(2, 4))
+
+        # 内容预览
+        tk.Label(
+            data_frame, text="内容预览:", bg="white",
+            font=("Microsoft YaHei", 8), fg="#666666"
+        ).pack(anchor="w", padx=8)
+        self.learn_preview_text = tk.Text(
+            data_frame, height=6, wrap=tk.WORD,
+            font=("Microsoft YaHei", 8), bg="#f8f9fa",
+            relief=tk.FLAT, state=tk.DISABLED
+        )
+        self.learn_preview_text.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        # 2. 学习主题
+        topic_frame = tk.LabelFrame(
+            left_panel, text="🎯 学习主题", bg="white",
+            font=("Microsoft YaHei", 9, "bold"), fg=self.primary_color
+        )
+        topic_frame.pack(fill=tk.X, padx=8, pady=4)
+        tk.Label(
+            topic_frame, text="输入要学习的主题或概念：",
+            bg="white", font=("Microsoft YaHei", 8), fg="#666666"
+        ).pack(anchor="w", padx=8, pady=(4, 0))
+        self.learn_topic_entry = tk.Entry(
+            topic_frame, font=("Microsoft YaHei", 10),
+            relief=tk.SOLID, bd=1
+        )
+        self.learn_topic_entry.pack(fill=tk.X, padx=8, pady=(2, 8))
+        self.learn_topic_entry.insert(0, "CVE漏洞分析")
+
+        # 3. 学习层次
+        level_frame = tk.LabelFrame(
+            left_panel, text="📊 学习层次", bg="white",
+            font=("Microsoft YaHei", 9, "bold"), fg=self.primary_color
+        )
+        level_frame.pack(fill=tk.X, padx=8, pady=4)
+        self.learn_level_var = tk.StringVar(value="入门")
+        levels = [
+            ("🌱 入门  — 简单类比，零基础理解", "入门"),
+            ("💼 专业  — 技术深度，行业标准", "专业"),
+            ("🏆 精通  — 苏格拉底挑战，跨域连接", "精通"),
+        ]
+        for text, val in levels:
+            tk.Radiobutton(
+                level_frame, text=text, variable=self.learn_level_var,
+                value=val, bg="white", font=("Microsoft YaHei", 9),
+                anchor="w"
+            ).pack(fill=tk.X, padx=8, pady=2)
+
+        # 4. 操作按钮
+        btn_frame = tk.Frame(left_panel, bg="white")
+        btn_frame.pack(fill=tk.X, padx=8, pady=8)
+        self.learn_start_btn = tk.Button(
+            btn_frame, text="🚀 开始学习",
+            command=self._start_learn_session,
+            bg=self.success_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=6
+        )
+        self.learn_start_btn.pack(fill=tk.X, pady=(0, 4))
+        tk.Button(
+            btn_frame, text="🔄 重置会话",
+            command=self._reset_learn_session,
+            bg=self.warning_color, fg="white",
+            font=("Microsoft YaHei", 9),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        ).pack(fill=tk.X)
+
+        # ── 右侧对话区域 ──────────────────────────────────────────────
+        right_panel = tk.Frame(main_paned, bg="white")
+        main_paned.add(right_panel)
+
+        chat_lf = tk.LabelFrame(
+            right_panel, text="💬 费曼对话",
+            bg="white", font=("Microsoft YaHei", 9, "bold"),
+            fg=self.primary_color
+        )
+        chat_lf.pack(fill=tk.BOTH, expand=True, padx=6, pady=(6, 4))
+
+        self.learn_chat_area = scrolledtext.ScrolledText(
+            chat_lf, wrap=tk.WORD,
+            font=("Microsoft YaHei", 10),
+            bg="#f0f4f8", relief=tk.FLAT,
+            state=tk.DISABLED
+        )
+        self.learn_chat_area.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        # 配置文字样式标签
+        self.learn_chat_area.tag_config("system", foreground="#888888", font=("Microsoft YaHei", 9, "italic"))
+        self.learn_chat_area.tag_config("ai", foreground=self.primary_color, font=("Microsoft YaHei", 10))
+        self.learn_chat_area.tag_config("user", foreground=self.success_color, font=("Microsoft YaHei", 10, "bold"))
+        self.learn_chat_area.tag_config("header", foreground=self.info_color, font=("Microsoft YaHei", 10, "bold"))
+
+        # 用户输入区
+        input_lf = tk.LabelFrame(
+            right_panel, text="✍️ 输入您的理解或提问",
+            bg="white", font=("Microsoft YaHei", 9, "bold"),
+            fg=self.primary_color
+        )
+        input_lf.pack(fill=tk.X, padx=6, pady=(0, 4))
+
+        self.learn_user_input = tk.Text(
+            input_lf, height=4, wrap=tk.WORD,
+            font=("Microsoft YaHei", 10),
+            relief=tk.SOLID, bd=1
+        )
+        self.learn_user_input.pack(fill=tk.X, padx=6, pady=(4, 4))
+        self.learn_user_input.bind("<Control-Return>", lambda e: self._send_learn_message())
+
+        send_bar = tk.Frame(input_lf, bg="white")
+        send_bar.pack(fill=tk.X, padx=6, pady=(0, 6))
+        tk.Label(
+            send_bar, text="Ctrl+Enter 快捷发送",
+            bg="white", fg="#999999", font=("Microsoft YaHei", 8)
+        ).pack(side=tk.LEFT)
+        self.learn_send_btn = tk.Button(
+            send_bar, text="💬 提交解释",
+            command=self._send_learn_message,
+            bg=self.primary_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=20, pady=4
+        )
+        self.learn_send_btn.pack(side=tk.RIGHT)
+
+        # ── 底部状态栏 ────────────────────────────────────────────────
+        self.learn_status_label = tk.Label(
+            self.learn_frame, text="就绪  |  请选择学习内容来源，输入主题，然后点击「开始学习」",
+            bg="#f5f5f5", fg="#555555",
+            font=("Microsoft YaHei", 9), anchor="w", padx=10
+        )
+        self.learn_status_label.pack(fill=tk.X, side=tk.BOTTOM, ipady=4)
+
+        # 显示欢迎信息
+        self._learn_append_message(
+            "【费曼学习法助手已就绪】\n\n"
+            "费曼学习法四步骤：\n"
+            "  1️⃣  选择一个概念\n"
+            "  2️⃣  用简单语言解释它（如同教给12岁孩子）\n"
+            "  3️⃣  找出你无法解释清楚的部分\n"
+            "  4️⃣  回顾原始资料，重新解释直到清晰\n\n"
+            "请在左侧选择学习内容来源和层次，输入主题后点击「开始学习」。",
+            tag="system"
+        )
+
+    def _on_learn_source_change(self):
+        """数据来源单选切换时显示/隐藏数据库子选项"""
+        if self.learn_source_var.get() == "db":
+            self.learn_db_type_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
+        else:
+            self.learn_db_type_frame.pack_forget()
+
+    def _load_learn_content(self):
+        """加载学习内容到预览框"""
+        source = self.learn_source_var.get()
+        if source == "db":
+            self._load_learn_from_db()
+        else:
+            self._load_learn_from_file()
+
+    def _load_learn_from_db(self):
+        """从 SQLite 数据库加载内容"""
+        db_type = self.learn_db_type_combo.get()
+        try:
+            cursor = self.conn.cursor()
+            content_lines = []
+
+            if db_type == "CVE漏洞数据":
+                cursor.execute(
+                    "SELECT cve_id, data FROM cves ORDER BY published_date DESC LIMIT 20"
+                )
+                rows = cursor.fetchall()
+                if not rows:
+                    self._learn_set_preview("数据库中暂无 CVE 数据，请先采集。")
+                    return
+                for cve_id, data_str in rows:
+                    try:
+                        d = json.loads(data_str)
+                        desc = ""
+                        descs = d.get("descriptions", [])
+                        for item in descs:
+                            if item.get("lang") == "en":
+                                desc = item.get("value", "")[:120]
+                                break
+                        metrics = d.get("metrics", {})
+                        cvss = metrics.get("cvssMetricV31", metrics.get("cvssMetricV30", []))
+                        severity = ""
+                        if cvss:
+                            severity = cvss[0].get("cvssData", {}).get("baseSeverity", "")
+                        content_lines.append(
+                            f"[{cve_id}] 严重性:{severity}\n  {desc}"
+                        )
+                    except Exception:
+                        content_lines.append(f"[{cve_id}] 数据解析失败")
+                topic_hint = "CVE漏洞分析与安全修复"
+
+            elif db_type == "Dell安全公告":
+                cursor.execute(
+                    "SELECT dsa_id, title, cve_ids FROM dell_advisories ORDER BY published_date DESC LIMIT 20"
+                )
+                rows = cursor.fetchall()
+                if not rows:
+                    self._learn_set_preview("数据库中暂无 Dell 安全公告，请先采集。")
+                    return
+                for dsa_id, title, cve_ids in rows:
+                    content_lines.append(f"[{dsa_id}] {title}\n  关联CVE: {cve_ids or '无'}")
+                topic_hint = "Dell安全公告与漏洞管理"
+
+            elif db_type == "AI分析记录":
+                cursor.execute(
+                    "SELECT cve_id, dell_advisory_id, result, analysis_time FROM ai_solutions "
+                    "ORDER BY created_at DESC LIMIT 10"
+                )
+                rows = cursor.fetchall()
+                if not rows:
+                    self._learn_set_preview("数据库中暂无 AI 分析记录。")
+                    return
+                for cve_id, dsa_id, result, ts in rows:
+                    snippet = (result or "")[:150].replace("\n", " ")
+                    content_lines.append(
+                        f"[{ts[:16]}] {cve_id} / {dsa_id}\n  {snippet}..."
+                    )
+                topic_hint = "AI安全分析结果解读"
+            else:
+                return
+
+            self.learn_source_content = "\n\n".join(content_lines)
+            self._learn_set_preview(self.learn_source_content)
+            # 自动填入建议主题
+            current = self.learn_topic_entry.get().strip()
+            if not current or current == "CVE漏洞分析":
+                self.learn_topic_entry.delete(0, tk.END)
+                self.learn_topic_entry.insert(0, topic_hint)
+            self.learn_status_label.config(
+                text=f"已从数据库加载 {len(content_lines)} 条{db_type}记录"
+            )
+        except Exception as e:
+            self._learn_set_preview(f"加载失败: {e}")
+
+    def _load_learn_from_file(self):
+        """从本地文件加载内容"""
+        path = filedialog.askopenfilename(
+            title="选择学习资料文件",
+            filetypes=[
+                ("文本文件", "*.txt"),
+                ("Markdown", "*.md"),
+                ("所有文件", "*.*"),
+            ]
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            self.learn_source_content = content[:8000]  # 最多8000字符作为上下文
+            preview = content[:600] + ("\n..." if len(content) > 600 else "")
+            self._learn_set_preview(preview)
+            # 用文件名作为主题提示
+            fname = Path(path).stem
+            self.learn_topic_entry.delete(0, tk.END)
+            self.learn_topic_entry.insert(0, fname)
+            self.learn_status_label.config(
+                text=f"已加载文件: {Path(path).name}  ({len(content)} 字符)"
+            )
+        except Exception as e:
+            self._learn_set_preview(f"文件读取失败: {e}")
+
+    def _learn_set_preview(self, text: str):
+        """更新内容预览框"""
+        self.learn_preview_text.config(state=tk.NORMAL)
+        self.learn_preview_text.delete("1.0", tk.END)
+        self.learn_preview_text.insert("1.0", text)
+        self.learn_preview_text.config(state=tk.DISABLED)
+
+    def _learn_append_message(self, text: str, tag: str = "ai", prefix: str = ""):
+        """向对话区追加一条消息"""
+        self.learn_chat_area.config(state=tk.NORMAL)
+        if prefix:
+            self.learn_chat_area.insert(tk.END, prefix + "\n", "header")
+        self.learn_chat_area.insert(tk.END, text + "\n\n", tag)
+        self.learn_chat_area.see(tk.END)
+        self.learn_chat_area.config(state=tk.DISABLED)
+
+    def _start_learn_session(self):
+        """开始一个新的费曼学习会话"""
+        topic = self.learn_topic_entry.get().strip()
+        if not topic:
+            messagebox.showwarning("提示", "请先输入学习主题")
+            return
+        if self.is_learn_generating:
+            return
+
+        self.learn_topic = topic
+        self.learn_messages = []
+
+        level = self.learn_level_var.get()
+        level_desc = {
+            "入门": "初学者（用日常类比和简单语言）",
+            "专业": "专业开发者（技术深度，精确术语）",
+            "精通": "领域专家（苏格拉底挑战式，跨域联接）",
+        }.get(level, level)
+
+        # 构造系统提示词
+        system_prompt = self._get_learn_system_prompt(level)
+
+        # 构造启动用户消息（含内容上下文）
+        context_part = ""
+        if self.learn_source_content:
+            snippet = self.learn_source_content[:2000]
+            context_part = f"\n\n【参考资料（节选）】\n{snippet}"
+
+        user_msg = (
+            f"我想用费曼学习法学习：「{topic}」\n"
+            f"我的学习层次：{level_desc}{context_part}\n\n"
+            f"请按费曼学习法引导我：先简单介绍这个主题，然后请我用自己的话解释它。"
+        )
+
+        self.learn_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+
+        # 清空对话区并显示开始信息
+        self.learn_chat_area.config(state=tk.NORMAL)
+        self.learn_chat_area.delete("1.0", tk.END)
+        self.learn_chat_area.config(state=tk.DISABLED)
+        self._learn_append_message(
+            f"▶ 开始学习：{topic}  |  层次：{level}",
+            tag="header"
+        )
+        self._learn_append_message(f"您: {user_msg[:200]}...", tag="user", prefix="")
+
+        self._set_learn_buttons(False)
+        self.learn_status_label.config(text="AI 正在生成费曼引导内容...")
+        threading.Thread(
+            target=self._learn_ai_thread,
+            args=(list(self.learn_messages),),
+            daemon=True
+        ).start()
+
+    def _send_learn_message(self):
+        """用户提交解释/回答"""
+        if self.is_learn_generating:
+            return
+        if not self.learn_messages:
+            messagebox.showinfo("提示", "请先点击「开始学习」启动会话")
+            return
+        user_text = self.learn_user_input.get("1.0", tk.END).strip()
+        if not user_text:
+            return
+
+        # 清空输入框
+        self.learn_user_input.delete("1.0", tk.END)
+
+        # 记录到历史
+        self.learn_messages.append({"role": "user", "content": user_text})
+        self._learn_append_message(user_text, tag="user", prefix="── 您的解释 ──")
+
+        self._set_learn_buttons(False)
+        self.learn_status_label.config(text="AI 正在分析您的解释...")
+        threading.Thread(
+            target=self._learn_ai_thread,
+            args=(list(self.learn_messages),),
+            daemon=True
+        ).start()
+
+    def _learn_ai_thread(self, messages: list):
+        """后台线程：调用 Qwen AI 进行费曼对话"""
+        self.is_learn_generating = True
+        try:
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                self.root.after(
+                    0, messagebox.showerror, "配置错误",
+                    "未设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY，无法调用 AI"
+                )
+                return
+
+            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            base_url = os.getenv(
+                "QWEN_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=1500,
+            )
+            reply = response.choices[0].message.content
+
+            # 追加到历史
+            self.learn_messages.append({"role": "assistant", "content": reply})
+            # 保持历史不超过20条（节省token）
+            if len(self.learn_messages) > 21:
+                # 保留system消息 + 最近20条
+                self.learn_messages = self.learn_messages[:1] + self.learn_messages[-20:]
+
+            self.root.after(0, self._learn_append_message, reply, "ai", "── AI 导师 ──")
+            self.root.after(0, self.learn_status_label.config,
+                            {"text": f"对话进行中  |  主题：{self.learn_topic}  |  共 {len(self.learn_messages)} 轮"})
+
+        except Exception as e:
+            err = f"AI 调用失败: {e}"
+            self.root.after(0, self._learn_append_message, err, "system")
+            self.root.after(0, self.learn_status_label.config, {"text": err})
+        finally:
+            self.is_learn_generating = False
+            self.root.after(0, self._set_learn_buttons, True)
+
+    def _set_learn_buttons(self, enabled: bool):
+        """启用/禁用学习相关按钮"""
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self.learn_start_btn.config(state=state)
+        self.learn_send_btn.config(state=state)
+
+    def _reset_learn_session(self):
+        """重置费曼学习会话"""
+        self.learn_messages = []
+        self.learn_topic = ""
+        self.learn_source_content = ""
+        self._learn_set_preview("")
+        self.learn_chat_area.config(state=tk.NORMAL)
+        self.learn_chat_area.delete("1.0", tk.END)
+        self.learn_chat_area.config(state=tk.DISABLED)
+        self._learn_append_message(
+            "会话已重置。请重新选择学习内容来源和主题，然后点击「开始学习」。",
+            tag="system"
+        )
+        self.learn_status_label.config(text="会话已重置")
+        self._set_learn_buttons(True)
+
+    def _get_learn_system_prompt(self, level: str) -> str:
+        """根据学习层次返回对应的系统提示词"""
+        prompts = {
+            "入门": (
+                "你是一位耐心的费曼学习法导师，面向零基础学习者。\n"
+                "原则：\n"
+                "1. 始终使用日常类比和生活化比喻解释技术概念，绝不堆砌专业术语\n"
+                "2. 每次只聚焦一个核心概念，循序渐进\n"
+                "3. 对用户的解释给予充分鼓励，用温和方式指出不足\n"
+                "4. 每次回应结尾提出一个简单的引导问题\n"
+                "5. 如果用户说'不知道'，用更简单的比喻重新解释，而非批评\n"
+                "语气：温暖、鼓励、耐心"
+            ),
+            "专业": (
+                "你是一位资深技术导师，采用费曼学习法面向专业工程师。\n"
+                "原则：\n"
+                "1. 使用准确的技术术语和行业标准表达\n"
+                "2. 关注实现细节、架构设计、权衡取舍和最佳实践\n"
+                "3. 对用户解释的技术准确性进行严格评估，指出精确性不足之处\n"
+                "4. 每次回应结尾提出一个深度技术问题或实际应用场景\n"
+                "5. 引用相关标准（如CVE评分标准、CVSS）或行业实践\n"
+                "语气：专业、精准、有深度"
+            ),
+            "精通": (
+                "你是一位顶级领域专家，运用苏格拉底式提问进行费曼教学，面向领域专家。\n"
+                "原则：\n"
+                "1. 挑战用户思维的边界，深挖理解的盲点和假设\n"
+                "2. 关注跨领域知识联接（如安全与系统设计、密码学与实现的关系）\n"
+                "3. 引导用户发现反直觉结论、边界条件和精微概念辨析\n"
+                "4. 每次提出一个能引发更深思考的苏格拉底式问题\n"
+                "5. 要求用户能够'教授他人'这个概念——这是费曼法的最高标准\n"
+                "语气：严谨、挑战性、启发式"
+            ),
+        }
+        return prompts.get(level, prompts["入门"])
+
+    # ==================== 操作日志 ====================
+
     def create_log_view(self):
         """创建日志视图"""
         # 日志文本区域
@@ -1975,6 +3314,198 @@ class CVEIntegratedGUI:
                 self.log_queue.put(f"采集过程出错: {str(e)}")
                 import traceback
                 self.log_queue.put(f"详细错误: {traceback.format_exc()}")
+
+    # ==================== Dell URL单条网页抓取功能 ====================
+
+    def fetch_dell_advisory_from_url(self):
+        """从用户输入的URL抓取单条Dell安全公告并存入数据库"""
+        url = self.dell_url_entry.get().strip()
+        placeholder = "https://www.dell.com/support/kbdoc/en-us/..."
+        if not url or url == placeholder:
+            messagebox.showwarning("请输入URL", "请先输入Dell安全公告的网页URL")
+            return
+        if not url.startswith("http"):
+            messagebox.showwarning("URL格式错误", "请输入有效的HTTP/HTTPS URL")
+            return
+        self.dell_fetch_btn.config(state=tk.DISABLED)
+        self.dell_fetch_status.config(text="⏳ 正在抓取页面内容...", fg=self.info_color)
+        self.log(f"开始抓取Dell安全公告: {url}")
+        thread = threading.Thread(
+            target=self._fetch_advisory_thread, args=(url,), daemon=True
+        )
+        thread.start()
+
+    def _fetch_advisory_thread(self, url: str):
+        """后台线程：抓取并解析单条Dell安全公告"""
+        try:
+            content = ""
+            exa_api_key = os.getenv("EXA_API_KEY")
+            # 1. 优先使用Exa API
+            if exa_api_key:
+                self.log_queue.put("使用Exa API获取页面内容...")
+                content = self._fetch_with_exa(url, exa_api_key)
+            # 2. Fallback：直接HTTP请求 + BeautifulSoup
+            if not content:
+                self.log_queue.put("回退：使用直接HTTP请求获取页面...")
+                content = self._fetch_with_requests(url)
+            if not content:
+                self.root.after(0, self._fetch_done, None,
+                                "❌ 无法获取页面内容，请检查URL是否有效或网络连接")
+                return
+            # 3. 解析内容构建advisory结构
+            advisory = self._parse_dell_page_content(url, content)
+            # 4. 保证DSA ID不为空
+            if not advisory.get('dell_security_advisory'):
+                dsa_id = self._extract_dsa_id_from_url(url)
+                if dsa_id:
+                    advisory['dell_security_advisory'] = dsa_id
+                else:
+                    self.root.after(0, self._fetch_done, None,
+                                    "⚠️ 未能识别DSA公告ID，请确认是Dell安全公告页面")
+                    return
+            # 5. 存入数据库
+            is_new = self.store_dell_advisory(advisory)
+            dsa_id = advisory['dell_security_advisory']
+            if is_new:
+                msg = f"✅ 新公告已入库：{dsa_id}（CVE数量：{len(advisory.get('cve_ids', []))}）"
+            else:
+                msg = f"ℹ️ 公告已存在，跳过：{dsa_id}"
+            self.root.after(0, self._fetch_done, advisory, msg)
+        except Exception as e:
+            import traceback
+            self.log_queue.put(f"URL抓取异常: {traceback.format_exc()}")
+            self.root.after(0, self._fetch_done, None, f"❌ 抓取失败: {str(e)}")
+
+    def _fetch_with_exa(self, url: str, api_key: str) -> str:
+        """使用Exa API获取页面正文文本"""
+        import requests as req
+        try:
+            response = req.post(
+                "https://api.exa.ai/contents",
+                headers={
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                    "x-api-key": api_key,
+                },
+                json={"ids": [url], "text": True},
+                timeout=30,
+            )
+            if response.status_code == 200:
+                results = response.json().get("results", [])
+                if results:
+                    return results[0].get("text", "")
+            else:
+                self.log_queue.put(f"Exa API返回 HTTP {response.status_code}")
+        except Exception as e:
+            self.log_queue.put(f"Exa API调用失败: {e}")
+        return ""
+
+    def _fetch_with_requests(self, url: str) -> str:
+        """直接HTTP请求 + BeautifulSoup 提取正文文本"""
+        import requests as req
+        from bs4 import BeautifulSoup
+        try:
+            response = req.get(
+                url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+                tag.decompose()
+            return soup.get_text(separator='\n', strip=True)
+        except Exception as e:
+            self.log_queue.put(f"直接HTTP抓取失败: {e}")
+        return ""
+
+    def _extract_dsa_id_from_url(self, url: str) -> str:
+        """从URL路径中推断DSA ID"""
+        match = re.search(r'dsa[-_](\d{4}[-_]\d+)', url, re.IGNORECASE)
+        if match:
+            return "DSA-" + match.group(1).replace('_', '-')
+        match = re.search(r'/(\d{9})', url)
+        if match:
+            return f"KB-{match.group(1)}"
+        return ""
+
+    def _parse_dell_page_content(self, url: str, content: str) -> dict:
+        """从页面文本内容提取Dell安全公告各字段"""
+        scraper = DellSecurityScraper()
+        # DSA ID
+        dsa_match = re.search(r'DSA-\d{4}-\d+', content, re.IGNORECASE)
+        dsa_id = dsa_match.group(0).upper() if dsa_match else ""
+        # CVE IDs（去重，统一大写）
+        cve_ids = list(set(
+            c.upper() for c in re.findall(r'CVE-\d{4}-\d{4,7}', content, re.IGNORECASE)
+        ))
+        # 标题：取前几行中含关键词的行
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
+        title = lines[0][:200] if lines else url
+        for line in lines[:8]:
+            if (len(line) > 15 and
+                    ('DSA' in line.upper() or 'Dell' in line or 'Security' in line)
+                    and len(line) < 300):
+                title = line
+                break
+        # 发布日期
+        published_date = datetime.now().isoformat()
+        date_patterns = [
+            (r'(\w+ \d{1,2},?\s+\d{4})', ['%B %d, %Y', '%B %d %Y']),
+            (r'(\d{4}-\d{2}-\d{2})',       ['%Y-%m-%d']),
+            (r'(\d{1,2}/\d{1,2}/\d{4})',   ['%m/%d/%Y']),
+        ]
+        for pattern, fmts in date_patterns:
+            m = re.search(pattern, content)
+            if m:
+                for fmt in fmts:
+                    try:
+                        published_date = datetime.strptime(m.group(1), fmt).isoformat()
+                        break
+                    except ValueError:
+                        continue
+                break
+        # 影响级别
+        impact = ""
+        impact_match = (
+            re.search(r'\b(Critical|High|Medium|Low)\b.*?[Ss]everity', content) or
+            re.search(r'[Ss]everity[:\s]*(Critical|High|Medium|Low)', content)
+        )
+        if impact_match:
+            impact = impact_match.group(1).capitalize()
+        # 产品和解决方案
+        products = scraper.extract_products_from_text(content)
+        solution = scraper.extract_solution_from_text(content)
+        # 摘要（前500字符，压缩空白）
+        summary = ' '.join(content.split())[:500]
+        return {
+            'dell_security_advisory': dsa_id,
+            'title': title,
+            'cve_ids': cve_ids,
+            'published_date': published_date,
+            'link': url,
+            'summary': summary,
+            'description': content[:2000],
+            'affected_products': products,
+            'solution': solution,
+            'impact': impact,
+            'source': 'URL Fetch',
+        }
+
+    def _fetch_done(self, advisory, message: str):
+        """抓取完成后在主线程更新UI状态"""
+        self.dell_fetch_btn.config(state=tk.NORMAL)
+        if advisory:
+            self.dell_fetch_status.config(text=message, fg=self.success_color)
+            self.log(message)
+            self.dell_queue.put(('refresh_database', None))
+        else:
+            self.dell_fetch_status.config(text=message, fg=self.danger_color)
+            self.log(f"URL抓取: {message}")
 
     # ==================== Dell 安全公告采集功能 ====================
 
@@ -3159,43 +4690,153 @@ class CVEIntegratedGUI:
         except Exception as e:
             self.log_queue.put(f"搜索出错: {str(e)}")
 
+    def delete_nvd_selected(self):
+        """删除NVD列表中当前选中的记录（支持多选）"""
+        selected = self.nvd_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先选择要删除的记录（支持 Ctrl/Shift 多选）")
+            return
+        count = len(selected)
+        if not messagebox.askyesno(
+            "确认删除",
+            f"确定要永久删除选中的 {count} 条 CVE 记录吗？\n此操作不可撤销，数据将从数据库中彻底删除。"
+        ):
+            return
+        cve_ids_to_delete = [self.nvd_tree.item(iid, 'values')[0] for iid in selected
+                              if self.nvd_tree.item(iid, 'values')]
+        try:
+            cursor = self.conn.cursor()
+            params = [(cid,) for cid in cve_ids_to_delete]
+            # 先删子表（外键约束），再删主表
+            cursor.executemany("DELETE FROM collection_history WHERE cve_id = ?", params)
+            cursor.executemany("DELETE FROM cves WHERE cve_id = ?", params)
+            self.conn.commit()
+        except sqlite3.Error as e:
+            messagebox.showerror("删除失败", f"数据库操作失败：{e}")
+            return
+        cve_id_set = set(cve_ids_to_delete)
+        self.cve_data = [c for c in self.cve_data if c.get('cve_id') not in cve_id_set]
+        for iid in selected:
+            self.nvd_tree.delete(iid)
+        preview = ', '.join(cve_ids_to_delete[:5])
+        suffix = '...' if count > 5 else ''
+        self.log(f"已永久删除 {count} 条CVE记录：{preview}{suffix}")
+        self.update_stats()
+
     def filter_dell_data(self, *args):
         """过滤 Dell 数据（支持公告ID、CVE ID、标题、产品搜索）"""
-        search_term = self.dell_search_var.get().upper()
+        search_term = self.dell_search_var.get().strip()
+        search_upper = search_term.upper()
 
         # 清空树视图
         for item in self.dell_tree.get_children():
             self.dell_tree.delete(item)
 
-        # 如果搜索框为空，显示所有数据
+        # 如果搜索框为空，显示所有内存中的数据
         if not search_term:
             for advisory in self.dell_advisories:
                 self.add_dell_to_tree(advisory)
             return
 
-        # 重新添加符合条件的数据
+        # 先在内存中搜索
+        matched = []
         for advisory in self.dell_advisories:
-            # 1. 公告ID（dell_security_advisory）
             advisory_id = advisory.get("dell_security_advisory", "") or ""
-
-            # 2. CVE IDs
             cve_ids = advisory.get("cve_ids", [])
-            cve_ids_str = ", ".join(cve_ids).upper() if cve_ids else ""
-
-            # 3. 标题
+            cve_ids_str = ", ".join(cve_ids) if cve_ids else ""
             title = advisory.get("title", "") or ""
-            title = title.upper()
-
-            # 4. 产品名称
             product_names = [p.get("name", "") for p in advisory.get("affected_products", [])]
-            products = ", ".join(product_names).upper() if product_names else ""
+            products = ", ".join(product_names) if product_names else ""
 
-            # 搜索匹配
-            if (search_term in advisory_id.upper() or
-                search_term in cve_ids_str or
-                search_term in title or
-                search_term in products):
+            if (search_upper in advisory_id.upper() or
+                    search_upper in cve_ids_str.upper() or
+                    search_upper in title.upper() or
+                    search_upper in products.upper()):
+                matched.append(advisory)
+
+        if matched:
+            for advisory in matched:
                 self.add_dell_to_tree(advisory)
+            self.log(f"在已加载数据中找到 {len(matched)} 条匹配记录")
+            return
+
+        # 内存中未找到，回退到数据库全量搜索
+        self.log(f"内存中未找到匹配，正在从数据库搜索 '{search_term}'...")
+        threading.Thread(
+            target=self._search_dell_from_database,
+            args=(search_term,),
+            daemon=True
+        ).start()
+
+    def _search_dell_from_database(self, search_term: str):
+        """从数据库全量搜索Dell公告（后台线程）"""
+        try:
+            search_upper = f"%{search_term.upper()}%"
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT data FROM dell_advisories
+                WHERE UPPER(dsa_id)   LIKE ?
+                   OR UPPER(title)    LIKE ?
+                   OR UPPER(cve_ids)  LIKE ?
+                   OR UPPER(data)     LIKE ?
+                ORDER BY published_date DESC
+                LIMIT 200
+            """, (search_upper, search_upper, search_upper, search_upper))
+
+            results = []
+            for (raw,) in cursor.fetchall():
+                try:
+                    if raw:
+                        results.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+
+            # 清空树并显示结果（通过队列回主线程）
+            self.dell_queue.put(('clear', None))
+            for advisory in results:
+                self.dell_queue.put(('add', advisory))
+
+            if results:
+                self.log_queue.put(f"✓ 数据库中找到 {len(results)} 条匹配 '{search_term}' 的记录")
+            else:
+                self.log_queue.put(f"未找到匹配 '{search_term}' 的Dell公告（已搜索全部数据库）")
+
+        except sqlite3.Error as e:
+            self.log_queue.put(f"数据库搜索失败: {str(e)}")
+        except Exception as e:
+            self.log_queue.put(f"Dell搜索出错: {str(e)}")
+
+    def delete_dell_selected(self):
+        """删除Dell列表中当前选中的记录（支持多选）"""
+        selected = self.dell_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先选择要删除的记录（支持 Ctrl/Shift 多选）")
+            return
+        count = len(selected)
+        if not messagebox.askyesno(
+            "确认删除",
+            f"确定要永久删除选中的 {count} 条 Dell 安全公告吗？\n此操作不可撤销，数据将从数据库中彻底删除。"
+        ):
+            return
+        dsa_ids_to_delete = [self.dell_tree.item(iid, 'values')[0] for iid in selected
+                              if self.dell_tree.item(iid, 'values')]
+        try:
+            cursor = self.conn.cursor()
+            cursor.executemany("DELETE FROM dell_advisories WHERE dsa_id = ?",
+                               [(did,) for did in dsa_ids_to_delete])
+            self.conn.commit()
+        except sqlite3.Error as e:
+            messagebox.showerror("删除失败", f"数据库操作失败：{e}")
+            return
+        dsa_id_set = set(dsa_ids_to_delete)
+        self.dell_advisories = [a for a in self.dell_advisories
+                                 if a.get('dell_security_advisory') not in dsa_id_set]
+        for iid in selected:
+            self.dell_tree.delete(iid)
+        preview = ', '.join(dsa_ids_to_delete[:5])
+        suffix = '...' if count > 5 else ''
+        self.log(f"已永久删除 {count} 条Dell安全公告：{preview}{suffix}")
+        self.update_stats()
 
     # ==================== 详情显示功能 ====================
 
@@ -4202,8 +5843,30 @@ LOW      (低危): {severity_count['LOW']} 个 ({severity_count['LOW'] / nvd_tot
         self.log("日志已清空")
 
 
+class _StderrFilter:
+    """过滤 libpng 等底层 C 库写入 stderr 的无害警告。"""
+    _SUPPRESS = ('libpng warning: iCCP',)
+
+    def __init__(self, real_stderr):
+        self._real = real_stderr
+
+    def write(self, msg):
+        if not any(pat in msg for pat in self._SUPPRESS):
+            self._real.write(msg)
+        return len(msg)
+
+    def flush(self):
+        self._real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def main():
     """主函数"""
+    # 过滤 Tk 初始化时 libpng 输出的 iCCP 警告（无害，来自 Tk 主题 PNG 资源）
+    sys.stderr = _StderrFilter(sys.stderr)
+
     # 设置 Windows DPI 感知
     try:
         from ctypes import windll

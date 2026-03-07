@@ -2,12 +2,10 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-4.0.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-4.1.0-orange.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-active-brightgreen.svg)](#)
 
 A professional **CVE vulnerability monitoring and management system** with **AI-powered analysis** capabilities. Integrates NVD CVE data with Dell security advisories for comprehensive vulnerability assessment and threat analysis.
-
-**新功能 🎉**: AI解决方案分析 - 使用Qwen-Max模型自动生成漏洞分析和修复方案！
 
 ---
 
@@ -15,10 +13,9 @@ A professional **CVE vulnerability monitoring and management system** with **AI-
 
 - [Features](#-features)
 - [Quick Start](#-quick-start)
-- [Installation](#-installation)
 - [Configuration](#-configuration)
 - [Usage Guide](#-usage-guide)
-- [AI Features](#-ai-features) ⭐ NEW
+- [AI Features](#-ai-features)
 - [System Architecture](#-system-architecture)
 - [Performance](#-performance)
 - [FAQ](#-faq)
@@ -35,54 +32,54 @@ A professional **CVE vulnerability monitoring and management system** with **AI-
 - ✅ Real-time NVD CVE database integration
 - ✅ Customizable time ranges (1 week to 1 year)
 - ✅ 10x faster with NVD API Key
-- ✅ SQLite + Redis dual-storage support
+- ✅ SQLite + Redis (WSL) dual-storage support
 - ✅ Async processing for large datasets
 
 #### Dell Security Advisory Integration
 - ✅ Automated Dell advisory scraping
+- ✅ Single URL fetch with Exa API (+ HTTP fallback)
 - ✅ Intelligent CVE ID extraction
 - ✅ Affected product identification
-- ✅ Solution recommendation
-- ✅ Multiple time range filters
+- ✅ CSV batch import
 
 #### CVE-Dell Correlation Analysis
 - ✅ Automatic vulnerability-advisory matching
 - ✅ Real-time correlation statistics
 - ✅ Risk assessment and prioritization
-- ✅ Comprehensive matching reports
 
-#### 🤖 AI-Powered Analysis (NEW!)
-- ✅ Qwen-Max model integration
+#### 🤖 AI-Powered Analysis
+- ✅ Qwen-Max / Claude model integration
 - ✅ Automated vulnerability analysis
 - ✅ Intelligent remediation suggestions
-- ✅ Threat impact assessment
-- ✅ Solution history tracking
 - ✅ Analysis result export (TXT/CSV)
 
+#### 🧠 Feynman Learning Module
+- ✅ AI-assisted security concept learning
+- ✅ Interactive teach-back method
+
 ### 📊 Data Visualization & Management
-- ✅ Modern GUI with Tkinter
-- ✅ Advanced search and filtering
+- ✅ Modern GUI with 8 tabs (Tkinter)
+- ✅ Full-database search (memory + SQLite fallback)
+- ✅ Multi-select delete with confirmation
 - ✅ JSON/CSV export support
-- ✅ Real-time statistics
-- ✅ Multi-tab interface with 6 different views
+- ✅ Real-time statistics dashboard
 
 ### ⚡ Performance Features
-- ✅ Optional Redis caching layer
-- ✅ Local SQLite database
+- ✅ Optional WSL Redis caching layer
+- ✅ Local SQLite database (lightweight, no Docker)
 - ✅ Asynchronous data loading
 - ✅ Optimized batch queries
-- ✅ Efficient memory management
+- ✅ Background threading for UI responsiveness
 
 ---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.8 or higher
-- Windows/Linux/Mac
-- 5-10MB disk space (data downloads on demand)
+- Python 3.8+
+- Windows 10/11 (with WSL for optional Redis)
 
-### Installation (3 Steps)
+### Installation
 
 ```bash
 # 1. Clone the repository
@@ -99,14 +96,9 @@ cp .env.example .env
 
 ### Run the Application
 
-**Windows:**
+**Recommended (with WSL Redis):**
 ```batch
-start_cve_gui.bat
-```
-
-**Linux/Mac:**
-```bash
-bash start_cve_gui.sh
+start_cve_with_wsl_redis.bat
 ```
 
 **Or directly:**
@@ -114,120 +106,75 @@ bash start_cve_gui.sh
 python cve_integrated_gui.py
 ```
 
+> The application works fully with SQLite alone. Redis is optional for performance.
+
 ---
 
 ## ⚙️ Configuration
 
-### Environment Variables
-
-Create a `.env` file with the following settings:
+### Environment Variables (`.env`)
 
 ```ini
-# ==================== NVD API ====================
-# Get your key from: https://nvd.nist.gov/developers/request-an-api-key
+# NVD API (recommended, 10x faster collection)
+# Apply: https://nvd.nist.gov/developers/request-an-api-key
 NVD_API_KEY=your_api_key_here
 
-# ==================== Qwen AI (for analysis) ====================
-# Get your key from: https://dashscope.console.aliyun.com/
-DASHSCOPE_API_KEY=sk-your-api-key-here
-QWEN_MODEL=qwen3-max-2026-01-23
-QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# Exa API (for Dell single-URL fetch)
+EXA_API_KEY=your_exa_api_key_here
 
-# ==================== Redis (Optional, for performance) ====================
+# Qwen AI (for vulnerability analysis)
+# Apply: https://dashscope.console.aliyun.com/
+DASHSCOPE_API_KEY=sk-your-api-key-here
+QWEN_MODEL=qwen3-coder-plus
+
+# Redis (optional, WSL)
 USE_REDIS=true
 REDIS_HOST=localhost
 REDIS_PORT=6379
-REDIS_PASSWORD=
 
-# ==================== Data Collection ====================
-COLLECT_INTERVAL=60           # Minutes between auto-collection
-COLLECT_DAYS_RANGE=7          # Default collection range (days)
-AUTO_COLLECT_ENABLED=false    # Enable auto-collection
+# Architecture
+ARCHITECTURE=lightweight
+USE_DOCKER=false
+SQLITE_DB_PATH=cve_data/cve_database.db
 ```
-
-### Quick Configuration for AI Features
-
-```bash
-# 1. Set Qwen API Key
-setx DASHSCOPE_API_KEY sk-your-api-key-here
-
-# 2. Verify configuration
-echo %DASHSCOPE_API_KEY%
-
-# 3. Restart the application
-```
-
-See [QUICK_QWEN_CONFIG_GUIDE.md](QUICK_QWEN_CONFIG_GUIDE.md) for detailed setup.
 
 ---
 
 ## 📖 Usage Guide
 
-### Basic Workflow
-
-```
-1. Launch Application
-   ↓
-2. Load CVE Data (NVD database)
-   ↓
-3. Load Dell Security Advisories
-   ↓
-4. Correlate CVE-Dell Relationships
-   ↓
-5. Analyze with AI (NEW!)
-   ↓
-6. View Results & Export
-```
-
-### GUI Tabs Explained
+### GUI Tabs
 
 | Tab | Purpose |
 |-----|---------|
-| 📊 NVD CVE Data | Import and browse CVE vulnerabilities |
-| 🏢 Dell Advisory | Import Dell security advisories |
-| 🔗 CVE-Dell Correlation | View matching results |
-| 💡 Solutions | AI analysis results (NEW!) |
-| 📈 Statistics | Data overview and trends |
+| 📰 IT News | RSS tech news reader |
+| 📊 NVD CVE Data | Import, browse, search, delete CVE vulnerabilities |
+| 🏢 Dell Advisory | Import, URL-fetch, browse, search, delete Dell advisories |
+| 🔗 CVE-Dell Correlation | View auto-matched CVE ↔ Dell results |
+| 💡 Solutions | AI-generated vulnerability analysis |
+| 📈 Statistics | Data overview, severity distribution |
+| 🧠 Smart Learning | Feynman learning assistant |
 | 📝 Logs | Real-time operation logs |
 
-### AI Analysis Workflow
+### Key Workflows
 
-```
-1. Go to "CVE-Dell Correlation" tab
-   ↓
-2. Click "Refresh Correlation Data" to load matches
-   ↓
-3. Select a CVE-Dell pair
-   ↓
-4. Click "AI Solution" button
-   ↓
-5. View analysis in "Solutions" tab
-   ↓
-6. Export or save for reference
-```
+1. **Collect Data** → NVD / Dell tabs → Click collect button
+2. **Search** → Type in search box → Searches memory then full database
+3. **Delete Records** → Ctrl/Shift multi-select → Click delete button
+4. **Single URL Fetch** → Dell tab → Paste advisory URL → Click fetch
+5. **AI Analysis** → Correlation tab → Select pair → Click AI Solution
 
 ---
 
 ## 🤖 AI Features
 
-### What's New in v4.0
-
-#### AI-Powered Vulnerability Analysis
-Automatically analyze CVE vulnerabilities with Qwen-Max AI model:
+### Vulnerability Analysis
+Automatically analyze CVE vulnerabilities with Qwen-Max AI:
 
 - **Vulnerability Details**: Attack vectors, impact scope, severity
 - **Dell Products Impact**: Affected systems and versions
 - **Remediation Plans**: Patch availability, upgrade paths
-- **Temporary Mitigations**: Quick workarounds if patches unavailable
-- **Detection Methods**: Monitoring and alerting recommendations
-- **Reference Resources**: Links to NVD, CVE details, Dell advisories
-
-#### Key Benefits
-✅ Save time on manual analysis
-✅ AI-powered threat assessment
-✅ Consistent analysis quality
-✅ Historical tracking of analyses
-✅ Easy export and sharing
+- **Temporary Mitigations**: Quick workarounds
+- **Detection Methods**: Monitoring recommendations
 
 See [AI_SOLUTION_USAGE_GUIDE.md](AI_SOLUTION_USAGE_GUIDE.md) for complete guide.
 
@@ -237,26 +184,27 @@ See [AI_SOLUTION_USAGE_GUIDE.md](AI_SOLUTION_USAGE_GUIDE.md) for complete guide.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    CVE Security Solution                     │
+│                    CVE Security Solution v4.1                 │
 ├─────────────────────────────────────────────────────────────┤
 │                                                               │
-│  ┌─────────────┐    ┌──────────────┐    ┌──────────────┐   │
-│  │   NVD API   │    │ Dell Website │    │  Qwen AI     │   │
-│  └──────┬──────┘    └──────┬───────┘    └──────┬───────┘   │
-│         │                  │                    │             │
-│         └──────────────────┼────────────────────┘             │
-│                            │                                  │
-│                    ┌───────▼─────────┐                       │
-│                    │  Application    │                       │
-│                    │  (Main Program) │                       │
-│                    └───────┬─────────┘                       │
-│                            │                                  │
-│              ┌─────────────┼─────────────┐                   │
-│              │             │             │                   │
-│         ┌────▼────┐  ┌─────▼────┐  ┌───▼──────┐            │
-│         │ SQLite  │  │   Redis  │  │ Tkinter  │            │
-│         │Database │  │  Cache   │  │   GUI    │            │
-│         └─────────┘  └──────────┘  └──────────┘            │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐        │
+│  │   NVD API   │  │ Dell Website │  │   Exa API    │        │
+│  └──────┬──────┘  └──────┬───────┘  └──────┬───────┘        │
+│         │                │                  │                 │
+│         └────────────────┼──────────────────┘                 │
+│                          │                                    │
+│                  ┌───────▼─────────┐     ┌──────────────┐    │
+│                  │  Application    │────▶│  Qwen AI /   │    │
+│                  │  (Main Program) │◀────│  Claude API  │    │
+│                  └───────┬─────────┘     └──────────────┘    │
+│                          │                                    │
+│            ┌─────────────┼─────────────┐                     │
+│            │             │             │                     │
+│       ┌────▼────┐  ┌─────▼────┐  ┌───▼──────┐              │
+│       │ SQLite  │  │   Redis  │  │ Tkinter  │              │
+│       │Database │  │  (WSL)   │  │   GUI    │              │
+│       │ (Main)  │  │ (Cache)  │  │ (8 Tabs) │              │
+│       └─────────┘  └──────────┘  └──────────┘              │
 │                                                               │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -265,121 +213,55 @@ See [AI_SOLUTION_USAGE_GUIDE.md](AI_SOLUTION_USAGE_GUIDE.md) for complete guide.
 
 | Layer | Technology |
 |-------|-----------|
-| **UI** | Tkinter (Modern Python GUI) |
-| **Data Collection** | aiohttp, asyncio (Async HTTP) |
-| **Storage** | SQLite3, Redis (Optional) |
-| **AI** | Qwen-Max API (OpenAI-compatible) |
-| **Web Scraping** | Feedparser, requests |
+| **UI** | Tkinter (8-tab interface) |
+| **Data Collection** | aiohttp, asyncio, Exa API |
+| **Storage** | SQLite3 (primary), Redis/WSL (optional cache) |
+| **AI** | Qwen-Max / Claude API |
+| **Web Scraping** | Feedparser, requests, BeautifulSoup |
 
 ---
 
 ## ⚡ Performance
 
-### Benchmarks
-
 | Operation | Time | Notes |
 |-----------|------|-------|
 | Load 100 CVEs | < 1s | Cached |
-| Correlate 1000+ matches | < 2s | Optimized queries |
+| Full-database search | < 2s | SQLite indexed |
 | AI Analysis | 30-60s | Per vulnerability |
-| GUI Startup | < 2s | With Redis enabled |
-
-### Optimization Features
-
-- 🔄 **Async Processing**: Non-blocking data collection
-- 💾 **Smart Caching**: Redis integration (optional)
-- 📦 **Batch Queries**: Efficient database access
-- 🔍 **Indexed Search**: Fast lookups
-- 🧵 **Threading**: Background operations
+| GUI Startup | < 2s | With Redis |
 
 ---
 
 ## ❓ FAQ
 
-### General Questions
+**Q: Do I need Docker?**
+A: **No.** The project uses SQLite by default. Docker has been removed entirely.
 
-**Q: How do I get started?**
-A: See [Quick Start](#-quick-start) section above. Takes < 5 minutes!
+**Q: Do I need Redis?**
+A: Optional. SQLite works standalone. WSL Redis improves cache performance.
 
 **Q: Do I need an API key?**
 A: Optional but recommended:
 - **NVD API Key**: 10x faster collection
-- **Qwen API Key**: Required for AI analysis (NEW!)
+- **Qwen API Key**: Required for AI analysis
+- **Exa API Key**: For Dell single-URL fetch
 
-**Q: Can I run without Redis?**
-A: Yes! SQLite works standalone. Redis is optional for performance.
-
-### AI Analysis FAQs
-
-**Q: How do I use AI analysis?**
-A: See [AI Features](#-ai-features) section or read [AI_SOLUTION_USAGE_GUIDE.md](AI_SOLUTION_USAGE_GUIDE.md)
-
-**Q: What model is used?**
-A: Qwen-Max (Alibaba's advanced LLM). See [QUICK_QWEN_CONFIG_GUIDE.md](QUICK_QWEN_CONFIG_GUIDE.md)
-
-**Q: How accurate is the analysis?**
-A: AI analysis is comprehensive but should be validated by security teams.
-
-### Troubleshooting
-
-**Q: API key not recognized?**
+**Q: How to start Redis?**
 A:
 ```bash
-# Verify environment variable
-echo %DASHSCOPE_API_KEY%  # Windows
-echo $DASHSCOPE_API_KEY   # Linux/Mac
-
-# If empty, restart the application after setting
+wsl sudo service redis-server start
 ```
-
-**Q: Data collection slow?**
-A:
-- Add NVD API Key for 10x speed improvement
-- Use smaller time ranges (e.g., 1 week instead of 1 year)
-- Enable Redis caching
-
-**Q: AI analysis fails?**
-A: Check [QWEN_API_CONFIG_FIX_REPORT.md](QWEN_API_CONFIG_FIX_REPORT.md) for debugging
 
 ---
 
 ## 📚 Documentation
 
-### Essential Guides
 - 📖 [QUICKSTART.md](QUICKSTART.md) - 3-minute setup guide
+- 🚀 [START_CVE_NOW.md](START_CVE_NOW.md) - Launch instructions
 - 🤖 [AI_SOLUTION_USAGE_GUIDE.md](AI_SOLUTION_USAGE_GUIDE.md) - AI analysis tutorial
 - ⚙️ [QUICK_QWEN_CONFIG_GUIDE.md](QUICK_QWEN_CONFIG_GUIDE.md) - Qwen API setup
-- 🔴 [Redis Mode Guide](docs/REDIS_GUIDE.md) - High-performance setup
-
-### Technical Documents
-- 📋 [CHANGELOG.md](CHANGELOG.md) - Version history
-- 🔧 [docs/](docs/) - Detailed documentation
-- ✅ [AI_SOLUTION_IMPLEMENTATION_REPORT.md](AI_SOLUTION_IMPLEMENTATION_REPORT.md) - Implementation details
-
-### Recent Fixes
-- 🐛 [DELL_DATABASE_QUERY_FIX_REPORT.md](DELL_DATABASE_QUERY_FIX_REPORT.md) - Database fixes
-- 🔑 [QWEN_API_CONFIG_FIX_REPORT.md](QWEN_API_CONFIG_FIX_REPORT.md) - API configuration
-- 🎨 [AI_RESULT_DISPLAY_FIX_REPORT.md](AI_RESULT_DISPLAY_FIX_REPORT.md) - Display improvements
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! Areas to help:
-
-- 🐛 Bug fixes and improvements
-- 📝 Documentation enhancements
-- 🎨 UI/UX improvements
-- 🚀 Performance optimizations
-- 🤖 Additional AI features
-
-### How to Contribute
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+- 🔴 [Redis Guide](docs/REDIS_GUIDE.md) - WSL Redis setup
+- 📋 [docs/](docs/) - Detailed documentation
 
 ---
 
@@ -394,38 +276,22 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 - **NVD (National Vulnerability Database)**: CVE data source
 - **Dell Security**: Advisory data source
 - **Alibaba Qwen**: AI analysis capabilities
-- **Python Community**: Open-source libraries
-
----
-
-## 📮 Support
-
-### Need Help?
-
-- 📖 Check [Documentation](#-documentation)
-- 💬 Read [FAQ](#-faq)
-- 🐛 Report issues on GitHub
-- 📧 Contact: [Your Email]
-
-### Quick Links
-
-- 🌐 [NVD Database](https://nvd.nist.gov/)
-- 🔑 [NVD API Keys](https://nvd.nist.gov/developers/request-an-api-key)
-- 🤖 [Qwen Platform](https://dashscope.console.aliyun.com/)
-- 📚 [Python Docs](https://docs.python.org/)
+- **Exa AI**: Web content extraction
 
 ---
 
 ## 🎯 Project Status
 
-- ✅ v4.0.0 Released (2026-02-04)
-- ✅ AI Analysis Integrated
-- ✅ Database Fixes Applied
+- ✅ v4.1.0 Released (2026-03-06)
+- ✅ Docker removed - Lightweight SQLite architecture
+- ✅ Multi-select delete for NVD/Dell tabs
+- ✅ Full-database search (memory + SQLite fallback)
+- ✅ Dell single-URL fetch (Exa API)
+- ✅ AI Analysis & Feynman Learning
 - ✅ Production Ready
-- 🚀 Future: Multi-language support, mobile app
 
 ---
 
 **Made with ❤️ for cybersecurity professionals**
 
-Last Updated: 2026-02-04 | Version: 4.0.0
+Last Updated: 2026-03-06 | Version: 4.1.0
