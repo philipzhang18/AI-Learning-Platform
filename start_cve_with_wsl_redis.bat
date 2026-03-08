@@ -33,6 +33,8 @@ if errorlevel 1 (
 echo Redis 已启动
 echo.
 
+set USE_REDIS=true
+
 echo ========================================
 echo 正在启动 CVE GUI 程序...
 echo ========================================

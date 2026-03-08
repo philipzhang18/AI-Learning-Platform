@@ -58,7 +58,6 @@ class CVEIntegratedGUI:
         self.data_queue = queue.Queue()
         self.log_queue = queue.Queue()
         self.dell_queue = queue.Queue()
-        self.sqlite_backup_queue = queue.Queue()  # SQLite 异步备份队列
         self.matched_tree_queue = queue.Queue()  # 关联树视图队列
 
         # ✅ 修复 #2: 添加数据库访问锁（线程安全）
@@ -164,7 +163,7 @@ class CVEIntegratedGUI:
             'PRAGMA cache_size=20000',           # 增加缓存大小（~80MB）for better performance
             'PRAGMA synchronous=NORMAL',         # 平衡性能和安全
             'PRAGMA temp_store=MEMORY',          # 临时数据存储在内存
-            'PRAGMA mmap_size=30000000000',      # 内存映射 I/O（30GB）
+            'PRAGMA mmap_size=268435456',         # 内存映射 I/O（256MB，匹配实际数据库规模）
             'PRAGMA page_size=4096',             # 页大小 4KB
             'PRAGMA auto_vacuum=INCREMENTAL',    # 增量自动清理
             'PRAGMA foreign_keys=ON',            # 启用外键约束
@@ -289,6 +288,10 @@ class CVEIntegratedGUI:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_sessions_topic ON learn_sessions(topic)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_sessions_created ON learn_sessions(created_at)")
 
+            # Index for collection_history
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_history_date ON collection_history(collected_date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_history_cve ON collection_history(cve_id)")
+
             self.conn.commit()
         except sqlite3.Error as e:
             self.log(f"创建数据库表失败: {str(e)}")
@@ -364,83 +367,107 @@ class CVEIntegratedGUI:
             return set()
 
     def start_sqlite_backup_thread(self):
-        """启动 SQLite 异步备份线程"""
-        def backup_worker():
-            """SQLite 备份工作线程"""
-            while True:
-                try:
-                    # 从队列获取备份任务（阻塞等待）
-                    data_type, data = self.sqlite_backup_queue.get(timeout=1)
-
-                    if data_type == 'cve':
-                        self._store_cve_to_sqlite(data)
-                    elif data_type == 'dell':
-                        self._store_dell_to_sqlite(data)
-
-                    # 标记任务完成
-                    self.sqlite_backup_queue.task_done()
-
-                except queue.Empty:
-                    # 队列为空，继续等待
-                    continue
-                except Exception as e:
-                    # 记录错误但不停止线程
-                    print(f"SQLite 备份线程错误: {e}")
-                    continue
-
-        # 创建守护线程（应用退出时自动结束）
-        backup_thread = threading.Thread(target=backup_worker, daemon=True)
-        backup_thread.start()
-        self.log("SQLite 异步备份线程已启动")
-
-    def store_cve_data(self, cve_data):
-        """存储单个CVE数据到数据库（Redis主存储，SQLite异步备份）"""
-        # 生产环境：只使用 Redis，SQLite 异步备份
-        if self.use_redis:
-            try:
-                is_new = self.redis_manager.store_cve(cve_data)
-
-                # ✅ 异步备份到 SQLite
-                self.sqlite_backup_queue.put(('cve', cve_data))
-
-                return is_new
-            except Exception as e:
-                self.log(f"存储到 Redis 失败: {e}, 回退到 SQLite")
-                # Redis 失败时直接写 SQLite
-                return self._store_cve_to_sqlite(cve_data)
-
-        # SQLite 存储（回退方案）
-        return self._store_cve_to_sqlite(cve_data)
-
-    def bulk_store_cve_data(self, cve_list):
-        """批量存储CVE数据到数据库（优化大量数据插入性能）"""
-        if not cve_list:
+        """启动 Redis 缓存同步线程（启动时将 SQLite 增量同步到 Redis）"""
+        if not self.use_redis:
             return
 
+        def sync_worker():
+            """将 SQLite 数据同步到 Redis（全量覆盖，SQLite 为权威源）"""
+            try:
+                # 同步 CVE 数据（增量补缺）
+                redis_cve_ids = self.redis_manager.redis_client.smembers(self.redis_manager.CVE_SET)
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT cve_id, data FROM cves")
+                    rows = cursor.fetchall()
+
+                missing_cves = []
+                for cve_id, data_str in rows:
+                    if cve_id not in redis_cve_ids:
+                        try:
+                            missing_cves.append(json.loads(data_str))
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+
+                if missing_cves:
+                    synced = 0
+                    for cve_data in missing_cves:
+                        try:
+                            self.redis_manager.store_cve(cve_data)
+                            synced += 1
+                        except Exception:
+                            continue
+                    self.log_queue.put(f"✓ Redis 同步: 补齐 {synced} 条 CVE")
+
+                # 同步 Dell 数据（全量覆盖：以 SQLite 为准更新 Redis）
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT dsa_id, data FROM dell_advisories")
+                    dell_rows = cursor.fetchall()
+
+                synced_dell = 0
+                for dsa_id, data_str in dell_rows:
+                    try:
+                        dell_data = json.loads(data_str)
+                        self.redis_manager.store_dell_advisory(dell_data)
+                        synced_dell += 1
+                    except Exception:
+                        continue
+
+                # 清理 Redis 中 SQLite 已删除的条目
+                sqlite_dell_ids = {row[0] for row in dell_rows}
+                redis_dell_ids = self.redis_manager.redis_client.smembers(self.redis_manager.DELL_SET)
+                orphan_ids = redis_dell_ids - sqlite_dell_ids
+                for orphan_id in orphan_ids:
+                    self.redis_manager.delete_dell_advisory(orphan_id)
+
+                if orphan_ids:
+                    self.log_queue.put(f"✓ Redis 同步: Dell 覆盖 {synced_dell} 条, 清理孤立 {len(orphan_ids)} 条")
+                elif not missing_cves:
+                    self.log_queue.put("✓ Redis 缓存与 SQLite 数据一致")
+                else:
+                    self.log_queue.put(f"✓ Redis 同步: Dell {synced_dell} 条已同步")
+
+            except Exception as e:
+                self.log_queue.put(f"Redis 增量同步出错: {e}")
+
+        sync_thread = threading.Thread(target=sync_worker, daemon=True)
+        sync_thread.start()
+
+    def store_cve_data(self, cve_data):
+        """存储单个CVE数据（SQLite主存储，Redis缓存同步）"""
+        # SQLite 先写（保证持久化）
+        is_new = self._store_cve_to_sqlite(cve_data)
+
+        # Redis 后写（缓存更新，失败不影响主流程）
         if self.use_redis:
             try:
-                # Bulk store to Redis if supported
-                new_count = 0
+                self.redis_manager.store_cve(cve_data)
+            except Exception:
+                pass
+
+        return is_new
+
+    def bulk_store_cve_data(self, cve_list):
+        """批量存储CVE数据（SQLite批量写入，Redis缓存同步）"""
+        if not cve_list:
+            return 0
+
+        # SQLite 批量写入（主存储）
+        new_count = self._bulk_store_cve_to_sqlite(cve_list)
+
+        # Redis 缓存更新（best-effort）
+        if self.use_redis:
+            try:
                 for cve_data in cve_list:
-                    is_new = self.redis_manager.store_cve(cve_data)
-                    if is_new:
-                        new_count += 1
+                    self.redis_manager.store_cve(cve_data)
+            except Exception:
+                pass
 
-                # Add all to SQLite backup queue
-                for cve_data in cve_list:
-                    self.sqlite_backup_queue.put(('cve', cve_data))
-
-                return new_count
-            except Exception as e:
-                self.log(f"批量存储到 Redis 失败: {e}, 回退到 SQLite")
-                # Fall back to SQLite bulk insert
-                return self._bulk_store_cve_to_sqlite(cve_list)
-
-        # SQLite bulk storage (fallback)
-        return self._bulk_store_cve_to_sqlite(cve_list)
+        return new_count
 
     def _bulk_store_cve_to_sqlite(self, cve_list):
-        """批量存储CVE数据到SQLite（事务处理，提高性能）"""
+        """批量存储CVE数据到SQLite（事务处理，使用executemany提高性能）"""
         with self.db_lock:
             try:
                 cursor = self.conn.cursor()
@@ -448,36 +475,38 @@ class CVEIntegratedGUI:
                 # Start transaction for better performance
                 cursor.execute("BEGIN TRANSACTION")
 
-                new_count = 0
+                # 预处理数据，准备批量插入
+                cve_rows = []
+                history_rows = []
+                now_iso = datetime.now().isoformat()
 
                 for cve_data in cve_list:
                     cve_id = cve_data.get('cve_id', '')
                     if not cve_id:
                         continue
-
                     data_str = json.dumps(cve_data) if cve_data else '{}'
-
-                    # Use INSERT OR REPLACE to handle both new and update cases efficiently
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO cves (cve_id, data, last_modified, published_date)
-                        VALUES (?, ?, ?, ?)
-                    ''', (
+                    cve_rows.append((
                         cve_id,
                         data_str,
                         cve_data.get('last_modified', '') or '',
                         cve_data.get('published_date', '') or ''
                     ))
+                    history_rows.append((cve_id, now_iso))
 
-                    # Insert into collection history
-                    cursor.execute('''
-                        INSERT INTO collection_history (cve_id, collected_date)
-                        VALUES (?, ?)
-                    ''', (cve_id, datetime.now().isoformat()))
+                # 批量插入 CVE 数据
+                cursor.executemany('''
+                    INSERT OR REPLACE INTO cves (cve_id, data, last_modified, published_date)
+                    VALUES (?, ?, ?, ?)
+                ''', cve_rows)
 
-                    new_count += 1
+                # 批量插入采集历史
+                cursor.executemany('''
+                    INSERT INTO collection_history (cve_id, collected_date)
+                    VALUES (?, ?)
+                ''', history_rows)
 
                 self.conn.commit()
-                return new_count
+                return len(cve_rows)
             except sqlite3.Error as e:
                 self.log(f"批量存储CVE数据失败: {str(e)}")
                 try:
@@ -491,7 +520,6 @@ class CVEIntegratedGUI:
 
     def _store_cve_to_sqlite(self, cve_data):
         """存储 CVE 数据到 SQLite（内部方法，线程安全）"""
-        # ✅ 修复 #2: 使用锁保护数据库操作
         with self.db_lock:
             try:
                 cursor = self.conn.cursor()
@@ -500,36 +528,22 @@ class CVEIntegratedGUI:
                 if not cve_id:
                     return False
 
-                # Ensure the data field is not None
                 data_str = json.dumps(cve_data) if cve_data else '{}'
 
-                # 检查是否已存在
+                # 检查是否已存在（用于返回值判断）
                 cursor.execute("SELECT 1 FROM cves WHERE cve_id = ?", (cve_id,))
                 is_new = cursor.fetchone() is None
 
-                if not is_new:
-                    # 更新现有记录
-                    cursor.execute('''
-                        UPDATE cves
-                        SET data = ?, last_modified = ?, published_date = ?
-                        WHERE cve_id = ?
-                    ''', (
-                        data_str,
-                        cve_data.get('last_modified', '') or '',
-                        cve_data.get('published_date', '') or '',
-                        cve_id
-                    ))
-                else:
-                    # 插入新记录
-                    cursor.execute('''
-                        INSERT INTO cves (cve_id, data, last_modified, published_date)
-                        VALUES (?, ?, ?, ?)
-                    ''', (
-                        cve_id,
-                        data_str,
-                        cve_data.get('last_modified', '') or '',
-                        cve_data.get('published_date', '') or ''
-                    ))
+                # INSERT OR REPLACE 一步完成插入/更新
+                cursor.execute('''
+                    INSERT OR REPLACE INTO cves (cve_id, data, last_modified, published_date)
+                    VALUES (?, ?, ?, ?)
+                ''', (
+                    cve_id,
+                    data_str,
+                    cve_data.get('last_modified', '') or '',
+                    cve_data.get('published_date', '') or ''
+                ))
 
                 # 添加到采集历史
                 cursor.execute('''
@@ -661,7 +675,7 @@ class CVEIntegratedGUI:
         try:
             cursor = self.conn.cursor()
             # 按发布日期倒序，只取最近的 limit 条
-            cursor.execute(f"SELECT cve_id, data, last_modified, published_date FROM cves ORDER BY published_date DESC LIMIT {limit}")
+            cursor.execute("SELECT cve_id, data, last_modified, published_date FROM cves ORDER BY published_date DESC LIMIT ?", (int(limit),))
 
             records = cursor.fetchall()
             cve_data = []
@@ -734,51 +748,43 @@ class CVEIntegratedGUI:
             return set()
 
     def store_dell_advisory(self, advisory_data):
-        """存储单个Dell安全公告到数据库（Redis主存储，SQLite异步备份）"""
-        # 生产环境：只使用 Redis，SQLite 异步备份
+        """存储单个Dell安全公告（SQLite主存储，Redis缓存同步）"""
+        # SQLite 先写（保证持久化）
+        is_new = self._store_dell_to_sqlite(advisory_data)
+
+        # Redis 后写（缓存更新，失败不影响主流程）
         if self.use_redis:
             try:
-                is_new = self.redis_manager.store_dell_advisory(advisory_data)
+                self.redis_manager.store_dell_advisory(advisory_data)
+            except Exception:
+                pass
 
-                # ✅ 异步备份到 SQLite
-                self.sqlite_backup_queue.put(('dell', advisory_data))
-
-                return is_new  # 返回是否是新数据
-            except Exception as e:
-                self.log(f"存储 Dell 数据到 Redis 失败: {e}, 回退到 SQLite")
-                # Redis 失败时直接写 SQLite
-                return self._store_dell_to_sqlite(advisory_data)
-
-        # SQLite 存储（回退方案）
-        return self._store_dell_to_sqlite(advisory_data)
+        return is_new
 
     def _store_dell_to_sqlite(self, advisory_data):
-        """存储 Dell 数据到 SQLite（内部方法，线程安全）"""
-        # ✅ 修复 #2: 使用锁保护数据库操作
+        """存储 Dell 数据到 SQLite（Upsert：有则更新，无则插入）"""
         with self.db_lock:
             try:
                 cursor = self.conn.cursor()
 
                 dsa_id = advisory_data.get('dell_security_advisory', '')
                 if not dsa_id:
-                    return False  # 返回False表示未存储
-
-                # 检查是否已存在
-                cursor.execute("SELECT 1 FROM dell_advisories WHERE dsa_id = ?", (dsa_id,))
-                is_new = cursor.fetchone() is None
-
-                if not is_new:
-                    # 已存在，跳过
                     return False
 
-                # 不存在，插入新记录
                 cve_ids_str = ','.join(advisory_data.get('cve_ids', []))
                 data_str = json.dumps(advisory_data, ensure_ascii=False)
 
+                # Upsert：新记录插入，已有记录用更完整的 data 覆盖
                 cursor.execute('''
                     INSERT INTO dell_advisories
                     (dsa_id, title, cve_ids, data, published_date, collected_date, link)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(dsa_id) DO UPDATE SET
+                        data = excluded.data,
+                        title = excluded.title,
+                        cve_ids = excluded.cve_ids,
+                        published_date = excluded.published_date,
+                        link = excluded.link
                 ''', (
                     dsa_id,
                     advisory_data.get('title', ''),
@@ -789,8 +795,9 @@ class CVEIntegratedGUI:
                     advisory_data.get('link', '')
                 ))
 
+                is_new = cursor.rowcount > 0
                 self.conn.commit()
-                return True  # 返回True表示新增了记录
+                return is_new
             except sqlite3.Error as e:
                 self.log(f"存储Dell数据失败: {str(e)}")
                 return False
@@ -1341,10 +1348,20 @@ class CVEIntegratedGUI:
         list_frame = tk.Frame(v_paned, bg="white")
         v_paned.add(list_frame, minsize=120)
 
+        list_header = tk.Frame(list_frame, bg="white")
+        list_header.pack(fill=tk.X, padx=8, pady=(6, 2))
+
         tk.Label(
-            list_frame, text="今日文章列表",
+            list_header, text="今日文章列表",
             bg="white", font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color,
-        ).pack(anchor="w", padx=8, pady=(6, 2))
+        ).pack(side=tk.LEFT)
+
+        self.news_ai_analyze_btn = tk.Button(
+            list_header, text="🤖 AI分析新闻", command=self._ai_analyze_selected_news,
+            bg="#8e44ad", fg="white", font=("Microsoft YaHei", 9, "bold"),
+            padx=10, pady=2, relief=tk.FLAT, cursor="hand2",
+        )
+        self.news_ai_analyze_btn.pack(side=tk.RIGHT, padx=4)
 
         list_inner = tk.Frame(list_frame, bg="white")
         list_inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
@@ -1620,11 +1637,21 @@ foreach ($tokenName in $targets.Keys) {
                 self.tts_voice_combo.current(0)
                 self._tts_voice_names = [v[1] for v in voices]
 
-            self.root.after(0, _update)
+            # 延迟调度，等主线程事件循环就绪；失败时存入属性供重试
+            self._pending_tts_voices = voices
+            for delay in (500, 1500, 3000):
+                try:
+                    self.root.after(delay, _update)
+                    break
+                except RuntimeError:
+                    continue
 
         except Exception as e:
-            self.root.after(0, self.log, f"加载 TTS 声音失败: {e}")
-            self.root.after(0, lambda: self.tts_voice_combo.config(values=["默认声音"]))
+            try:
+                self.root.after(1000, self.log, f"加载 TTS 声音失败: {e}")
+                self.root.after(1000, lambda: self.tts_voice_combo.config(values=["默认声音"]))
+            except RuntimeError:
+                pass
             self._tts_voice_names = [""]
 
     def _on_news_article_select(self, event):
@@ -1840,6 +1867,114 @@ foreach ($tokenName in $targets.Keys) {
         # 刷新日历高亮
         self._refresh_calendar_tags()
         messagebox.showinfo("保存成功", f"简报已保存至数据库和文件")
+
+    # ==================== AI 分析新闻 ====================
+
+    def _ai_analyze_selected_news(self):
+        """AI深度分析选中的新闻文章"""
+        sel = self.news_listbox.curselection()
+        if not sel:
+            messagebox.showwarning("提示", "请先在「今日文章列表」中选择一条新闻")
+            return
+        idx = sel[0]
+        if idx >= len(self.news_articles):
+            messagebox.showwarning("提示", "选择的文章索引无效，请重新选择")
+            return
+
+        art = self.news_articles[idx]
+        title = art.get('title', '未知标题')
+        self.news_ai_analyze_btn.config(state=tk.DISABLED, text="分析中...")
+        self.news_status_label.config(text=f"AI 正在分析: {title[:40]}...")
+        threading.Thread(
+            target=self._ai_analyze_news_thread,
+            args=(art,),
+            daemon=True
+        ).start()
+
+    def _ai_analyze_news_thread(self, article):
+        """后台线程：调用 AI 深度分析单条新闻"""
+        try:
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                self.root.after(0, messagebox.showerror, "配置错误",
+                                "未设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY，无法调用 AI")
+                return
+
+            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+            title = article.get('title', '未知标题')
+            source = article.get('source', '未知来源')
+            url = article.get('url', '')
+            summary = article.get('summary', '')
+            published = article.get('published', '')
+            today = datetime.now().strftime("%Y年%m月%d日")
+
+            prompt = f"""今天是 {today}。请对以下 IT 科技新闻进行深度分析：
+
+【标题】{title}
+【来源】{source}
+【发布时间】{published}
+【链接】{url}
+【摘要】{summary}
+
+请提供以下维度的专业分析：
+1. **新闻概述**：用 2-3 句话精炼概括新闻核心内容
+2. **技术解读**：分析涉及的关键技术、产品或服务
+3. **行业影响**：对相关行业/领域的影响和意义
+4. **企业分析**：对涉及企业的战略影响（如适用）
+5. **安全视角**：从信息安全角度分析潜在风险或启示（如适用）
+6. **趋势展望**：这条新闻反映的技术或行业发展趋势
+7. **关键要点**：3-5 个核心要点总结
+
+请用中文撰写，语言专业简洁，总字数约 600-800 字。"""
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一位资深 IT 科技分析师，擅长对科技新闻进行深度解读和行业分析。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.6,
+                max_tokens=2000,
+            )
+            analysis = response.choices[0].message.content.strip()
+
+            # 在简报区域显示分析结果，带标题头
+            header = (
+                f"{'=' * 60}\n"
+                f"🤖 AI 新闻深度分析\n"
+                f"{'=' * 60}\n"
+                f"📰 {title}\n"
+                f"📡 来源: {source}  |  时间: {published}\n"
+                f"🔗 {url}\n"
+                f"{'─' * 60}\n\n"
+            )
+            full_text = header + analysis
+
+            self.root.after(0, self._show_news_analysis, full_text, title)
+
+        except Exception as e:
+            self.root.after(0, self.log, f"AI分析新闻失败: {e}")
+            self.root.after(0, messagebox.showerror, "错误", f"AI分析失败：{e}")
+        finally:
+            self.root.after(0, self.news_ai_analyze_btn.config,
+                            {"state": tk.NORMAL, "text": "🤖 AI分析新闻"})
+
+    def _show_news_analysis(self, analysis_text, title):
+        """显示 AI 新闻分析结果到简报区域"""
+        self.news_brief_area.delete(1.0, tk.END)
+        self.news_brief_area.insert(tk.END, analysis_text)
+        self.news_brief_text = analysis_text
+        self.news_right_notebook.select(0)
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.news_status_label.config(text=f"AI分析完成 — {ts}")
+        self.news_brief_info.config(
+            text=f"AI分析: {title[:30]}... | {datetime.now().strftime('%Y-%m-%d %H:%M')} | {len(analysis_text)} 字"
+        )
+        self.log(f"AI新闻分析完成: {title[:40]}")
 
     def generate_podcast(self):
         """一键生成播客脚本（后台线程）"""
@@ -3039,31 +3174,33 @@ foreach ($tokenName in $targets.Keys) {
         )
         delete_selected_btn.pack(side=tk.RIGHT, padx=5)
 
-        # 历史记录展示区域
-        data_container = tk.Frame(self.solution_frame, bg="white")
-        data_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        # 使用 PanedWindow 分割上下区域，用户可拖动调整大小
+        paned = tk.PanedWindow(
+            self.solution_frame, orient=tk.VERTICAL,
+            bg="#cccccc", sashwidth=6, sashrelief=tk.RAISED
+        )
+        paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        # 创建 Treeview 来展示历史记录
+        # --- 上方：历史记录列表 ---
+        tree_wrapper = tk.Frame(paned, bg="white")
+
         columns = ("时间戳", "CVE ID", "Dell公告", "分析状态", "结果预览")
 
-        # 创建滚动条
-        tree_scroll_y = tk.Scrollbar(data_container, orient=tk.VERTICAL)
-        tree_scroll_x = tk.Scrollbar(data_container, orient=tk.HORIZONTAL)
+        tree_scroll_y = tk.Scrollbar(tree_wrapper, orient=tk.VERTICAL)
+        tree_scroll_x = tk.Scrollbar(tree_wrapper, orient=tk.HORIZONTAL)
 
         self.solution_tree = ttk.Treeview(
-            data_container,
+            tree_wrapper,
             columns=columns,
             show="headings",
             yscrollcommand=tree_scroll_y.set,
             xscrollcommand=tree_scroll_x.set,
-            height=10
+            height=6
         )
 
-        # 配置滚动条
         tree_scroll_y.config(command=self.solution_tree.yview)
         tree_scroll_x.config(command=self.solution_tree.xview)
 
-        # 设置列标题和宽度
         self.solution_tree.heading("时间戳", text="分析时间")
         self.solution_tree.heading("CVE ID", text="CVE 编号")
         self.solution_tree.heading("Dell公告", text="Dell 公告 ID")
@@ -3076,34 +3213,44 @@ foreach ($tokenName in $targets.Keys) {
         self.solution_tree.column("分析状态", width=100, minwidth=80)
         self.solution_tree.column("结果预览", width=400, minwidth=300)
 
-        # 布局
-        self.solution_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
-        tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self.solution_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 绑定双击事件
+        # 单击即可查看详情，双击也保留
+        self.solution_tree.bind("<<TreeviewSelect>>", self.on_solution_item_double_click)
         self.solution_tree.bind("<Double-1>", self.on_solution_item_double_click)
 
-        # 详细结果显示区域
-        detail_frame = tk.Frame(self.solution_frame, bg="white")
-        detail_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        paned.add(tree_wrapper, minsize=120)
+
+        # --- 下方：详细分析结果 ---
+        detail_frame = tk.Frame(paned, bg="white")
 
         tk.Label(
             detail_frame,
-            text="详细分析结果",
+            text="详细分析结果（选中上方记录自动显示）",
             bg="white",
             font=("Microsoft YaHei", 12, "bold")
-        ).pack(anchor="w", pady=(10, 5))
+        ).pack(anchor="w", pady=(8, 4))
 
         self.solution_detail_text = scrolledtext.ScrolledText(
             detail_frame,
             wrap=tk.WORD,
-            width=100,
-            height=8,
-            font=("Consolas", 9),
-            bg="#f8f9fa"
+            font=("Consolas", 11),
+            bg="#f8f9fa",
+            relief=tk.GROOVE,
+            bd=2
         )
         self.solution_detail_text.pack(fill=tk.BOTH, expand=True)
+
+        paned.add(detail_frame, minsize=200)
+
+        # 默认分割比例：列表占 30%，详情占 70%
+        self.solution_frame.update_idletasks()
+        try:
+            paned.sash_place(0, 0, 200)
+        except Exception:
+            pass
 
         # 初始化数据
         self.solution_history = []
@@ -3142,10 +3289,10 @@ foreach ($tokenName in $targets.Keys) {
             ("NVD CVE总数", "0", self.primary_color, "📊"),
             ("Dell公告数", "0", self.info_color, "🔔"),
             ("关联匹配数", "0", self.success_color, "🔗"),
-            ("严重", "0", "#c0392b", "🔴"),
-            ("高危", "0", "#e67e22", "🟠"),
-            ("中危", "0", "#f1c40f", "🟡"),
-            ("低危", "0", "#27ae60", "🟢"),
+            ("Dell 严重", "0", "#c0392b", "🔴"),
+            ("Dell 高危", "0", "#e67e22", "🟠"),
+            ("Dell 中危", "0", "#f1c40f", "🟡"),
+            ("Dell 低危", "0", "#27ae60", "🟢"),
         ]
 
         for i, (title, value, color, icon) in enumerate(cards_info):
@@ -3183,7 +3330,17 @@ foreach ($tokenName in $targets.Keys) {
         )
         self.chart_bar_frame.grid(row=0, column=2, padx=(4, 0), pady=5, sticky="nsew")
 
-        # ── 第三行：最新 CVE 前10 ──
+        # ── 第三行：数据库信息 ──
+        db_info_frame = tk.LabelFrame(
+            content, text="  数据库信息  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg="#8e44ad"
+        )
+        db_info_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        self.db_info_container = tk.Frame(db_info_frame, bg="white")
+        self.db_info_container.pack(fill=tk.X, padx=10, pady=8)
+
+        # ── 第四行：最新 CVE 前10 ──
         cve_list_frame = tk.LabelFrame(
             content, text="  最新 CVE 漏洞 (前10)  ", bg="white",
             font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
@@ -3211,7 +3368,7 @@ foreach ($tokenName in $targets.Keys) {
         self.stats_cve_tree.tag_configure("MEDIUM", foreground="#f39c12")
         self.stats_cve_tree.tag_configure("LOW", foreground="#27ae60")
 
-        # ── 第四行：最新 Dell 安全公告 前10 ──
+        # ── 第五行：最新 Dell 安全公告 前10 ──
         dell_list_frame = tk.LabelFrame(
             content, text="  最新 Dell 安全公告 (前10)  ", bg="white",
             font=("Microsoft YaHei", 10, "bold"), fg=self.info_color
@@ -3289,6 +3446,7 @@ foreach ($tokenName in $targets.Keys) {
                 ("High", cve_severity.get("HIGH", 0), "#e67e22"),
                 ("Medium", cve_severity.get("MEDIUM", 0), "#f1c40f"),
                 ("Low", cve_severity.get("LOW", 0), "#27ae60"),
+                ("N/A", cve_severity.get("N/A", 0), "#95a5a6"),
             ]
             for lbl, cnt, clr in cve_level_map:
                 if cnt > 0:
@@ -3331,6 +3489,7 @@ foreach ($tokenName in $targets.Keys) {
                 ("High", dell_severity.get("High", 0), "#e67e22"),
                 ("Medium", dell_severity.get("Medium", 0), "#f1c40f"),
                 ("Low", dell_severity.get("Low", 0), "#27ae60"),
+                ("N/A", dell_severity.get("N/A", 0), "#95a5a6"),
             ]
             for lbl, cnt, clr in dell_level_map:
                 if cnt > 0:
@@ -3363,32 +3522,19 @@ foreach ($tokenName in $targets.Keys) {
             canvas_dell.draw()
             canvas_dell.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-            # ── 柱状图：数据概览 + 分类数量 ──
+            # ── 柱状图：数据概览（仅 NVD/Dell/关联） ──
             fig_bar = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
             ax_bar = fig_bar.add_subplot(111)
 
-            # 合并 CVE 和 Dell 各等级数量
-            bar_labels = ['NVD\nCVE', 'Dell\n公告', '关联\n匹配',
-                          'Critical', 'High', 'Medium', 'Low']
-            cve_total_severity = sum(cve_severity.values())
-            dell_total_severity = sum(dell_severity.values())
-            bar_values = [
-                nvd_total, dell_total, matched_count,
-                cve_severity.get("CRITICAL", 0) + dell_severity.get("Critical", 0),
-                cve_severity.get("HIGH", 0) + dell_severity.get("High", 0),
-                cve_severity.get("MEDIUM", 0) + dell_severity.get("Medium", 0),
-                cve_severity.get("LOW", 0) + dell_severity.get("Low", 0),
-            ]
-            bar_colors = [
-                self.primary_color, self.info_color, self.success_color,
-                "#c0392b", "#e67e22", "#f1c40f", "#27ae60"
-            ]
+            bar_labels = ['NVD\nCVE', 'Dell\n公告', '关联\n匹配']
+            bar_values = [nvd_total, dell_total, matched_count]
+            bar_colors = [self.primary_color, self.info_color, self.success_color]
 
-            bars = ax_bar.bar(bar_labels, bar_values, color=bar_colors, width=0.6, edgecolor='white')
+            bars = ax_bar.bar(bar_labels, bar_values, color=bar_colors, width=0.5, edgecolor='white')
             for bar, val in zip(bars, bar_values):
                 if val > 0:
                     ax_bar.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
-                                str(val), ha='center', va='bottom', fontsize=10,
+                                str(val), ha='center', va='bottom', fontsize=11,
                                 fontweight='bold', fontfamily='Microsoft YaHei')
 
             ax_bar.set_ylabel('数量', fontsize=10, fontfamily='Microsoft YaHei')
@@ -3412,6 +3558,161 @@ foreach ($tokenName in $targets.Keys) {
         except Exception as e:
             tk.Label(self.chart_cve_pie_frame, text=f"图表渲染失败:\n{e}",
                      bg="white", fg="#c0392b", font=("Microsoft YaHei", 9)).pack(expand=True)
+
+    def _update_db_info(self):
+        """更新数据库信息面板（版本、表条目数、占用空间）"""
+        for w in self.db_info_container.winfo_children():
+            w.destroy()
+
+        info_font = ("Consolas", 10)
+        label_font = ("Microsoft YaHei", 9, "bold")
+        val_fg = "#2c3e50"
+
+        # ── 左列：数据库引擎版本 ──
+        left = tk.Frame(self.db_info_container, bg="white")
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+        tk.Label(left, text="数据库引擎", bg="white", fg="#8e44ad",
+                 font=label_font).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        # SQLite 版本
+        try:
+            sqlite_ver = self.conn.execute("SELECT sqlite_version()").fetchone()[0]
+        except:
+            sqlite_ver = "N/A"
+
+        # 数据库文件大小
+        try:
+            db_size_bytes = self.db_path.stat().st_size
+            if db_size_bytes >= 1048576:
+                db_size_str = f"{db_size_bytes / 1048576:.1f} MB"
+            else:
+                db_size_str = f"{db_size_bytes / 1024:.0f} KB"
+        except:
+            db_size_str = "N/A"
+
+        # WAL 文件大小
+        wal_size_str = ""
+        try:
+            wal_path = self.db_path.with_suffix('.db-wal')
+            if wal_path.exists():
+                wal_bytes = wal_path.stat().st_size
+                if wal_bytes >= 1048576:
+                    wal_size_str = f"  (WAL: {wal_bytes / 1048576:.1f} MB)"
+                else:
+                    wal_size_str = f"  (WAL: {wal_bytes / 1024:.0f} KB)"
+        except:
+            pass
+
+        engine_items = [
+            ("SQLite 版本:", sqlite_ver),
+            ("数据库大小:", f"{db_size_str}{wal_size_str}"),
+        ]
+
+        # Redis 信息
+        if self.use_redis:
+            try:
+                info = self.redis_manager.redis_client.info('server')
+                redis_ver = info.get('redis_version', 'N/A')
+                mem_info = self.redis_manager.redis_client.info('memory')
+                used = mem_info.get('used_memory_human', 'N/A')
+                redis_status = f"v{redis_ver}  ({used})"
+                redis_fg = "#27ae60"
+            except:
+                redis_status = "连接异常"
+                redis_fg = "#e74c3c"
+        else:
+            # 根据初始化消息判断状态
+            if "连接失败" in self.redis_init_message or "初始化失败" in self.redis_init_message:
+                redis_status = "连接失败 (回退 SQLite)"
+                redis_fg = "#e74c3c"
+            elif "禁用" in self.redis_init_message:
+                redis_status = "已禁用 (SQLite 独立模式)"
+                redis_fg = "#95a5a6"
+            else:
+                redis_status = "未连接"
+                redis_fg = "#95a5a6"
+        engine_items.append(("Redis 状态:", redis_status))
+
+        for i, (lbl, val) in enumerate(engine_items):
+            tk.Label(left, text=lbl, bg="white", fg="#666",
+                     font=("Microsoft YaHei", 9)).grid(row=i + 1, column=0, sticky="w", padx=(8, 4))
+            # Redis 状态行使用动态颜色
+            fg = redis_fg if lbl == "Redis 状态:" else val_fg
+            tk.Label(left, text=val, bg="white", fg=fg,
+                     font=info_font).grid(row=i + 1, column=1, sticky="w")
+
+        # ── 右列：各表数据条目数 ──
+        right = tk.Frame(self.db_info_container, bg="white")
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(right, text="数据库表统计", bg="white", fg="#8e44ad",
+                 font=label_font).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+        # 表头
+        for ci, h in enumerate(["表名", "条目数", "估算大小"]):
+            tk.Label(right, text=h, bg="#f0f0f0", fg="#333",
+                     font=("Microsoft YaHei", 9, "bold"), padx=8, pady=2,
+                     relief=tk.GROOVE).grid(row=1, column=ci, sticky="nsew")
+
+        tables = [
+            ("cves", "CVE 漏洞"),
+            ("dell_advisories", "Dell 安全公告"),
+            ("collection_history", "采集历史"),
+            ("ai_solutions", "AI 解决方案"),
+            ("news_briefs", "新闻简报"),
+            ("podcast_scripts", "播客脚本"),
+            ("learn_sessions", "学习对话"),
+        ]
+
+        total_rows = 0
+        for ri, (tbl, display_name) in enumerate(tables):
+            try:
+                cnt = self.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            except:
+                cnt = 0
+            total_rows += cnt
+
+            # 估算大小：使用 page_count * page_size 近似
+            try:
+                pages = self.conn.execute(
+                    f"SELECT COUNT(*) FROM dbstat WHERE name = ?", (tbl,)
+                ).fetchone()[0]
+                page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
+                tbl_bytes = pages * page_size
+                if tbl_bytes >= 1048576:
+                    size_str = f"{tbl_bytes / 1048576:.1f} MB"
+                elif tbl_bytes >= 1024:
+                    size_str = f"{tbl_bytes / 1024:.0f} KB"
+                else:
+                    size_str = f"{tbl_bytes} B"
+            except:
+                size_str = "-"
+
+            bg = "white" if ri % 2 == 0 else "#fafafa"
+            tk.Label(right, text=display_name, bg=bg, fg=val_fg,
+                     font=("Microsoft YaHei", 9), padx=8, pady=1,
+                     anchor="w").grid(row=ri + 2, column=0, sticky="nsew")
+            tk.Label(right, text=f"{cnt:,}", bg=bg, fg=val_fg,
+                     font=info_font, padx=8, pady=1,
+                     anchor="e").grid(row=ri + 2, column=1, sticky="nsew")
+            tk.Label(right, text=size_str, bg=bg, fg="#888",
+                     font=info_font, padx=8, pady=1,
+                     anchor="e").grid(row=ri + 2, column=2, sticky="nsew")
+
+        # 合计行
+        tk.Label(right, text="合计", bg="#e8e8e8", fg="#333",
+                 font=("Microsoft YaHei", 9, "bold"), padx=8, pady=2,
+                 anchor="w").grid(row=len(tables) + 2, column=0, sticky="nsew")
+        tk.Label(right, text=f"{total_rows:,}", bg="#e8e8e8", fg="#333",
+                 font=("Consolas", 10, "bold"), padx=8, pady=2,
+                 anchor="e").grid(row=len(tables) + 2, column=1, sticky="nsew")
+        tk.Label(right, text=db_size_str, bg="#e8e8e8", fg="#333",
+                 font=("Consolas", 10, "bold"), padx=8, pady=2,
+                 anchor="e").grid(row=len(tables) + 2, column=2, sticky="nsew")
+
+        for ci in range(3):
+            right.columnconfigure(ci, weight=1)
 
     def create_learn_view(self):
         """创建智能学习（费曼学习法）标签页内容"""
@@ -3740,7 +4041,7 @@ foreach ($tokenName in $targets.Keys) {
                     )
                     for cve_id, dsa_id, ts in cursor.fetchall():
                         ts_short = (ts or "")[:16]
-                        items.append(f"{cve_id} / {dsa_id or 'NA'} ({ts_short})")
+                        items.append(f"{cve_id} / {dsa_id or 'N/A'} ({ts_short})")
                 elif db_type == "学习对话记录":
                     cursor.execute(
                         "SELECT id, topic, level, created_at FROM learn_sessions "
@@ -3913,7 +4214,7 @@ foreach ($tokenName in $targets.Keys) {
                     if row:
                         cve_id, dsa_id, result, ts, model = row
                         content_lines.append(f"【AI分析记录】")
-                        content_lines.append(f"CVE: {cve_id}  Dell公告: {dsa_id or 'NA'}")
+                        content_lines.append(f"CVE: {cve_id}  Dell公告: {dsa_id or 'N/A'}")
                         content_lines.append(f"模型: {model or 'N/A'}  时间: {ts}")
                         content_lines.append(f"\n{'─'*40}\n{result or '无分析结果'}")
                     else:
@@ -4572,15 +4873,16 @@ foreach ($tokenName in $targets.Keys) {
                         # Process in bulk batches for better performance
                         if len(cves_to_store) >= batch_size or i == len(all_raw_cves) - 1:
                             if cves_to_store:
-                                # Bulk store to Redis/SQLite
+                                # SQLite 批量写入（主存储）
+                                self._bulk_store_cve_to_sqlite(cves_to_store)
+
+                                # Redis 缓存更新（best-effort）
                                 if self.use_redis:
-                                    for cve_to_store in cves_to_store:
-                                        self.redis_manager.store_cve(cve_to_store)
-                                        # Add to SQLite backup queue
-                                        self.sqlite_backup_queue.put(('cve', cve_to_store))
-                                else:
-                                    # Fall back to SQLite bulk storage
-                                    self._bulk_store_cve_to_sqlite(cves_to_store)
+                                    try:
+                                        for cve_to_store in cves_to_store:
+                                            self.redis_manager.store_cve(cve_to_store)
+                                    except Exception:
+                                        pass
 
                                 # Clear the batch
                                 cves_to_store = []
@@ -5002,14 +5304,6 @@ foreach ($tokenName in $targets.Keys) {
                     self.log_queue.put(f"✓ 新增 {new_count} 条 Dell 安全公告到数据库")
                 if existing_count > 0:
                     self.log_queue.put(f"ℹ 跳过 {existing_count} 条已存在的公告")
-
-                # 只在有新数据时保存 JSON 文件
-                if new_advisories:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = self.data_dir / f"dell_advisories_new_{timestamp}.json"
-                    with open(filename, "w", encoding="utf-8") as f:
-                        json.dump(new_advisories, f, ensure_ascii=False, indent=2)
-                    self.log_queue.put(f"新增数据已保存到: {filename}")
 
                 # ✅ 修复：使用正确的方法计算数据库总数
                 total_count = self.get_dell_count_from_db()
@@ -5469,20 +5763,6 @@ foreach ($tokenName in $targets.Keys) {
 
                     dell_data.append(advisory)
 
-            # ✅ 保存 CSV 数据到本地 JSON 文件
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            if new_advisories:
-                # 只保存新增数据
-                filename = self.data_dir / f"dell_csv_new_{timestamp}.json"
-                with open(filename, "w", encoding="utf-8") as f:
-                    json.dump(new_advisories, f, ensure_ascii=False, indent=2)
-                self.log_queue.put(f"✓ 新增数据已保存到: {filename.name}")
-
-            # 保存全量数据（可选）
-            full_filename = self.data_dir / f"dell_csv_full_{timestamp}.json"
-            with open(full_filename, "w", encoding="utf-8") as f:
-                json.dump(dell_data, f, ensure_ascii=False, indent=2)
-
             # 发送日志到队列
             self.log_queue.put(f"✓ 成功加载Dell CSV数据: {Path(csv_file).name}")
             self.log_queue.put(f"  总计: {len(dell_data)} 条DSA")
@@ -5490,7 +5770,6 @@ foreach ($tokenName in $targets.Keys) {
                 self.log_queue.put(f"  新增: {new_count} 条Dell安全公告到数据库")
             if existing_count > 0:
                 self.log_queue.put(f"  跳过: {existing_count} 条已存在的公告")
-            self.log_queue.put(f"✓ 全量数据已保存到: {full_filename.name}")
 
             # ✅ 通知主线程刷新GUI（从数据库重新加载）
             self.dell_queue.put(('refresh_database', None))
@@ -6121,19 +6400,37 @@ foreach ($tokenName in $targets.Keys) {
         ).start()
 
     def _search_nvd_from_database(self, search_term):
-        """从数据库搜索NVD数据（后台线程）"""
+        """从数据库搜索NVD数据（后台线程，分级搜索策略）"""
         try:
             search_upper = search_term.upper()
             cursor = self.conn.cursor()
 
-            # 使用LIKE进行模糊搜索（限制500条结果）
-            cursor.execute("""
-                SELECT data FROM cves
-                WHERE UPPER(cve_id) LIKE ?
-                   OR UPPER(data) LIKE ?
-                ORDER BY published_date DESC
-                LIMIT 500
-            """, (f'%{search_upper}%', f'%{search_upper}%'))
+            # 第一级：精确/前缀匹配 cve_id（走索引，最快）
+            cursor.execute(
+                "SELECT data FROM cves WHERE cve_id = ? LIMIT 1",
+                (search_upper,)
+            )
+            records = cursor.fetchall()
+
+            # 第二级：cve_id 模糊匹配（主键列，仍然较快）
+            if not records:
+                cursor.execute("""
+                    SELECT data FROM cves
+                    WHERE UPPER(cve_id) LIKE ?
+                    ORDER BY published_date DESC
+                    LIMIT 500
+                """, (f'%{search_upper}%',))
+                records = cursor.fetchall()
+
+            # 第三级：搜索 data JSON 字段（全表扫描，仅在前两级无结果时触发）
+            if not records:
+                self.log_queue.put(f"CVE ID 无匹配，正在搜索详细数据（较慢）...")
+                cursor.execute("""
+                    SELECT data FROM cves
+                    WHERE data LIKE ?
+                    ORDER BY published_date DESC
+                    LIMIT 200
+                """, (f'%{search_upper}%',))
 
             records = cursor.fetchall()
             results = []
@@ -6242,19 +6539,20 @@ foreach ($tokenName in $targets.Keys) {
         ).start()
 
     def _search_dell_from_database(self, search_term: str):
-        """从数据库全量搜索Dell公告（后台线程）"""
+        """从数据库搜索Dell公告（后台线程，分级搜索策略）"""
         try:
             search_upper = f"%{search_term.upper()}%"
             cursor = self.conn.cursor()
+
+            # 第一级：仅搜索索引列和短文本列（dsa_id, title, cve_ids）
             cursor.execute("""
                 SELECT data FROM dell_advisories
                 WHERE UPPER(dsa_id)   LIKE ?
                    OR UPPER(title)    LIKE ?
                    OR UPPER(cve_ids)  LIKE ?
-                   OR UPPER(data)     LIKE ?
                 ORDER BY published_date DESC
                 LIMIT 200
-            """, (search_upper, search_upper, search_upper, search_upper))
+            """, (search_upper, search_upper, search_upper))
 
             results = []
             for (raw,) in cursor.fetchall():
@@ -6263,6 +6561,22 @@ foreach ($tokenName in $targets.Keys) {
                         results.append(json.loads(raw))
                 except json.JSONDecodeError:
                     continue
+
+            # 第二级：仅在前一级无结果时才搜索 data JSON 字段
+            if not results:
+                self.log_queue.put(f"在主要字段中未找到匹配，正在搜索详细数据（较慢）...")
+                cursor.execute("""
+                    SELECT data FROM dell_advisories
+                    WHERE data LIKE ?
+                    ORDER BY published_date DESC
+                    LIMIT 100
+                """, (search_upper,))
+                for (raw,) in cursor.fetchall():
+                    try:
+                        if raw:
+                            results.append(json.loads(raw))
+                    except json.JSONDecodeError:
+                        continue
 
             # 清空树并显示结果（通过队列回主线程）
             self.dell_queue.put(('clear', None))
@@ -6544,11 +6858,10 @@ Dell 安全公告详细信息
                     try:
                         with self.db_lock:
                             cursor = self.db_conn.cursor()
-                            cursor.execute("SELECT * FROM dell_advisories WHERE dsa_id = ?", (advisory_id,))
+                            cursor.execute("SELECT data FROM dell_advisories WHERE dsa_id = ?", (advisory_id,))
                             row = cursor.fetchone()
-                            if row:
-                                cols = [desc[0] for desc in cursor.description]
-                                dell_detail = dict(zip(cols, row))
+                            if row and row[0]:
+                                dell_detail = json.loads(row[0])
                     except Exception as e:
                         self.log(f"从数据库查询Dell公告数据失败: {str(e)}")
 
@@ -6655,7 +6968,7 @@ Dell 安全公告详细信息
             solution_result = response.choices[0].message.content
 
             # 构造空的 dell_advisory_data 以复用显示逻辑
-            empty_dell = {"dell_security_advisory": "NA", "title": ""}
+            empty_dell = {"dell_security_advisory": "N/A", "title": ""}
             self.root.after(0, self._show_ai_solution_result, solution_result, cve_data, empty_dell)
 
         except ImportError:
@@ -6806,7 +7119,7 @@ Qwen API密钥未设置。
             # 创建弹框
             dialog = tk.Toplevel(self.root)
             dialog.title(f"AI解决方案 - {cve_id}")
-            dialog.geometry("900x650")
+            dialog.geometry("1100x800")
             dialog.transient(self.root)
             dialog.grab_set()
 
@@ -6827,7 +7140,7 @@ Qwen API密钥未设置。
             text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
             result_text = scrolledtext.ScrolledText(
-                text_frame, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa"
+                text_frame, wrap=tk.WORD, font=("Consolas", 11), bg="#f8f9fa"
             )
             result_text.pack(fill=tk.BOTH, expand=True)
             result_text.insert(tk.END, result)
@@ -6924,6 +7237,10 @@ Qwen API密钥未设置。
 
                 for row in rows:
                     id, cve_id, advisory_id, analysis_time, status, result = row
+
+                    # 规范化空值显示
+                    advisory_id = advisory_id if advisory_id and advisory_id != "NA" else "N/A"
+                    status = status if status else "N/A"
 
                     # 格式化时间戳
                     try:
@@ -7071,25 +7388,43 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
         ):
             return
 
-        # 收集要删除的记录标识（时间戳 + CVE ID + Dell公告ID）
+        # 收集要删除的记录（优先使用数据库 id）
         items_to_delete = []
+        db_ids = []
         for iid in selected:
             values = self.solution_tree.item(iid, 'values')
             if values:
-                items_to_delete.append({
+                item_info = {
                     'time': str(values[0]),
                     'cve_id': str(values[1]),
                     'advisory_id': str(values[2])
-                })
+                }
+                items_to_delete.append(item_info)
+                # 从 solution_history 中查找对应的数据库 id
+                for h in self.solution_history:
+                    if (h['cve_id'] == item_info['cve_id'] and
+                        h.get('advisory_id', '') == item_info['advisory_id'] and
+                        h.get('time', '') == item_info['time'] and
+                        'id' in h):
+                        db_ids.append((h['id'],))
+                        break
 
         try:
             with self.db_lock:
                 cursor = self.db_conn.cursor()
-                for item in items_to_delete:
-                    cursor.execute(
-                        "DELETE FROM ai_solutions WHERE cve_id = ? AND dell_advisory_id = ? AND analysis_time LIKE ?",
-                        (item['cve_id'], item['advisory_id'], f"%{item['time'][:10]}%")
+                if db_ids:
+                    # 使用精确 id 删除（走主键索引，快速且精确）
+                    cursor.executemany(
+                        "DELETE FROM ai_solutions WHERE id = ?",
+                        db_ids
                     )
+                else:
+                    # 回退：使用精确匹配（非 LIKE）
+                    for item in items_to_delete:
+                        cursor.execute(
+                            "DELETE FROM ai_solutions WHERE cve_id = ? AND dell_advisory_id = ? AND analysis_time = ?",
+                            (item['cve_id'], item['advisory_id'], item['time'])
+                        )
                 self.db_conn.commit()
         except sqlite3.Error as e:
             messagebox.showerror("删除失败", f"数据库操作失败：{e}")
@@ -7204,64 +7539,59 @@ CVE 描述:
     # ==================== 统计更新功能 ====================
 
     def update_stats(self):
-        """更新统计信息（图表 + 详情列表）"""
+        """更新统计信息（图表 + 详情列表 + 数据库信息）"""
         nvd_total = self.get_cve_count_from_db()
         dell_total = self.get_dell_count_from_db()
         matched_count = self.get_matched_count_from_db()
 
-        # ── CVE 严重等级统计 ──
-        cve_severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        if self.cve_data:
-            for cve in self.cve_data:
-                severity = cve.get("cvss_severity", "")
-                if severity in cve_severity:
-                    cve_severity[severity] += 1
-        else:
-            try:
-                cursor = self.conn.cursor()
-                cursor.execute("SELECT data FROM cves ORDER BY published_date DESC LIMIT 500")
-                for (raw,) in cursor.fetchall():
-                    try:
-                        d = json.loads(raw)
-                        s = d.get("cvss_severity", "")
-                        if s in cve_severity:
-                            cve_severity[s] += 1
-                    except:
-                        continue
-            except:
-                pass
+        # ── CVE 严重等级统计（全量数据库，含未分级） ──
+        cve_severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "N/A": 0}
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT data FROM cves")
+            for (raw,) in cursor.fetchall():
+                try:
+                    d = json.loads(raw)
+                    s = d.get("cvss_severity", "")
+                    if s in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+                        cve_severity[s] += 1
+                    else:
+                        cve_severity["N/A"] += 1
+                except:
+                    cve_severity["N/A"] += 1
+        except:
+            pass
 
-        # ── Dell 公告影响等级统计 ──
-        dell_severity = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
-        dell_source = self.dell_advisories if self.dell_advisories else []
-        if not dell_source:
-            try:
-                cursor = self.conn.cursor()
-                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC LIMIT 500")
-                for (raw,) in cursor.fetchall():
-                    try:
-                        dell_source.append(json.loads(raw))
-                    except:
-                        continue
-            except:
-                pass
-        for adv in dell_source:
-            impact = adv.get('impact', '')
-            if not impact:
-                summary = adv.get('summary', '')
-                m = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
-                impact = m.group(1).capitalize() if m else ''
-            if impact in dell_severity:
-                dell_severity[impact] += 1
+        # ── Dell 公告影响等级统计（全量数据库，含未分级） ──
+        dell_severity = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "N/A": 0}
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT data FROM dell_advisories")
+            for (raw,) in cursor.fetchall():
+                try:
+                    d = json.loads(raw)
+                    impact = d.get('impact', '')
+                    if not impact:
+                        summary = d.get('summary', '')
+                        m = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
+                        impact = m.group(1).capitalize() if m else ''
+                    if impact in ("Critical", "High", "Medium", "Low"):
+                        dell_severity[impact] += 1
+                    else:
+                        dell_severity["N/A"] += 1
+                except:
+                    dell_severity["N/A"] += 1
+        except:
+            pass
 
-        # 更新卡片数值
+        # 更新卡片数值（严重/高危/中危/低危 = Dell 影响等级）
         self.stats_cards["NVD CVE总数"].value_label.config(text=str(nvd_total))
         self.stats_cards["Dell公告数"].value_label.config(text=str(dell_total))
         self.stats_cards["关联匹配数"].value_label.config(text=str(matched_count))
-        self.stats_cards["严重"].value_label.config(text=str(cve_severity["CRITICAL"]))
-        self.stats_cards["高危"].value_label.config(text=str(cve_severity["HIGH"]))
-        self.stats_cards["中危"].value_label.config(text=str(cve_severity["MEDIUM"]))
-        self.stats_cards["低危"].value_label.config(text=str(cve_severity["LOW"]))
+        self.stats_cards["Dell 严重"].value_label.config(text=str(dell_severity["Critical"]))
+        self.stats_cards["Dell 高危"].value_label.config(text=str(dell_severity["High"]))
+        self.stats_cards["Dell 中危"].value_label.config(text=str(dell_severity["Medium"]))
+        self.stats_cards["Dell 低危"].value_label.config(text=str(dell_severity["Low"]))
 
         # 更新底部状态栏
         self.cve_count_label.config(
@@ -7270,6 +7600,9 @@ CVE 描述:
 
         # 绘制图表（CVE饼图 + Dell饼图 + 柱状图）
         self._draw_charts(cve_severity, dell_severity, nvd_total, dell_total, matched_count)
+
+        # ── 更新数据库信息 ──
+        self._update_db_info()
 
         # ── 填充最新 CVE 前10 ──
         for item in self.stats_cve_tree.get_children():
@@ -7511,24 +7844,7 @@ CVE 描述:
         self.root.after(100, self.check_queues)
 
     def close_database_connection(self):
-        """关闭数据库连接（改进版，等待队列清空）"""
-        # ✅ 修复 #1: 等待备份队列清空
-        if hasattr(self, 'sqlite_backup_queue') and not self.sqlite_backup_queue.empty():
-            try:
-                print("等待数据备份完成...")
-                # 等待队列清空，最多等待 10 秒
-                import time
-                start_time = time.time()
-                while not self.sqlite_backup_queue.empty() and (time.time() - start_time) < 10:
-                    time.sleep(0.1)
-
-                if self.sqlite_backup_queue.empty():
-                    print("✓ 数据备份完成")
-                else:
-                    print(f"⚠ 备份队列仍有 {self.sqlite_backup_queue.qsize()} 项未完成，强制关闭")
-            except Exception as e:
-                print(f"等待备份队列时出错: {e}")
-
+        """关闭数据库连接"""
         # 关闭 Redis 连接
         if hasattr(self, 'redis_manager') and self.redis_manager:
             try:

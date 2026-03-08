@@ -35,27 +35,8 @@ class RedisDataManager:
         self.password = redis_pwd if redis_pwd and redis_pwd.strip() else None
         self.db = int(os.getenv('REDIS_DB', db))
 
-        # 创建连接池（性能优化）
-        self.pool = ConnectionPool(
-            host=self.host,
-            port=self.port,
-            password=self.password,
-            db=self.db,
-            decode_responses=True,  # 自动解码为字符串
-            max_connections=50,     # 增加连接池大小
-            socket_timeout=5,
-            socket_connect_timeout=5,
-            socket_keepalive=True,  # 启用 TCP keepalive
-            socket_keepalive_options={
-                1: 1,   # TCP_KEEPIDLE
-                2: 1,   # TCP_KEEPINTVL
-                3: 3    # TCP_KEEPCNT
-            } if os.name != 'nt' else None,  # Windows 不支持 socket_keepalive_options
-            retry_on_timeout=True,
-            health_check_interval=30
-        )
-
-        # 创建Redis客户端（使用连接池）
+        # 创建连接池和客户端
+        self.pool = self._create_pool(self.password)
         self.redis_client = redis.Redis(connection_pool=self.pool)
 
         # Redis键前缀
@@ -65,10 +46,43 @@ class RedisDataManager:
         self.DELL_SET = "dell:all_ids"
         self.COLLECTION_HISTORY = "collection:history"
 
+    def _create_pool(self, password):
+        """创建 Redis 连接池"""
+        return ConnectionPool(
+            host=self.host,
+            port=self.port,
+            password=password,
+            db=self.db,
+            decode_responses=True,
+            max_connections=50,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            socket_keepalive_options={
+                1: 1,   # TCP_KEEPIDLE
+                2: 1,   # TCP_KEEPINTVL
+                3: 3    # TCP_KEEPCNT
+            } if os.name != 'nt' else None,
+            retry_on_timeout=True,
+            health_check_interval=30
+        )
+
     def ping(self) -> bool:
-        """测试Redis连接"""
+        """测试Redis连接（密码认证失败时自动尝试无密码连接）"""
         try:
             return self.redis_client.ping()
+        except redis.AuthenticationError:
+            # 密码不匹配：Redis 服务端未设密码但客户端带了密码，尝试无密码重连
+            if self.password is not None:
+                self.password = None
+                self.pool.disconnect()
+                self.pool = self._create_pool(None)
+                self.redis_client = redis.Redis(connection_pool=self.pool)
+                try:
+                    return self.redis_client.ping()
+                except (redis.ConnectionError, redis.AuthenticationError):
+                    return False
+            return False
         except redis.ConnectionError:
             return False
 
@@ -201,13 +215,13 @@ class RedisDataManager:
     # ==================== Dell 安全公告操作 ====================
 
     def store_dell_advisory(self, advisory_data: Dict[str, Any]) -> bool:
-        """存储Dell安全公告到Redis（增量存储）
+        """存储Dell安全公告到Redis（Upsert：有则合并更新，无则插入）
 
         Args:
             advisory_data: Dell公告数据字典
 
         Returns:
-            True if new, False if already exists
+            True if new, False if updated existing
         """
         dsa_id = advisory_data.get('dell_security_advisory')
         if not dsa_id:
@@ -219,17 +233,27 @@ class RedisDataManager:
         is_new = not self.redis_client.exists(key)
 
         if is_new:
-            # 只有不存在时才存储（增量存储）
             advisory_data['collected_date'] = datetime.now().isoformat()
-            self.redis_client.set(key, json.dumps(advisory_data, ensure_ascii=False))
+        else:
+            # 合并：用已有数据打底，新数据覆盖（保留旧字段，更新新字段）
+            existing = self.redis_client.get(key)
+            if existing:
+                try:
+                    old = json.loads(existing)
+                    old.update({k: v for k, v in advisory_data.items() if v})
+                    advisory_data = old
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-            # 添加到Dell ID集合
-            self.redis_client.sadd(self.DELL_SET, dsa_id)
+        self.redis_client.set(key, json.dumps(advisory_data, ensure_ascii=False))
 
-            # 为CVE ID建立索引
-            cve_ids = advisory_data.get('cve_ids', [])
-            for cve_id in cve_ids:
-                self.redis_client.sadd(f"cve_to_dell:{cve_id}", dsa_id)
+        # 添加到Dell ID集合
+        self.redis_client.sadd(self.DELL_SET, dsa_id)
+
+        # 更新CVE ID索引
+        cve_ids = advisory_data.get('cve_ids', [])
+        for cve_id in cve_ids:
+            self.redis_client.sadd(f"cve_to_dell:{cve_id}", dsa_id)
 
         return is_new
 
