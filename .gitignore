@@ -1,4 +1,4 @@
-# Python and Virtual Environments
+# ==================== Python ====================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -24,8 +24,13 @@ MANIFEST
 venv/
 env/
 ENV/
+.pytest_cache/
+pytest_cache/
+.coverage
+htmlcov/
+tests/
 
-# IDE and Editors
+# ==================== IDE / Editor ====================
 .vscode/
 .idea/
 *.swp
@@ -35,13 +40,12 @@ ENV/
 Thumbs.db
 desktop.ini
 
-# Logs
+# ==================== Logs ====================
 *.log
 logs/
 log/
-gui_output.log
 
-# Data, Cache and Backups (DO NOT UPLOAD)
+# ==================== Data / Cache / Backup ====================
 cve_data/
 cache/
 temp/
@@ -56,7 +60,7 @@ archive/
 *.sqlite
 *.sqlite3
 
-# Temporary data files
+# ==================== Temp Data Files ====================
 temp_*.json
 *.jsonl
 *.csv
@@ -64,7 +68,7 @@ dsa_DSA-*.json
 dsa_DSA-*.csv
 configuration_summary.json
 
-# Model files and checkpoints
+# ==================== Model / Checkpoint ====================
 checkpoints/
 models/
 *.pt
@@ -74,7 +78,7 @@ models/
 *.pkl
 *.pickle
 
-# Temporary images and web files
+# ==================== Images / HTML Artifacts ====================
 *.png
 *.jpg
 *.jpeg
@@ -84,23 +88,18 @@ models/
 *.webp
 *.tmp
 *.html
-cve_web_interface*.html
-dsa_*.html
-dell_*.html
 
-# Browser drivers
+# ==================== Browser Drivers ====================
 chromedriver*
 geckodriver*
 msedgedriver*
-chromedriver.exe
-geckodriver.exe
-msedgedriver.exe
 
-# Environment and Configuration
+# ==================== Secrets / Environment ====================
 .env
 .env.local
 .env.dev
 .env.prod
+.env.llm.example
 .claude/
 .qwen/
 claude.config.json
@@ -108,117 +107,127 @@ qwen_http_tools.json
 secrets.json
 credentials.json
 
-# Git temporary files
+# ==================== Git Temp ====================
 *.orig
 *.rej
 *.backup
+.gitignore.backup
 
-# Windows artifacts
+# ==================== Windows ====================
 nul
 
-# Jupyter
+# ==================== Jupyter ====================
 .ipynb_checkpoints/
 *.ipynb
 
-# Testing and Debugging (temporary scripts)
+# ==================== Test / Debug Scripts ====================
 test_*.py
 *_test.py
 debug_*.py
-gpu_*.py
-tests/
-pytest_cache/
-.pytest_cache/
-.coverage
-htmlcov/
-
-# AI-generated temporary validation/test scripts
-final_validation_report.py
-full_system_validation.py
-test_new_features.py
-test_match_performance.py
-comprehensive_performance_test.py
+diagnose_*.py
+verify_*.py
+fix_*.py
+*_validation_report.py
+*_validation.py
+comprehensive_*.py
 simple_performance_test.py
-gpu_performance_test.py
 system_test.py
-test_bug_fixes.py
-test_data_display.py
-test_data_load.py
-test_data_loading.py
-test_dell_page_structure.py
-test_dell_search.py
-test_integration.py
-test_matching_display.py
-test_matching_fix.py
-test_performance_optimized.py
-test_sqlite_mode.py
-test_stress.py
-test_system_complete.py
-test_wsl_redis.py
-test_wsl_redis_simple.py
+test_gpu_services.sh
 
-# Debug and helper scripts
-diagnose_dell_display.py
-diagnose_matching_issue.py
-fix_gui_data_loading.py
-migrate_to_redis.py
-sync_sqlite_to_redis.py
-verify_fixes.py
-
-# Backup code files (not in use)
-cve_integrated_gui_sqlite_backup*.py
-*_sqlite_backup*.py
-
-# Helper modules (not needed for main program)
-llm_config.py
-ollama_llm_service.py
-qwen_assistant.py
+# ==================== Unused Source ====================
+main.py
+gpu_cve_sync.py
+gpu_*.py
 hybrid_data_manager.py
 unified_data_manager.py
+llm_config.py
+llm_config.py.example
+ollama_llm_service.py
+qwen_assistant.py
 dell_dsa_scraper.py
 dell_dsa_scraper_selenium.py
+migrate_to_redis.py
+sync_sqlite_to_redis.py
+sample_*.csv
 
-# Startup scripts (use start_cve_gui.bat/sh instead)
+# ==================== Unused Config ====================
+.wslconfig.example
+requirements_llm.txt
+requirements_selenium.txt
+init-vector-db.sql
 run_cve_test.bat
-test_gpu_services.sh
+
+# ==================== Unused Startup Scripts ====================
 start_cve_wsl_redis.sh
 start_gpu_services.sh
 start_gpu_wsl.sh
 
-# Temporary and archived reports/documentation
-# These should be archived separately, not in main repo
+# ==================== Backup Source ====================
+*_backup_*.py
+*_sqlite_backup*.py
+
+# ==================== AI Reports / Temp Docs ====================
+AI fuction.md
+AI_*.md
 BUG_FIX_REPORT*.md
+CHANGELOG.md
 CLEANUP_*.md
+CODE_SCALE*.md
 COMPLETE_*.md
+CONFIG.md
 DATA_*.md
 DELL_BUG*.md
 DELL_DATA*.md
+DELL_DATABASE_*.md
 DELL_DISPLAY*.md
+DELL_DSA_SCRAPER_README.md
+DELL_DSA_SCRAPER_SUMMARY.md
 DEPLOYMENT_*.md
+DOCUMENTATION_INDEX.md
 DSA_*.md
 FEATURE_*.md
 FINAL_*.md
 GITHUB_*.md
-GPU_*.md
+GPU_ARCHITECTURE.md
+GPU_DOCKER_SETUP.md
+GPU_OPTIMIZATION_SUMMARY.md
+GPU_QUICKSTART.md
+GPU_TEST_REPORT.md
+GPU_USAGE_GUIDE.md
 LIGHTWEIGHT_*.md
 MATCHING_*.md
+NVD_*.md
 PERFORMANCE_*.md
 PROJECT_SUMMARY*.md
 QUICK_GITHUB*.md
 QUICK_OPTIMIZATION*.md
+QUICK_QWEN_CONFIG_GUIDE.md
 QUICK_UPLOAD*.md
+QWEN_API_*.md
 README_WSL*.md
+REDIS_MODE_STARTUP_REPORT.md
 REDIS_OPTIMIZATION*.md
 REDIS_TEST*.md
+RUN_CVE_GUIDE.md
+RUN_GUIDE.md
 SELENIUM_*.md
+START_CVE_NOW.md
 STARTUP_*.md
 SYSTEM_*.md
 WORKSPACE_*.md
-CODE_SCALE*.md
-NVD_*.md
-DOCUMENTATION_INDEX.md
 FIXES_CHECKLIST.txt
 files_to_delete.txt
 claude code Ubuntu.txt
-CONFIG.md
-.wslconfig.example
-init-vector-db.sql
+docs/bug_analysis_report.md
+docs/bug_fix_csv_loading.md
+docs/dell_security_test_report.md
+docs/dell_time_range_improvement.md
+docs/git_commit_report.md
+docs/gui_performance_optimization_report.md
+docs/REDIS_GUIDE.md
+docs/REDIS_MIGRATION_REPORT.md
+docs/README.md
+docs/data_collection_optimization_report.md
+docs/feature_update_v3.2.md
+docs/system_optimization_v3.6_report.md
+docs/system_upgrade_v3.3_report.md
