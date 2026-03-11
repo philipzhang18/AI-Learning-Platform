@@ -9,7 +9,7 @@ echo.
 
 REM 激活虚拟环境
 echo [1/2] 激活虚拟环境...
-call D:\AI\cursor\starone\.venv\Scripts\activate.bat
+call E:\AI\cursor\starone\.venv\Scripts\activate.bat
 
 if errorlevel 1 (
     echo 错误：无法激活虚拟环境

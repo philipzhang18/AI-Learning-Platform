@@ -1521,15 +1521,14 @@ class CVEIntegratedGUI:
             import subprocess
 
             # ── 第一步：将 OneCore 中文声音（如 Kangkang）注册到 SAPI5 HKLM ──
-            #   OneCore 声音在 Speech_OneCore 注册表下，SAPI5 .NET 只读 Speech 下
-            #   通过复制注册表项（需要管理员权限，应用通常有权限）实现对齐
-            reg_script = r"""
+            #   注册失败不应阻止第二步的声音列表查询
+            try:
+                reg_script = r"""
 Add-Type -AssemblyName System.Speech
 $srcBase = 'HKLM:\SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens'
 $dstBase = 'HKLM:\SOFTWARE\Microsoft\Speech\Voices\Tokens'
 $voiceDataDir = 'C:\Windows\Speech_OneCore\Engines\TTS\zh-CN'
 
-# 需要注册的 OneCore 中文声音（含正确 VoicePath 修正）
 $targets = @{
     'MSTTS_V110_zhCN_KangkangM' = 'M2052Kangkang'
     'MSTTS_V110_zhCN_YaoyaoM'   = 'M2052Yaoyao'
@@ -1539,20 +1538,17 @@ foreach ($tokenName in $targets.Keys) {
     $src = "$srcBase\$tokenName"
     $dst = "$dstBase\$tokenName"
     if (-not (Test-Path $src)) { continue }
-    if (Test-Path $dst) { continue }   # 已存在则跳过
+    if (Test-Path $dst) { continue }
     try {
         New-Item -Path $dst -Force | Out-Null
         $props = Get-ItemProperty $src
         $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
             Set-ItemProperty -Path $dst -Name $_.Name -Value $_.Value
         }
-        # 修正 VoicePath 为实际的 Kangkang / Yaoyao 文件
         $correctPath = Join-Path $voiceDataDir $targets[$tokenName]
         Set-ItemProperty -Path $dst -Name 'VoicePath' -Value $correctPath
-        # 添加 SpLexicon（SAPI5 桌面声音必需）
         Set-ItemProperty -Path $dst -Name '(default)' -Value (($props.'(default)') -replace ' - Chinese.*', ' Desktop - Chinese (Simplified)')
 
-        # 复制 Attributes 子键
         $attrSrc = "$src\Attributes"
         $attrDst = "$dst\Attributes"
         if (Test-Path $attrSrc) {
@@ -1561,7 +1557,6 @@ foreach ($tokenName in $targets.Keys) {
             $ap.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object {
                 Set-ItemProperty -Path $attrDst -Name $_.Name -Value $_.Value
             }
-            # SpLexicon 使 SAPI5 正确工作
             Set-ItemProperty -Path $attrDst -Name 'SpLexicon' -Value '{0655E396-25D0-11D3-9C26-00C04F8EF87C}'
             $oldName = (Get-ItemProperty $attrDst).Name
             Set-ItemProperty -Path $attrDst -Name 'Name' -Value "$oldName Desktop"
@@ -1572,18 +1567,19 @@ foreach ($tokenName in $targets.Keys) {
     }
 }
 """
-            # 写 ps1 到临时文件执行，避免命令行转义问题
-            import tempfile, os as _os
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8-sig", suffix=".ps1", delete=False, dir=str(self.data_dir)
-            )
-            tmp.write(reg_script)
-            tmp.close()
-            subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
-                capture_output=True, timeout=15,
-            )
-            _os.remove(tmp.name)
+                import tempfile, os as _os
+                tmp = tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8-sig", suffix=".ps1", delete=False, dir=str(self.data_dir)
+                )
+                tmp.write(reg_script)
+                tmp.close()
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp.name],
+                    capture_output=True, timeout=15,
+                )
+                _os.remove(tmp.name)
+            except Exception:
+                pass  # 注册失败不影响下面的声音列表查询
 
             # ── 第二步：读取 SAPI5 已安装声音，仅保留中文声音 ──────────
             list_script = (
@@ -2979,6 +2975,12 @@ foreach ($tokenName in $targets.Keys) {
         self.dell_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
         tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 按影响等级配色（与 NVD CVE 标签页一致）
+        self.dell_tree.tag_configure("Critical", background="#ffebee", foreground="#b71c1c")
+        self.dell_tree.tag_configure("High", background="#fff3e0", foreground="#e65100")
+        self.dell_tree.tag_configure("Medium", background="#fff9c4", foreground="#f57f17")
+        self.dell_tree.tag_configure("Low", background="#f1f8e9", foreground="#33691e")
 
         # 绑定双击事件
         self.dell_tree.bind("<Double-1>", self.on_dell_item_double_click)
@@ -5980,7 +5982,8 @@ foreach ($tokenName in $targets.Keys) {
                 advisory.get("title", ""),
                 cve_ids_str,
                 published,
-            )
+            ),
+            tags=(severity_level,)
         )
 
     def _refresh_matched_data_background(self):
