@@ -135,20 +135,17 @@ system_test.py
 test_gpu_services.sh
 
 # ==================== Unused Source ====================
-main.py
 gpu_cve_sync.py
 gpu_*.py
 hybrid_data_manager.py
 unified_data_manager.py
-llm_config.py
-llm_config.py.example
-ollama_llm_service.py
-qwen_assistant.py
 dell_dsa_scraper.py
 dell_dsa_scraper_selenium.py
 migrate_to_redis.py
 sync_sqlite_to_redis.py
 sample_*.csv
+*_backup_*.py
+*_sqlite_backup*.py
 
 # ==================== Unused Config ====================
 .wslconfig.example
@@ -156,78 +153,16 @@ requirements_llm.txt
 requirements_selenium.txt
 init-vector-db.sql
 run_cve_test.bat
-
-# ==================== Unused Startup Scripts ====================
 start_cve_wsl_redis.sh
 start_gpu_services.sh
 start_gpu_wsl.sh
 
-# ==================== Backup Source ====================
-*_backup_*.py
-*_sqlite_backup*.py
+# ==================== Office / Binary ====================
+*.pptx
+*.docx
+*.xlsx
 
-# ==================== AI Reports / Temp Docs ====================
-AI fuction.md
-AI_*.md
-BUG_FIX_REPORT*.md
-CHANGELOG.md
-CLEANUP_*.md
-CODE_SCALE*.md
-COMPLETE_*.md
-CONFIG.md
-DATA_*.md
-DELL_BUG*.md
-DELL_DATA*.md
-DELL_DATABASE_*.md
-DELL_DISPLAY*.md
-DELL_DSA_SCRAPER_README.md
-DELL_DSA_SCRAPER_SUMMARY.md
-DEPLOYMENT_*.md
-DOCUMENTATION_INDEX.md
-DSA_*.md
-FEATURE_*.md
-FINAL_*.md
-GITHUB_*.md
-GPU_ARCHITECTURE.md
-GPU_DOCKER_SETUP.md
-GPU_OPTIMIZATION_SUMMARY.md
-GPU_QUICKSTART.md
-GPU_TEST_REPORT.md
-GPU_USAGE_GUIDE.md
-LIGHTWEIGHT_*.md
-MATCHING_*.md
-NVD_*.md
-PERFORMANCE_*.md
-PROJECT_SUMMARY*.md
-QUICK_GITHUB*.md
-QUICK_OPTIMIZATION*.md
-QUICK_QWEN_CONFIG_GUIDE.md
-QUICK_UPLOAD*.md
-QWEN_API_*.md
-README_WSL*.md
-REDIS_MODE_STARTUP_REPORT.md
-REDIS_OPTIMIZATION*.md
-REDIS_TEST*.md
-RUN_CVE_GUIDE.md
-RUN_GUIDE.md
-SELENIUM_*.md
-START_CVE_NOW.md
-STARTUP_*.md
-SYSTEM_*.md
-WORKSPACE_*.md
+# ==================== Misc Temp Files ====================
 FIXES_CHECKLIST.txt
 files_to_delete.txt
 claude code Ubuntu.txt
-docs/bug_analysis_report.md
-docs/bug_fix_csv_loading.md
-docs/dell_security_test_report.md
-docs/dell_time_range_improvement.md
-docs/git_commit_report.md
-docs/gui_performance_optimization_report.md
-docs/REDIS_GUIDE.md
-docs/REDIS_MIGRATION_REPORT.md
-docs/README.md
-docs/data_collection_optimization_report.md
-docs/feature_update_v3.2.md
-docs/system_optimization_v3.6_report.md
-docs/system_upgrade_v3.3_report.md

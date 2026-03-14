@@ -37,7 +37,7 @@ from redis_manager import RedisDataManager
 
 
 class CVEIntegratedGUI:
-    """CVE 漏洞监控系统整合界面"""
+    """智能知识学习平台 - 整合界面"""
 
     def __init__(self, root):
         self.root = root
