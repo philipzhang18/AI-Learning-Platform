@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title 智能知识学习平台 - SQLite+WSL Redis混合模式
+title 智能知识管理平台 - SQLite+WSL Redis混合模式
 
 echo ========================================
-echo 智能知识学习平台 - 混合模式启动
+echo 智能知识管理平台 - 混合模式启动
 echo 架构: SQLite存储 + WSL Redis缓存
 echo ========================================
 echo.
@@ -39,7 +39,7 @@ if exist "cve_data\cve_database.db" (
 
 echo.
 echo ========================================
-echo 正在启动智能知识学习平台...
+echo 正在启动智能知识管理平台...
 echo ========================================
 echo.
 
@@ -60,6 +60,6 @@ E:\AI\cursor\starone\.venv\Scripts\python.exe cve_integrated_gui.py
 
 echo.
 echo ========================================
-echo 智能知识学习平台已退出
+echo 智能知识管理平台已退出
 echo ========================================
 pause

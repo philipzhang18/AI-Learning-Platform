@@ -1,5 +1,5 @@
 """
-智能知识学习平台
+智能知识管理平台
 集成 NVD CVE 数据和 Dell 安全公告
 支持离线数据查看和 CVE ID 关联匹配
 """
@@ -37,11 +37,11 @@ from redis_manager import RedisDataManager
 
 
 class CVEIntegratedGUI:
-    """智能知识学习平台 - 整合界面"""
+    """智能知识管理平台 - 整合界面"""
 
     def __init__(self, root):
         self.root = root
-        self.root.title("智能知识学习平台")
+        self.root.title("智能知识管理平台")
         self.root.geometry("1400x900")
 
         # 设置主题颜色
@@ -266,6 +266,18 @@ class CVEIntegratedGUI:
                 )
             ''')
 
+            # Dell技术库文章表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dell_kb_articles (
+                    article_id TEXT PRIMARY KEY,
+                    title TEXT,
+                    content TEXT,
+                    solution TEXT,
+                    url TEXT,
+                    collected_date TEXT
+                )
+            ''')
+
             # Create indexes for better query performance
             # Index on published_date for date-based queries
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_cves_published_date ON cves(published_date)")
@@ -287,6 +299,9 @@ class CVEIntegratedGUI:
             # Index for learn sessions
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_sessions_topic ON learn_sessions(topic)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_sessions_created ON learn_sessions(created_at)")
+
+            # Index for Dell KB articles
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_kb_collected_date ON dell_kb_articles(collected_date)")
 
             # Index for collection_history
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_history_date ON collection_history(collected_date)")
@@ -1038,7 +1053,7 @@ class CVEIntegratedGUI:
 
         title_label = tk.Label(
             header_frame,
-            text="🛡️ 智能知识学习平台",
+            text="🛡️ 智能知识管理平台",
             font=("Microsoft YaHei", 24, "bold"),
             fg="white",
             bg=self.primary_color
@@ -1069,15 +1084,19 @@ class CVEIntegratedGUI:
         self.solution_frame = tk.Frame(self.notebook, bg="white")
         self.solution_tab_id = self.notebook.add(self.solution_frame, text="💡 解决方案")
 
-        # 5. 统计分析标签页
+        # 5. Dell技术库标签页
+        self.dell_kb_frame = tk.Frame(self.notebook, bg="white")
+        self.dell_kb_tab_id = self.notebook.add(self.dell_kb_frame, text="📖 Dell技术库")
+
+        # 6. 统计分析标签页
         self.stats_frame = tk.Frame(self.notebook, bg="white")
         self.stats_tab_id = self.notebook.add(self.stats_frame, text="📈 统计分析")
 
-        # 6. 智能学习标签页（位于统计分析和操作日志之间）
+        # 7. 智能学习标签页
         self.learn_frame = tk.Frame(self.notebook, bg="white")
         self.learn_tab_id = self.notebook.add(self.learn_frame, text="🧠 智能学习")
 
-        # 7. 日志标签页
+        # 8. 日志标签页
         self.log_frame = tk.Frame(self.notebook, bg="white")
         self.log_tab_id = self.notebook.add(self.log_frame, text="📝 操作日志")
 
@@ -1087,6 +1106,7 @@ class CVEIntegratedGUI:
         self.create_dell_view()
         self.create_matched_view()
         self.create_solution_view()
+        self.create_dell_kb_view()
         self.create_stats_view()
         self.create_learn_view()
         self.create_log_view()
@@ -3195,6 +3215,7 @@ foreach ($tokenName in $targets.Keys) {
             tree_wrapper,
             columns=columns,
             show="headings",
+            selectmode="extended",
             yscrollcommand=tree_scroll_y.set,
             xscrollcommand=tree_scroll_x.set,
             height=6
@@ -3204,7 +3225,7 @@ foreach ($tokenName in $targets.Keys) {
         tree_scroll_x.config(command=self.solution_tree.xview)
 
         self.solution_tree.heading("时间戳", text="分析时间")
-        self.solution_tree.heading("CVE ID", text="CVE 编号")
+        self.solution_tree.heading("CVE ID", text="方案编号")
         self.solution_tree.heading("Dell公告", text="Dell 公告 ID")
         self.solution_tree.heading("分析状态", text="分析状态")
         self.solution_tree.heading("结果预览", text="结果预览")
@@ -3257,6 +3278,145 @@ foreach ($tokenName in $targets.Keys) {
         # 初始化数据
         self.solution_history = []
         self.load_ai_solution_history()
+
+    # ==================== Dell技术库标签页 ====================
+
+    def create_dell_kb_view(self):
+        """创建Dell技术库视图"""
+        # 内存缓存
+        self.dell_kb_data = []
+
+        # 控制面板
+        control_frame = tk.Frame(self.dell_kb_frame, bg="white", pady=10)
+        control_frame.pack(fill=tk.X, padx=10)
+
+        # 第一行：URL 输入 + 抓取
+        url_row = tk.Frame(control_frame, bg="white")
+        url_row.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Label(
+            url_row, text="文章 URL:", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        self.kb_url_entry = tk.Entry(
+            url_row, font=("Microsoft YaHei", 10),
+            relief=tk.SOLID, bd=1
+        )
+        self.kb_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.kb_url_entry.insert(0, "https://www.dell.com/support/kbdoc/zh-cn/...")
+        self.kb_url_entry.bind("<FocusIn>", lambda e: self._kb_url_focus_in())
+        self.kb_url_entry.config(fg="gray")
+
+        self.kb_fetch_btn = tk.Button(
+            url_row, text="📥 抓取文章", command=self.fetch_dell_kb_from_url,
+            bg=self.primary_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15, pady=3, relief=tk.FLAT, cursor="hand2"
+        )
+        self.kb_fetch_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.kb_fetch_status = tk.Label(
+            url_row, text="", bg="white",
+            font=("Microsoft YaHei", 9), fg=self.info_color
+        )
+        self.kb_fetch_status.pack(side=tk.LEFT)
+
+        # 第二行：搜索 + 操作按钮
+        action_row = tk.Frame(control_frame, bg="white")
+        action_row.pack(fill=tk.X)
+
+        # 搜索
+        tk.Label(
+            action_row, text="搜索:", bg="white",
+            font=("Microsoft YaHei", 10)
+        ).pack(side=tk.LEFT, padx=(0, 5))
+
+        self.kb_search_entry = tk.Entry(
+            action_row, font=("Microsoft YaHei", 10),
+            relief=tk.SOLID, bd=1, width=25
+        )
+        self.kb_search_entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.kb_search_entry.bind("<Return>", lambda e: self.filter_dell_kb_data())
+
+        tk.Button(
+            action_row, text="🔍 搜索", command=self.filter_dell_kb_data,
+            bg=self.info_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=10, pady=3, relief=tk.FLAT, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        # 从数据库加载
+        tk.Button(
+            action_row, text="📂 从数据库加载", command=self.load_dell_kb_from_database,
+            bg=self.success_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=10, pady=3, relief=tk.FLAT, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        # AI解决方案
+        tk.Button(
+            action_row, text="🤖 AI解决方案", command=self.dell_kb_ai_solution_click,
+            bg="#9b59b6", fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=10, pady=3, relief=tk.FLAT, cursor="hand2"
+        ).pack(side=tk.RIGHT, padx=(10, 0))
+
+        # 删除选中
+        tk.Button(
+            action_row, text="🗑️ 删除选中", command=self.delete_dell_kb_selected,
+            bg=self.danger_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=10, pady=3, relief=tk.FLAT, cursor="hand2"
+        ).pack(side=tk.RIGHT, padx=(10, 0))
+
+        # 数据展示区
+        data_container = tk.Frame(self.dell_kb_frame, bg="white")
+        data_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        columns = ("文章编号", "标题", "解决方案预览", "采集时间")
+
+        tree_scroll_y = tk.Scrollbar(data_container, orient=tk.VERTICAL)
+        tree_scroll_x = tk.Scrollbar(data_container, orient=tk.HORIZONTAL)
+
+        self.kb_tree = ttk.Treeview(
+            data_container,
+            columns=columns,
+            show="headings",
+            selectmode="extended",
+            yscrollcommand=tree_scroll_y.set,
+            xscrollcommand=tree_scroll_x.set,
+            height=20
+        )
+
+        tree_scroll_y.config(command=self.kb_tree.yview)
+        tree_scroll_x.config(command=self.kb_tree.xview)
+
+        self.kb_tree.heading("文章编号", text="文章编号")
+        self.kb_tree.heading("标题", text="标题")
+        self.kb_tree.heading("解决方案预览", text="解决方案预览")
+        self.kb_tree.heading("采集时间", text="采集时间")
+
+        self.kb_tree.column("文章编号", width=130, minwidth=100)
+        self.kb_tree.column("标题", width=400, minwidth=200)
+        self.kb_tree.column("解决方案预览", width=300, minwidth=200)
+        self.kb_tree.column("采集时间", width=160, minwidth=120)
+
+        tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self.kb_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.kb_tree.bind("<Double-1>", self.on_dell_kb_item_double_click)
+
+        # 延迟加载，避免 log_text 尚未创建
+        self.dell_kb_frame.after(500, self.load_dell_kb_from_database)
+
+    def _kb_url_focus_in(self):
+        """URL输入框获取焦点时清除占位符"""
+        placeholder = "https://www.dell.com/support/kbdoc/zh-cn/..."
+        if self.kb_url_entry.get() == placeholder:
+            self.kb_url_entry.delete(0, tk.END)
+            self.kb_url_entry.config(fg="black")
 
     def create_stats_view(self):
         """创建统计视图（图表 + 详情列表）— 15.6寸屏幕布局"""
@@ -3809,7 +3969,7 @@ foreach ($tokenName in $targets.Keys) {
         ).pack(side=tk.LEFT)
         self.learn_db_type_combo = ttk.Combobox(
             self.learn_db_type_frame,
-            values=["IT新闻简报", "Dell安全公告", "CVE漏洞数据", "AI分析记录", "学习对话记录"],
+            values=["IT新闻简报", "Dell安全公告", "Dell技术库", "CVE漏洞数据", "AI分析记录", "学习对话记录"],
             state="readonly", width=13, font=("Microsoft YaHei", 9)
         )
         self.learn_db_type_combo.current(0)
@@ -4030,6 +4190,13 @@ foreach ($tokenName in $targets.Keys) {
                     for dsa_id, title in cursor.fetchall():
                         display = f"{dsa_id} - {(title or '')[:35]}"
                         items.append(display)
+                elif db_type == "Dell技术库":
+                    cursor.execute(
+                        "SELECT article_id, title FROM dell_kb_articles ORDER BY collected_date DESC LIMIT 200"
+                    )
+                    for aid, title in cursor.fetchall():
+                        display = f"{aid} - {(title or '')[:35]}"
+                        items.append(display)
                 elif db_type == "CVE漏洞数据":
                     cursor.execute(
                         "SELECT cve_id FROM cves ORDER BY published_date DESC LIMIT 200"
@@ -4154,6 +4321,28 @@ foreach ($tokenName in $targets.Keys) {
                         self._learn_set_preview(f"未找到公告 {dsa_id}。")
                         return
                     topic_hint = f"Dell安全公告分析 ({dsa_id})"
+
+                elif db_type == "Dell技术库":
+                    # sub_val 格式 "000261124 - 标题..."
+                    article_id = sub_val.split(" - ")[0].strip()
+                    cursor.execute(
+                        "SELECT article_id, title, content, solution, url FROM dell_kb_articles WHERE article_id = ?",
+                        (article_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        aid, title, content, solution, url = row
+                        content_lines.append(f"【Dell技术库文章: {aid}】")
+                        content_lines.append(f"标题: {title or 'N/A'}")
+                        content_lines.append(f"链接: {url or 'N/A'}")
+                        if content:
+                            content_lines.append(f"\n【正文内容】\n{content[:8000]}")
+                        if solution:
+                            content_lines.append(f"\n【解决方案】\n{solution[:3000]}")
+                    else:
+                        self._learn_set_preview(f"未找到文章 {article_id}。")
+                        return
+                    topic_hint = f"Dell技术文档学习 ({article_id})"
 
                 elif db_type == "CVE漏洞数据":
                     # sub_val 是 CVE ID 如 "CVE-2026-1234"
@@ -5164,6 +5353,334 @@ foreach ($tokenName in $targets.Keys) {
         else:
             self.dell_fetch_status.config(text=message, fg=self.danger_color)
             self.log(f"URL抓取: {message}")
+
+    # ==================== Dell技术库 抓取功能 ====================
+
+    def fetch_dell_kb_from_url(self):
+        """从URL抓取Dell技术库文章"""
+        url = self.kb_url_entry.get().strip()
+        placeholder = "https://www.dell.com/support/kbdoc/zh-cn/..."
+        if not url or url == placeholder:
+            messagebox.showwarning("请输入URL", "请先输入Dell技术库文章的URL")
+            return
+        if not url.startswith("http"):
+            messagebox.showwarning("URL格式错误", "请输入有效的HTTP/HTTPS URL")
+            return
+        self.kb_fetch_btn.config(state=tk.DISABLED)
+        self.kb_fetch_status.config(text="⏳ 正在抓取文章内容...", fg=self.info_color)
+        self.log(f"开始抓取Dell技术库文章: {url}")
+        threading.Thread(
+            target=self._fetch_kb_article_thread, args=(url,), daemon=True
+        ).start()
+
+    def _fetch_kb_article_thread(self, url: str):
+        """后台线程：抓取Dell技术库文章"""
+        try:
+            content = ""
+            exa_api_key = os.getenv("EXA_API_KEY")
+            if exa_api_key:
+                self.log_queue.put("使用Exa API获取技术文章...")
+                content = self._fetch_with_exa(url, exa_api_key)
+            if not content:
+                self.log_queue.put("使用HTTP请求获取技术文章...")
+                content = self._fetch_with_requests(url)
+            if not content:
+                self.root.after(0, self._kb_fetch_done, None,
+                                "❌ 无法获取页面内容，请检查URL是否有效")
+                return
+
+            # 提取文章编号
+            article_id = self._extract_kb_article_id(url)
+            if not article_id:
+                self.root.after(0, self._kb_fetch_done, None,
+                                "⚠️ 未能从URL提取文章编号")
+                return
+
+            # 解析标题和解决方案
+            title, solution = self._parse_kb_article_content(content, article_id)
+
+            article = {
+                'article_id': article_id,
+                'title': title,
+                'content': content,
+                'solution': solution,
+                'url': url,
+                'collected_date': datetime.now().isoformat()
+            }
+
+            is_new = self._store_kb_article_to_sqlite(article)
+            if is_new:
+                msg = f"✅ 文章已入库：{article_id}"
+            else:
+                msg = f"ℹ️ 文章已更新：{article_id}"
+            self.root.after(0, self._kb_fetch_done, article, msg)
+
+        except Exception as e:
+            import traceback
+            self.log_queue.put(f"技术库文章抓取异常: {traceback.format_exc()}")
+            self.root.after(0, self._kb_fetch_done, None, f"❌ 抓取失败: {str(e)}")
+
+    def _extract_kb_article_id(self, url: str) -> str:
+        """从URL中提取Dell技术库文章编号"""
+        # 匹配 /000261124/ 或 /000261124- 格式
+        match = re.search(r'/(\d{6,12})(?:[/-]|$)', url)
+        if match:
+            return match.group(1)
+        return ""
+
+    def _parse_kb_article_content(self, content: str, article_id: str) -> tuple:
+        """解析技术库文章内容，提取标题和解决方案"""
+        lines = content.strip().split('\n')
+
+        # 提取标题：查找包含文章编号或前几行中最有意义的标题
+        title = ""
+        for line in lines[:15]:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            # 优先匹配包含文章编号的行
+            if article_id in line_stripped:
+                title = line_stripped
+                break
+            # 或者找到较长的非导航行作为标题
+            if len(line_stripped) > 10 and not title:
+                # 跳过导航链接、面包屑等
+                if any(kw in line_stripped.lower() for kw in ['dell', 'support', 'kbdoc', 'powerstore',
+                                                               'poweredge', 'powerflex', 'idrac',
+                                                               'unity', 'vxrail', 'avamar',
+                                                               'networker', 'recoverpoint']):
+                    title = line_stripped
+                    break
+        if not title and lines:
+            # 回退：使用第一行非空内容
+            for line in lines[:5]:
+                if line.strip():
+                    title = line.strip()[:200]
+                    break
+
+        # 提取解决方案：搜索关键词分段
+        solution = ""
+        solution_keywords = ['解决方案', '解决办法', '解决步骤', '修复方法',
+                             'Resolution', 'Solution', 'Workaround', 'Fix',
+                             'resolution', 'solution', 'workaround', 'fix']
+        content_lower = content.lower()
+        best_pos = -1
+        for kw in solution_keywords:
+            pos = content_lower.find(kw.lower())
+            if pos != -1 and (best_pos == -1 or pos < best_pos):
+                best_pos = pos
+
+        if best_pos != -1:
+            # 从关键词位置开始提取内容
+            solution = content[best_pos:best_pos + 3000].strip()
+        else:
+            # 没有明确的解决方案段落，取后半部分内容
+            half = len(content) // 2
+            solution = content[half:half + 2000].strip() if len(content) > 500 else ""
+
+        return title[:500], solution[:5000]
+
+    def _store_kb_article_to_sqlite(self, article: dict) -> bool:
+        """存储技术库文章到SQLite（Upsert）"""
+        with self.db_lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    INSERT INTO dell_kb_articles
+                    (article_id, title, content, solution, url, collected_date)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(article_id) DO UPDATE SET
+                        title = excluded.title,
+                        content = excluded.content,
+                        solution = excluded.solution,
+                        url = excluded.url,
+                        collected_date = excluded.collected_date
+                ''', (
+                    article['article_id'],
+                    article.get('title', ''),
+                    article.get('content', ''),
+                    article.get('solution', ''),
+                    article.get('url', ''),
+                    article.get('collected_date', '')
+                ))
+                is_new = cursor.rowcount > 0
+                self.conn.commit()
+                return is_new
+            except sqlite3.Error as e:
+                self.log(f"存储技术库文章失败: {e}")
+                return False
+
+    def _kb_fetch_done(self, article, message: str):
+        """抓取完成后更新UI"""
+        self.kb_fetch_btn.config(state=tk.NORMAL)
+        if article:
+            self.kb_fetch_status.config(text=message, fg=self.success_color)
+            self.log(message)
+            # 刷新列表
+            self.load_dell_kb_from_database()
+        else:
+            self.kb_fetch_status.config(text=message, fg=self.danger_color)
+            self.log(f"技术库抓取: {message}")
+
+    def load_dell_kb_from_database(self):
+        """从数据库加载Dell技术库文章到TreeView"""
+        # 清空TreeView
+        for item in self.kb_tree.get_children():
+            self.kb_tree.delete(item)
+        self.dell_kb_data = []
+
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT article_id, title, content, solution, url, collected_date "
+                    "FROM dell_kb_articles ORDER BY collected_date DESC LIMIT 500"
+                )
+                rows = cursor.fetchall()
+
+            for row in rows:
+                article_id, title, content, solution, url, collected_date = row
+                # 格式化时间
+                time_str = collected_date
+                try:
+                    dt = datetime.fromisoformat(collected_date)
+                    time_str = dt.strftime('%Y-%m-%d %H:%M')
+                except (ValueError, TypeError):
+                    pass
+
+                # 解决方案预览
+                sol_preview = (solution or "")[:120].replace('\n', ' ')
+
+                self.kb_tree.insert(
+                    "", tk.END,
+                    values=(article_id, (title or "")[:100], sol_preview, time_str)
+                )
+                self.dell_kb_data.append({
+                    'article_id': article_id,
+                    'title': title or '',
+                    'content': content or '',
+                    'solution': solution or '',
+                    'url': url or '',
+                    'collected_date': collected_date or ''
+                })
+
+            self.log(f"Dell技术库已加载 {len(rows)} 条文章")
+        except Exception as e:
+            self.log(f"加载Dell技术库失败: {e}")
+
+    def filter_dell_kb_data(self):
+        """搜索Dell技术库文章"""
+        search_term = self.kb_search_entry.get().strip()
+        if not search_term:
+            self.load_dell_kb_from_database()
+            return
+
+        search_upper = search_term.upper()
+
+        # 清空TreeView
+        for item in self.kb_tree.get_children():
+            self.kb_tree.delete(item)
+
+        # 阶段1：内存搜索
+        results = []
+        for article in self.dell_kb_data:
+            if (search_upper in (article.get('article_id', '') or '').upper() or
+                search_upper in (article.get('title', '') or '').upper() or
+                search_upper in (article.get('content', '') or '').upper() or
+                search_upper in (article.get('solution', '') or '').upper()):
+                results.append(article)
+
+        if results:
+            for article in results[:500]:
+                time_str = article.get('collected_date', '')
+                try:
+                    dt = datetime.fromisoformat(time_str)
+                    time_str = dt.strftime('%Y-%m-%d %H:%M')
+                except (ValueError, TypeError):
+                    pass
+                sol_preview = (article.get('solution', '') or '')[:120].replace('\n', ' ')
+                self.kb_tree.insert(
+                    "", tk.END,
+                    values=(article['article_id'], (article.get('title', '') or '')[:100],
+                            sol_preview, time_str)
+                )
+            self.log(f"Dell技术库搜索到 {len(results)} 条匹配记录")
+            return
+
+        # 阶段2：数据库搜索
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                like_term = f'%{search_term}%'
+                cursor.execute(
+                    "SELECT article_id, title, content, solution, url, collected_date "
+                    "FROM dell_kb_articles "
+                    "WHERE article_id LIKE ? OR title LIKE ? OR content LIKE ? OR solution LIKE ? "
+                    "ORDER BY collected_date DESC LIMIT 200",
+                    (like_term, like_term, like_term, like_term)
+                )
+                rows = cursor.fetchall()
+
+            for row in rows:
+                article_id, title, content, solution, url, collected_date = row
+                time_str = collected_date
+                try:
+                    dt = datetime.fromisoformat(collected_date)
+                    time_str = dt.strftime('%Y-%m-%d %H:%M')
+                except (ValueError, TypeError):
+                    pass
+                sol_preview = (solution or "")[:120].replace('\n', ' ')
+                self.kb_tree.insert(
+                    "", tk.END,
+                    values=(article_id, (title or "")[:100], sol_preview, time_str)
+                )
+            self.log(f"数据库搜索到 {len(rows)} 条Dell技术库匹配记录")
+        except Exception as e:
+            self.log(f"数据库搜索Dell技术库失败: {e}")
+
+    def delete_dell_kb_selected(self):
+        """删除选中的Dell技术库文章（支持多选）"""
+        selected = self.kb_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先选择要删除的文章（支持 Ctrl/Shift 多选）")
+            return
+
+        count = len(selected)
+        if not messagebox.askyesno(
+            "确认删除",
+            f"确定要永久删除选中的 {count} 篇技术库文章吗？\n此操作不可撤销。"
+        ):
+            return
+
+        ids_to_delete = []
+        for iid in selected:
+            values = self.kb_tree.item(iid, 'values')
+            if values:
+                ids_to_delete.append(values[0])
+
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.executemany(
+                    "DELETE FROM dell_kb_articles WHERE article_id = ?",
+                    [(aid,) for aid in ids_to_delete]
+                )
+                self.conn.commit()
+        except sqlite3.Error as e:
+            messagebox.showerror("删除失败", f"数据库操作失败：{e}")
+            return
+
+        # 更新内存
+        id_set = set(ids_to_delete)
+        self.dell_kb_data = [a for a in self.dell_kb_data if a.get('article_id') not in id_set]
+
+        # 从TreeView删除
+        for iid in selected:
+            self.kb_tree.delete(iid)
+
+        preview = ', '.join(ids_to_delete[:5])
+        suffix = '...' if count > 5 else ''
+        self.log(f"已删除 {count} 篇技术库文章：{preview}{suffix}")
 
     # ==================== Dell 安全公告采集功能 ====================
 
@@ -6768,6 +7285,222 @@ Dell 安全公告详细信息
 
     # ==================== AI解决方案功能 ====================
 
+    def dell_kb_ai_solution_click(self):
+        """Dell技术库 AI解决方案按钮点击事件"""
+        selection = self.kb_tree.selection()
+        if not selection:
+            messagebox.showwarning("提示", "请先选择要分析的技术库文章")
+            return
+
+        item = self.kb_tree.item(selection[0])
+        article_id_raw = str(item['values'][0])
+
+        # 从内存中查找（兼容 TreeView 去掉前导零的情况）
+        article = None
+        for a in self.dell_kb_data:
+            stored_id = a.get('article_id', '')
+            if stored_id == article_id_raw or stored_id.lstrip('0') == article_id_raw.lstrip('0'):
+                article = a
+                break
+
+        # 内存中未找到，从数据库查询（精确 + 模糊）
+        if not article:
+            try:
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    # 先精确匹配
+                    cursor.execute(
+                        "SELECT article_id, title, content, solution, url FROM dell_kb_articles WHERE article_id = ?",
+                        (article_id_raw,)
+                    )
+                    row = cursor.fetchone()
+                    # 回退：LIKE 模糊匹配（处理前导零差异）
+                    if not row:
+                        cursor.execute(
+                            "SELECT article_id, title, content, solution, url FROM dell_kb_articles WHERE article_id LIKE ?",
+                            (f'%{article_id_raw}%',)
+                        )
+                        row = cursor.fetchone()
+                    if row:
+                        article = {
+                            'article_id': row[0], 'title': row[1],
+                            'content': row[2], 'solution': row[3], 'url': row[4]
+                        }
+            except Exception as e:
+                self.log(f"查询技术库文章失败: {e}")
+
+        if not article:
+            messagebox.showerror("错误", f"无法找到文章 {article_id_raw} 的详细数据")
+            return
+
+        self.log(f"正在调用AI分析技术库文章: {article_id_raw}...")
+        threading.Thread(
+            target=self._call_dell_kb_ai_solution_thread,
+            args=(article,), daemon=True
+        ).start()
+
+    def _call_dell_kb_ai_solution_thread(self, article):
+        """后台线程调用AI分析Dell技术库文章"""
+        try:
+            model_name = os.getenv("QWEN_MODEL", "qwen3.5-plus")
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+            if not api_key:
+                raise ValueError("Qwen API密钥未设置。请在 .env 文件中设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY。")
+
+            article_id = article.get('article_id', 'N/A')
+            title = article.get('title', '无标题')
+            content = article.get('content', '')
+            solution = article.get('solution', '')
+            url = article.get('url', '')
+
+            # 截断避免超长
+            if len(content) > 3000:
+                content = content[:3000] + "..."
+            if len(solution) > 2000:
+                solution = solution[:2000] + "..."
+
+            prompt = f"""请对以下Dell技术文档进行专业分析，提供深入的技术理解和操作建议：
+
+【文章信息】
+- 文章编号: {article_id}
+- 标题: {title}
+- 原文链接: {url}
+
+【文章内容】
+{content}
+
+【文档中的解决方案】
+{solution if solution else '文档未提供明确的解决方案段落'}
+
+【分析要求】
+请提供以下内容：
+1. 问题概述：简要说明该技术文档描述的问题或场景
+2. 根因分析：分析问题产生的根本原因
+3. 解决方案详解：对文档中的解决方案进行详细解读和补充
+4. 操作步骤建议：给出清晰的操作步骤
+5. 注意事项：执行过程中需要注意的风险和前提条件
+6. 相关知识扩展：与该问题相关的技术背景知识
+
+请以专业、结构清晰的格式组织答案。"""
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=120)
+            analysis_date = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": f"你是一个Dell企业级产品技术专家，精通Dell服务器、存储、网络等产品线的技术支持。当前分析日期: {analysis_date}。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+
+            result = response.choices[0].message.content
+
+            # 构造兼容 _show_ai_solution_result 的数据结构
+            cve_data = {'cve_id': f"KB-{article.get('article_id', 'N/A')}"}
+            dell_data = {'dell_security_advisory': 'Dell技术库', 'dsa_id': 'Dell技术库'}
+            self.root.after(0, self._show_ai_solution_result, result, cve_data, dell_data)
+
+        except ImportError:
+            err = "openai库未安装。请运行: pip install openai"
+            self.root.after(0, self.log, err)
+            self.root.after(0, messagebox.showerror, "错误", err)
+        except Exception as e:
+            error_msg = f"AI分析技术库文章失败: {str(e)}"
+            self.root.after(0, self.log, error_msg)
+            self.root.after(0, messagebox.showerror, "错误", error_msg)
+
+    def on_dell_kb_item_double_click(self, event):
+        """双击查看Dell技术库文章详情"""
+        selection = self.kb_tree.selection()
+        if not selection:
+            return
+
+        item = self.kb_tree.item(selection[0])
+        article_id = str(item['values'][0])
+
+        # 从内存中查找（兼容前导零差异）
+        article = None
+        for a in self.dell_kb_data:
+            stored_id = a.get('article_id', '')
+            if stored_id == article_id or stored_id.lstrip('0') == article_id.lstrip('0'):
+                article = a
+                break
+
+        if not article:
+            try:
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        "SELECT article_id, title, content, solution, url, collected_date "
+                        "FROM dell_kb_articles WHERE article_id = ?",
+                        (article_id,)
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        cursor.execute(
+                            "SELECT article_id, title, content, solution, url, collected_date "
+                            "FROM dell_kb_articles WHERE article_id LIKE ?",
+                            (f'%{article_id}%',)
+                        )
+                        row = cursor.fetchone()
+                    if row:
+                        article = {
+                            'article_id': row[0], 'title': row[1],
+                            'content': row[2], 'solution': row[3],
+                            'url': row[4], 'collected_date': row[5]
+                        }
+            except Exception as e:
+                self.log(f"查询技术库文章详情失败: {e}")
+
+        if not article:
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Dell技术库 - {article_id}")
+        dialog.geometry("1000x700")
+        dialog.transient(self.root)
+
+        # 标题栏
+        header = f"文章编号: {article_id}  |  {article.get('title', '')}"
+        tk.Label(
+            dialog, text=header,
+            font=("Microsoft YaHei", 11, "bold"),
+            bg="#2c3e50", fg="white", padx=10, pady=10
+        ).pack(fill=tk.X)
+
+        # 内容区域
+        text_frame = tk.Frame(dialog)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        text = scrolledtext.ScrolledText(
+            text_frame, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa"
+        )
+        text.pack(fill=tk.BOTH, expand=True)
+
+        text.insert(tk.END, f"【文章编号】{article_id}\n")
+        text.insert(tk.END, f"【标题】{article.get('title', '')}\n")
+        text.insert(tk.END, f"【URL】{article.get('url', '')}\n")
+        text.insert(tk.END, f"【采集时间】{article.get('collected_date', '')}\n")
+        text.insert(tk.END, f"\n{'=' * 60}\n【正文内容】\n{'=' * 60}\n\n")
+        text.insert(tk.END, article.get('content', '无内容'))
+        if article.get('solution'):
+            text.insert(tk.END, f"\n\n{'=' * 60}\n【解决方案】\n{'=' * 60}\n\n")
+            text.insert(tk.END, article['solution'])
+        text.config(state=tk.DISABLED)
+
+        # 关闭按钮
+        tk.Button(
+            dialog, text="关闭", command=dialog.destroy,
+            bg="#95a5a6", fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=20, pady=5, relief=tk.FLAT, cursor="hand2"
+        ).pack(pady=10)
+
     def nvd_ai_solution_click(self):
         """NVD标签页 AI解决方案按钮点击事件"""
         try:
@@ -7314,22 +8047,56 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
                     break
 
     def export_solution_history(self):
-        """导出解决方案历史记录"""
+        """导出解决方案历史记录（支持导出全部或选中条目）"""
         try:
+            # 判断是否有选中条目
+            selected_iids = self.solution_tree.selection()
+            if selected_iids:
+                choice = messagebox.askyesnocancel(
+                    "导出范围",
+                    f"当前选中了 {len(selected_iids)} 条记录。\n\n"
+                    f"• 点击「是」— 仅导出选中的 {len(selected_iids)} 条\n"
+                    f"• 点击「否」— 导出全部 {len(self.solution_history)} 条\n"
+                    f"• 点击「取消」— 取消导出"
+                )
+                if choice is None:
+                    return
+                if choice:
+                    # 根据选中行的索引获取对应的 solution_history 条目
+                    all_iids = self.solution_tree.get_children()
+                    selected_indices = set()
+                    for iid in selected_iids:
+                        try:
+                            selected_indices.add(all_iids.index(iid))
+                        except ValueError:
+                            pass
+                    export_data = [self.solution_history[i] for i in sorted(selected_indices)
+                                   if i < len(self.solution_history)]
+                else:
+                    export_data = self.solution_history
+            else:
+                export_data = self.solution_history
+
+            if not export_data:
+                messagebox.showwarning("提示", "没有可导出的记录")
+                return
+
             filepath = filedialog.asksaveasfilename(
-                defaultextension=".txt",
-                filetypes=[("文本文件", "*.txt"), ("CSV文件", "*.csv"), ("所有文件", "*.*")]
+                defaultextension=".html",
+                filetypes=[("HTML文件", "*.html"), ("文本文件", "*.txt"), ("CSV文件", "*.csv"), ("所有文件", "*.*")]
             )
 
             if not filepath:
                 return
 
             with open(filepath, 'w', encoding='utf-8') as f:
-                if filepath.endswith('.csv'):
+                if filepath.endswith('.html'):
+                    self._export_solution_as_html(f, export_data)
+                elif filepath.endswith('.csv'):
                     import csv
                     writer = csv.writer(f)
                     writer.writerow(['分析时间', 'CVE编号', '公告编号', '分析状态', '结果'])
-                    for history in self.solution_history:
+                    for history in export_data:
                         writer.writerow([
                             history['time'],
                             history['cve_id'],
@@ -7338,7 +8105,7 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
                             history['result'][:200]
                         ])
                 else:
-                    for history in self.solution_history:
+                    for history in export_data:
                         f.write(f"\n{'=' * 80}\n")
                         f.write(f"CVE编号: {history['cve_id']}\n")
                         f.write(f"公告编号: {history['advisory_id']}\n")
@@ -7346,13 +8113,97 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
                         f.write(f"状态: {history['status']}\n")
                         f.write(f"\n{history['result']}\n")
 
-            self.log(f"解决方案历史记录已导出: {filepath}")
-            messagebox.showinfo("成功", f"历史记录已导出到:\n{filepath}")
+            count_msg = f"{len(export_data)} 条记录"
+            self.log(f"解决方案历史记录已导出 ({count_msg}): {filepath}")
+            messagebox.showinfo("成功", f"已导出 {count_msg} 到:\n{filepath}")
 
         except Exception as e:
             error_msg = f"导出历史记录失败: {str(e)}"
             self.log(error_msg)
             messagebox.showerror("错误", error_msg)
+
+    def _export_solution_as_html(self, f, export_data):
+        """将解决方案历史记录导出为 HTML 格式"""
+        import html as html_module
+        from datetime import datetime
+
+        export_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        total = len(export_data)
+        success_count = sum(1 for h in export_data if h['status'] == '成功')
+        fail_count = total - success_count
+
+        f.write(f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 解决方案历史记录</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: "Microsoft YaHei", "Segoe UI", sans-serif; background: #f5f7fa; color: #333; line-height: 1.6; padding: 20px; }}
+  .container {{ max-width: 1100px; margin: 0 auto; }}
+  .header {{ background: linear-gradient(135deg, #2c3e50, #3498db); color: white; padding: 30px; border-radius: 10px; margin-bottom: 25px; }}
+  .header h1 {{ font-size: 24px; margin-bottom: 8px; }}
+  .header .meta {{ font-size: 13px; opacity: 0.85; }}
+  .stats {{ display: flex; gap: 15px; margin-bottom: 25px; }}
+  .stat-card {{ flex: 1; background: white; border-radius: 8px; padding: 18px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
+  .stat-card .num {{ font-size: 28px; font-weight: bold; }}
+  .stat-card .label {{ font-size: 13px; color: #888; margin-top: 4px; }}
+  .stat-card.total .num {{ color: #3498db; }}
+  .stat-card.success .num {{ color: #27ae60; }}
+  .stat-card.fail .num {{ color: #e74c3c; }}
+  .card {{ background: white; border-radius: 8px; margin-bottom: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden; }}
+  .card-header {{ display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; border-bottom: 1px solid #eee; }}
+  .card-header .ids {{ font-weight: bold; font-size: 15px; }}
+  .card-header .cve {{ color: #e74c3c; }}
+  .card-header .advisory {{ color: #8e44ad; margin-left: 12px; }}
+  .badge {{ display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }}
+  .badge.success {{ background: #e8f8f0; color: #27ae60; }}
+  .badge.fail {{ background: #fdecea; color: #e74c3c; }}
+  .card-meta {{ padding: 10px 20px; font-size: 13px; color: #888; background: #fafbfc; }}
+  .card-body {{ padding: 20px; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; line-height: 1.8; }}
+  .footer {{ text-align: center; margin-top: 30px; padding: 15px; color: #aaa; font-size: 12px; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>AI 解决方案历史记录</h1>
+    <div class="meta">导出时间：{export_time} | 智能知识管理平台</div>
+  </div>
+  <div class="stats">
+    <div class="stat-card total"><div class="num">{total}</div><div class="label">总记录数</div></div>
+    <div class="stat-card success"><div class="num">{success_count}</div><div class="label">分析成功</div></div>
+    <div class="stat-card fail"><div class="num">{fail_count}</div><div class="label">分析失败</div></div>
+  </div>
+""")
+
+        for i, history in enumerate(export_data, 1):
+            cve_id = html_module.escape(history['cve_id'])
+            advisory_id = html_module.escape(history['advisory_id'])
+            time_str = html_module.escape(history['time'])
+            status = history['status']
+            result = html_module.escape(history['result'])
+            badge_cls = "success" if status == "成功" else "fail"
+
+            f.write(f"""  <div class="card">
+    <div class="card-header">
+      <div class="ids">
+        <span class="cve">{cve_id}</span>
+        <span class="advisory">{advisory_id}</span>
+      </div>
+      <span class="badge {badge_cls}">{html_module.escape(status)}</span>
+    </div>
+    <div class="card-meta">分析时间：{time_str}</div>
+    <div class="card-body">{result}</div>
+  </div>
+""")
+
+        f.write("""  <div class="footer">由智能知识管理平台生成</div>
+</div>
+</body>
+</html>
+""")
 
     def clear_solution_history(self):
         """清空解决方案历史记录"""
@@ -7893,8 +8744,13 @@ CVE 描述:
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_message = f"[{timestamp}] {message}\n"
 
-        self.log_text.insert(tk.END, log_message)
-        self.log_text.see(tk.END)
+        if hasattr(self, 'log_text') and self.log_text:
+            self.log_text.insert(tk.END, log_message)
+            self.log_text.see(tk.END)
+        else:
+            # 控件尚未创建，写入队列
+            if hasattr(self, 'log_queue'):
+                self.log_queue.put(message)
 
     def clear_log(self):
         """清空日志"""

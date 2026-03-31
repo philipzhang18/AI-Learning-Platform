@@ -1,5 +1,5 @@
 """
-智能知识学习平台 - 主应用入口
+智能知识管理平台 - 主应用入口
 """
 import asyncio
 import os
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # 模拟配置（实际应从 config 模块导入）
 class Settings:
-    PROJECT_NAME = "智能知识学习平台"
+    PROJECT_NAME = "智能知识管理平台"
     VERSION = "1.0.0"
     API_V1_STR = "/api/v1"
     BACKEND_CORS_ORIGINS = ["http://localhost:3000", "http://localhost:8000"]

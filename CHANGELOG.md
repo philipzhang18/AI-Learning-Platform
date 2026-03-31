@@ -1,9 +1,36 @@
 # Changelog
 
+## [v5.1.0] - 2026-03-30
+
+### Added
+- 新增「📖 Dell技术库」标签页（位于解决方案和统计分析之间）
+  - 单条 Dell kbdoc URL 抓取：Exa API 优先，requests 回退
+  - 自动提取文章编号（如 000261124）作为主键
+  - 解析正文内容和解决方案段落
+  - TreeView 展示：文章编号、标题、解决方案预览、采集时间
+  - 搜索功能：内存优先，数据库 LIKE 回退
+  - 删除选中：支持 Ctrl/Shift 多选
+  - AI 解决方案：调用 Qwen API 分析技术文档，结果存入解决方案标签页
+  - 双击查看完整文章详情
+- 新增数据库表 `dell_kb_articles`（article_id, title, content, solution, url, collected_date）
+- 智能学习数据源新增 "Dell技术库" 选项
+- 解决方案导出支持 HTML 格式（美观卡片布局 + 统计面板）
+- 解决方案导出支持选中条目导出（全部/选中/取消三选对话框）
+
+### Fixed
+- 修复 `log()` 方法在控件未创建时崩溃的问题（添加 `hasattr` 安全检查）
+- 修复 Dell 技术库 AI 解决方案/双击详情因 TreeView 前导零丢失导致文章查找失败的问题
+- 修复 `dell_kb_ai_solution_click` 中变量名 `article_id` 未定义的 NameError
+
+### Changed
+- 解决方案标签页「CVE 编号」列名改为「方案编号」
+
+---
+
 ## [v5.0.0] - 2026-03-14
 
 ### Changed
-- 项目重命名为"智能知识学习平台"（原 CVE 监控系统）
+- 项目重命名为"智能知识管理平台"（原 CVE 监控系统）
 - 统一更新所有文件中的项目名称（GUI、main.py、启动脚本、配置文档）
 - 项目定位调整：以知识学习为核心，CVE/Dell 数据作为学习内容之一
 
