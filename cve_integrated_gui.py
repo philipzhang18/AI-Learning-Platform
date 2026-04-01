@@ -3807,64 +3807,85 @@ foreach ($tokenName in $targets.Keys) {
         for ci, (h, w) in enumerate([("表名", 16), ("条目数", 10), ("估算大小", 10)]):
             tk.Label(table_frame, text=h, bg="#f0f0f0", fg="#333",
                      font=("Microsoft YaHei", 9, "bold"), width=w, padx=8, pady=2,
-                     relief=tk.GROOVE).grid(row=0, column=ci, sticky="nsew")
+                     relief=tk.GROOVE, anchor="center").grid(row=0, column=ci, sticky="nsew")
 
         tables = [
             ("cves", "CVE 漏洞"),
             ("dell_advisories", "Dell 安全公告"),
             ("dell_kb_articles", "Dell 技术库"),
-            ("collection_history", "采集历史"),
             ("ai_solutions", "AI 解决方案"),
             ("news_briefs", "新闻简报"),
             ("podcast_scripts", "播客脚本"),
             ("learn_sessions", "学习对话"),
         ]
 
+        # 先收集每个表的行数和字节数
+        page_size = 4096
+        try:
+            page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
+        except:
+            pass
+
+        table_data = []  # [(display_name, cnt, tbl_bytes), ...]
         total_rows = 0
-        for ri, (tbl, display_name) in enumerate(tables):
+        total_bytes = 0
+
+        for tbl, display_name in tables:
             try:
                 cnt = self.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
             except:
                 cnt = 0
             total_rows += cnt
 
-            # 估算大小
+            tbl_bytes = 0
             try:
                 pages = self.conn.execute(
-                    f"SELECT COUNT(*) FROM dbstat WHERE name = ?", (tbl,)
+                    "SELECT COUNT(*) FROM dbstat WHERE name = ?", (tbl,)
                 ).fetchone()[0]
-                page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
                 tbl_bytes = pages * page_size
-                if tbl_bytes >= 1048576:
-                    size_str = f"{tbl_bytes / 1048576:.1f} MB"
-                elif tbl_bytes >= 1024:
-                    size_str = f"{tbl_bytes / 1024:.0f} KB"
-                else:
-                    size_str = f"{tbl_bytes} B"
             except:
-                size_str = "-"
+                # dbstat 不可用时按行数比例估算
+                tbl_bytes = cnt * 512 if cnt > 0 else page_size
+            total_bytes += tbl_bytes
+            table_data.append((display_name, cnt, tbl_bytes))
+
+        # 渲染表格行
+        for ri, (display_name, cnt, tbl_bytes) in enumerate(table_data):
+            if tbl_bytes >= 1048576:
+                size_str = f"{tbl_bytes / 1048576:.1f} MB"
+            elif tbl_bytes >= 1024:
+                size_str = f"{tbl_bytes / 1024:.0f} KB"
+            else:
+                size_str = f"{tbl_bytes} B"
 
             bg = "white" if ri % 2 == 0 else "#fafafa"
             tk.Label(table_frame, text=display_name, bg=bg, fg=val_fg,
                      font=("Microsoft YaHei", 9), padx=8, pady=1,
-                     anchor="w").grid(row=ri + 1, column=0, sticky="nsew")
+                     anchor="center").grid(row=ri + 1, column=0, sticky="nsew")
             tk.Label(table_frame, text=f"{cnt:,}", bg=bg, fg=val_fg,
                      font=info_font, padx=8, pady=1,
-                     anchor="e").grid(row=ri + 1, column=1, sticky="nsew")
+                     anchor="center").grid(row=ri + 1, column=1, sticky="nsew")
             tk.Label(table_frame, text=size_str, bg=bg, fg="#888",
                      font=info_font, padx=8, pady=1,
-                     anchor="e").grid(row=ri + 1, column=2, sticky="nsew")
+                     anchor="center").grid(row=ri + 1, column=2, sticky="nsew")
 
         # 合计行
+        if total_bytes >= 1048576:
+            total_size_str = f"{total_bytes / 1048576:.1f} MB"
+        elif total_bytes >= 1024:
+            total_size_str = f"{total_bytes / 1024:.0f} KB"
+        else:
+            total_size_str = f"{total_bytes} B"
+
         tk.Label(table_frame, text="合计", bg="#e8e8e8", fg="#333",
                  font=("Microsoft YaHei", 9, "bold"), padx=8, pady=2,
-                 anchor="w").grid(row=len(tables) + 1, column=0, sticky="nsew")
+                 anchor="center").grid(row=len(tables) + 1, column=0, sticky="nsew")
         tk.Label(table_frame, text=f"{total_rows:,}", bg="#e8e8e8", fg="#333",
                  font=("Consolas", 10, "bold"), padx=8, pady=2,
-                 anchor="e").grid(row=len(tables) + 1, column=1, sticky="nsew")
-        tk.Label(table_frame, text=db_size_str, bg="#e8e8e8", fg="#333",
+                 anchor="center").grid(row=len(tables) + 1, column=1, sticky="nsew")
+        tk.Label(table_frame, text=total_size_str, bg="#e8e8e8", fg="#333",
                  font=("Consolas", 10, "bold"), padx=8, pady=2,
-                 anchor="e").grid(row=len(tables) + 1, column=2, sticky="nsew")
+                 anchor="center").grid(row=len(tables) + 1, column=2, sticky="nsew")
 
         for ci in range(3):
             table_frame.columnconfigure(ci, weight=1)
