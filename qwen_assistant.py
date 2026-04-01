@@ -22,16 +22,22 @@ from llm_config import QWEN_API_KEY, QWEN_BASE_URL, QWEN_MODEL
 class QwenAssistant:
     """Qwen AI 助手"""
 
-    def __init__(self):
-        """初始化 Qwen 助手"""
+    def __init__(self, verbose: bool = True):
+        """初始化 Qwen 助手
+
+        Args:
+            verbose: 是否打印初始化信息（作为库导入时建议设为 False）
+        """
         self.client = OpenAI(
             api_key=QWEN_API_KEY,
-            base_url=QWEN_BASE_URL
+            base_url=QWEN_BASE_URL,
+            timeout=60
         )
-        self.model = QWEN_MODEL  # 使用配置中的模型（如 qwen3-coder-plus）
+        self.model = QWEN_MODEL
         self.conversation_history = []
-        print("🤖 Qwen 助手已就绪！")
-        print("-" * 60)
+        if verbose:
+            print("Qwen 助手已就绪！")
+            print("-" * 60)
 
     def chat(self, user_input: str, system_prompt: str = None) -> str:
         """与 Qwen 对话"""
@@ -54,6 +60,8 @@ class QwenAssistant:
                 max_tokens=2000
             )
 
+            if not response.choices:
+                return "错误: API 返回空响应"
             assistant_reply = response.choices[0].message.content
 
             # 更新对话历史

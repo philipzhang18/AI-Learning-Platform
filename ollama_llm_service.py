@@ -1,14 +1,14 @@
 """
 Ollama LLM 服务集成
 使用本地 GPU 加速的 LLM 进行 CVE 分析
+支持向量嵌入存储（SQLite）和相似度搜索
 """
 import os
-import requests
 import json
+import math
+import sqlite3
+import requests
 from typing import List, Dict, Any, Optional
-import psycopg2
-from psycopg2.extras import execute_values
-import numpy as np
 
 
 class OllamaLLMService:
@@ -29,16 +29,16 @@ class OllamaLLMService:
         try:
             response = requests.get(f"{self.base_url}/api/tags", timeout=5)
             return response.status_code == 200
-        except:
+        except Exception:
             return False
 
     def list_models(self) -> List[str]:
         """列出已安装的模型"""
         try:
-            response = requests.get(f"{self.base_url}/api/tags")
+            response = requests.get(f"{self.base_url}/api/tags", timeout=30)
             data = response.json()
             return [model['name'] for model in data.get('models', [])]
-        except:
+        except Exception:
             return []
 
     def pull_model(self, model_name: str) -> bool:
@@ -55,13 +55,13 @@ class OllamaLLMService:
             response = requests.post(
                 f"{self.base_url}/api/pull",
                 json={"name": model_name},
-                stream=True
+                stream=True,
+                timeout=600
             )
 
             for line in response.iter_lines():
                 if line:
                     data = json.loads(line)
-                    status = data.get('status', '')
                     if 'total' in data and 'completed' in data:
                         progress = (data['completed'] / data['total']) * 100
                         print(f"\r进度: {progress:.1f}%", end='')
@@ -87,7 +87,8 @@ class OllamaLLMService:
                 json={
                     "model": self.embeddings_model,
                     "prompt": text
-                }
+                },
+                timeout=30
             )
 
             if response.status_code == 200:
@@ -145,7 +146,8 @@ class OllamaLLMService:
                     "model": self.chat_model,
                     "messages": messages,
                     "stream": stream
-                }
+                },
+                timeout=120
             )
 
             if stream:
@@ -156,7 +158,7 @@ class OllamaLLMService:
                         content = data.get('message', {}).get('content', '')
                         full_response += content
                         print(content, end='', flush=True)
-                print()  # 换行
+                print()
                 return full_response
             else:
                 data = response.json()
@@ -207,31 +209,57 @@ CVSS 评分: {cvss_score}
 
 
 class VectorDatabaseManager:
-    """PostgreSQL + pgvector 向量数据库管理"""
+    """SQLite 向量数据库管理（存储嵌入向量，Python 层面余弦相似度搜索）"""
 
-    def __init__(self, db_url: str):
+    def __init__(self, db_path: str = "cve_data/cve_database.db"):
         """初始化数据库连接
 
         Args:
-            db_url: PostgreSQL 连接 URL
+            db_path: SQLite 数据库路径
         """
-        self.db_url = db_url
+        self.db_path = db_path
         self.conn = None
 
-    def connect(self):
-        """连接数据库"""
+    def connect(self) -> bool:
+        """连接数据库并初始化表结构"""
         try:
-            self.conn = psycopg2.connect(self.db_url)
-            print("[OK] PostgreSQL 连接成功")
+            self.conn = sqlite3.connect(self.db_path)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self._create_table()
+            print(f"[OK] SQLite 向量数据库连接成功: {self.db_path}")
             return True
         except Exception as e:
-            print(f"[ERROR] PostgreSQL 连接失败: {e}")
+            print(f"[ERROR] SQLite 连接失败: {e}")
             return False
+
+    def _create_table(self):
+        """创建嵌入向量存储表"""
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS cve_embeddings (
+                cve_id TEXT PRIMARY KEY,
+                title TEXT,
+                description TEXT,
+                embedding TEXT,
+                severity TEXT,
+                cvss_score REAL,
+                published_date TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        self.conn.commit()
 
     def close(self):
         """关闭连接"""
         if self.conn:
             self.conn.close()
+            self.conn = None
+
+    def __enter__(self):
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     def insert_cve_embedding(self, cve_id: str, title: str, description: str,
                             embedding: List[float], severity: str, cvss_score: float,
@@ -248,32 +276,19 @@ class VectorDatabaseManager:
             published_date: 发布日期
         """
         try:
-            cursor = self.conn.cursor()
-
-            # 转换向量为字符串格式
-            embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-
-            cursor.execute("""
-                INSERT INTO cve_embeddings
+            embedding_json = json.dumps(embedding)
+            self.conn.execute("""
+                INSERT OR REPLACE INTO cve_embeddings
                 (cve_id, title, description, embedding, severity, cvss_score, published_date)
-                VALUES (%s, %s, %s, %s::vector, %s, %s, %s)
-                ON CONFLICT (cve_id) DO UPDATE SET
-                    title = EXCLUDED.title,
-                    description = EXCLUDED.description,
-                    embedding = EXCLUDED.embedding,
-                    severity = EXCLUDED.severity,
-                    cvss_score = EXCLUDED.cvss_score,
-                    published_date = EXCLUDED.published_date
-            """, (cve_id, title, description, embedding_str, severity, cvss_score, published_date))
-
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (cve_id, title, description, embedding_json, severity, cvss_score, published_date))
             self.conn.commit()
         except Exception as e:
             print(f"插入嵌入失败: {e}")
-            self.conn.rollback()
 
     def search_similar_cves(self, query_embedding: List[float], limit: int = 10,
                            threshold: float = 0.7) -> List[Dict[str, Any]]:
-        """搜索相似的 CVE
+        """搜索相似的 CVE（余弦相似度）
 
         Args:
             query_embedding: 查询向量
@@ -281,33 +296,47 @@ class VectorDatabaseManager:
             threshold: 相似度阈值
 
         Returns:
-            相似 CVE 列表
+            相似 CVE 列表（按相似度降序）
         """
         try:
-            cursor = self.conn.cursor()
-
-            embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
-
-            cursor.execute("""
-                SELECT * FROM search_similar_cves(%s::vector, %s, %s)
-            """, (embedding_str, threshold, limit))
+            cursor = self.conn.execute(
+                "SELECT cve_id, title, description, embedding, severity, cvss_score, published_date "
+                "FROM cve_embeddings"
+            )
 
             results = []
             for row in cursor.fetchall():
-                results.append({
-                    'cve_id': row[0],
-                    'title': row[1],
-                    'description': row[2],
-                    'similarity': row[3],
-                    'severity': row[4],
-                    'cvss_score': row[5],
-                    'published_date': str(row[6])
-                })
+                stored_embedding = json.loads(row[3])
+                similarity = self._cosine_similarity(query_embedding, stored_embedding)
 
-            return results
+                if similarity >= threshold:
+                    results.append({
+                        'cve_id': row[0],
+                        'title': row[1],
+                        'description': row[2],
+                        'similarity': round(similarity, 4),
+                        'severity': row[4],
+                        'cvss_score': row[5],
+                        'published_date': row[6]
+                    })
+
+            results.sort(key=lambda x: x['similarity'], reverse=True)
+            return results[:limit]
         except Exception as e:
             print(f"搜索失败: {e}")
             return []
+
+    @staticmethod
+    def _cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+        """计算余弦相似度（纯 Python，无需 numpy）"""
+        if len(vec_a) != len(vec_b):
+            return 0.0
+        dot_product = sum(a * b for a, b in zip(vec_a, vec_b))
+        norm_a = math.sqrt(sum(a * a for a in vec_a))
+        norm_b = math.sqrt(sum(b * b for b in vec_b))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot_product / (norm_a * norm_b)
 
 
 # 测试代码
@@ -357,5 +386,5 @@ if __name__ == "__main__":
 
     else:
         print("[ERROR] Ollama 服务未运行")
-        print("请先启动 Ollama 服务:")
-        print("  docker-compose -f docker-compose-gpu.yml up -d ollama")
+        print("请确保 Ollama 已安装并启动:")
+        print("  ollama serve")

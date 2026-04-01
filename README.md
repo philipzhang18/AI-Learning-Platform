@@ -99,9 +99,8 @@ EXA_API_KEY=your_exa_api_key
 ├── dell_security_scraper.py   # Dell 安全公告爬虫
 ├── redis_manager.py           # Redis 缓存管理
 ├── llm_config.py              # LLM API 配置
-├── qwen_assistant.py          # Qwen AI 助手
-├── ollama_llm_service.py      # Ollama 本地模型集成
-├── main.py                    # FastAPI 后端
+├── qwen_assistant.py          # Qwen AI 助手（CLI）
+├── ollama_llm_service.py      # Ollama 本地模型 + 向量搜索
 ├── requirements.txt           # Python 依赖
 ├── .env.example               # 环境变量模板
 ├── CLAUDE.md                  # Claude 开发配置
