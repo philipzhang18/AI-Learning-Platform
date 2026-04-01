@@ -3819,16 +3819,22 @@ foreach ($tokenName in $targets.Keys) {
             ("learn_sessions", "学习对话"),
         ]
 
-        # 先收集每个表的行数和字节数
+        # 获取实际数据库文件大小作为合计基准
+        try:
+            actual_db_bytes = self.db_path.stat().st_size
+        except:
+            actual_db_bytes = 0
+
         page_size = 4096
         try:
             page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
         except:
             pass
 
-        table_data = []  # [(display_name, cnt, tbl_bytes), ...]
+        # 第一轮：收集每个表的 dbstat 原始页数
+        raw_table_bytes = []
         total_rows = 0
-        total_bytes = 0
+        raw_total = 0
 
         for tbl, display_name in tables:
             try:
@@ -3844,20 +3850,32 @@ foreach ($tokenName in $targets.Keys) {
                 ).fetchone()[0]
                 tbl_bytes = pages * page_size
             except:
-                # dbstat 不可用时按行数比例估算
-                tbl_bytes = cnt * 512 if cnt > 0 else page_size
-            total_bytes += tbl_bytes
-            table_data.append((display_name, cnt, tbl_bytes))
+                tbl_bytes = max(cnt * 512, page_size) if cnt > 0 else page_size
+            raw_total += tbl_bytes
+            raw_table_bytes.append((display_name, cnt, tbl_bytes))
+
+        # 第二轮：按比例缩放，使各表大小之和 = 实际数据库文件大小
+        scale = actual_db_bytes / raw_total if raw_total > 0 else 1.0
+        table_data = []
+        scaled_total = 0
+        for i, (display_name, cnt, raw_bytes) in enumerate(raw_table_bytes):
+            if i < len(raw_table_bytes) - 1:
+                scaled = int(raw_bytes * scale)
+            else:
+                # 最后一项用减法，确保精确相等
+                scaled = actual_db_bytes - scaled_total
+            scaled_total += scaled
+            table_data.append((display_name, cnt, scaled))
 
         # 渲染表格行
-        for ri, (display_name, cnt, tbl_bytes) in enumerate(table_data):
-            if tbl_bytes >= 1048576:
-                size_str = f"{tbl_bytes / 1048576:.1f} MB"
-            elif tbl_bytes >= 1024:
-                size_str = f"{tbl_bytes / 1024:.0f} KB"
-            else:
-                size_str = f"{tbl_bytes} B"
+        def _fmt_size(b):
+            if b >= 1048576:
+                return f"{b / 1048576:.1f} MB"
+            elif b >= 1024:
+                return f"{b / 1024:.0f} KB"
+            return f"{b} B"
 
+        for ri, (display_name, cnt, tbl_bytes) in enumerate(table_data):
             bg = "white" if ri % 2 == 0 else "#fafafa"
             tk.Label(table_frame, text=display_name, bg=bg, fg=val_fg,
                      font=("Microsoft YaHei", 9), padx=8, pady=1,
@@ -3865,17 +3883,12 @@ foreach ($tokenName in $targets.Keys) {
             tk.Label(table_frame, text=f"{cnt:,}", bg=bg, fg=val_fg,
                      font=info_font, padx=8, pady=1,
                      anchor="center").grid(row=ri + 1, column=1, sticky="nsew")
-            tk.Label(table_frame, text=size_str, bg=bg, fg="#888",
+            tk.Label(table_frame, text=_fmt_size(tbl_bytes), bg=bg, fg="#888",
                      font=info_font, padx=8, pady=1,
                      anchor="center").grid(row=ri + 1, column=2, sticky="nsew")
 
-        # 合计行
-        if total_bytes >= 1048576:
-            total_size_str = f"{total_bytes / 1048576:.1f} MB"
-        elif total_bytes >= 1024:
-            total_size_str = f"{total_bytes / 1024:.0f} KB"
-        else:
-            total_size_str = f"{total_bytes} B"
+        # 合计行（使用实际数据库文件大小）
+        total_size_str = _fmt_size(actual_db_bytes)
 
         tk.Label(table_frame, text="合计", bg="#e8e8e8", fg="#333",
                  font=("Microsoft YaHei", 9, "bold"), padx=8, pady=2,
