@@ -3730,12 +3730,9 @@ foreach ($tokenName in $targets.Keys) {
         label_font = ("Microsoft YaHei", 9, "bold")
         val_fg = "#2c3e50"
 
-        # ── 左列：数据库引擎版本 ──
-        left = tk.Frame(self.db_info_container, bg="white")
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
-
-        tk.Label(left, text="数据库引擎", bg="white", fg="#8e44ad",
-                 font=label_font).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        # ── 顶栏：数据库引擎信息（水平紧凑布局） ──
+        engine_row = tk.Frame(self.db_info_container, bg="#f8f8f8", relief=tk.GROOVE, borderwidth=1)
+        engine_row.pack(fill=tk.X, pady=(0, 6))
 
         # SQLite 版本
         try:
@@ -3752,6 +3749,7 @@ foreach ($tokenName in $targets.Keys) {
                 db_size_str = f"{db_size_bytes / 1024:.0f} KB"
         except:
             db_size_str = "N/A"
+            db_size_bytes = 0
 
         # WAL 文件大小
         wal_size_str = ""
@@ -3760,66 +3758,61 @@ foreach ($tokenName in $targets.Keys) {
             if wal_path.exists():
                 wal_bytes = wal_path.stat().st_size
                 if wal_bytes >= 1048576:
-                    wal_size_str = f"  (WAL: {wal_bytes / 1048576:.1f} MB)"
+                    wal_size_str = f" + WAL {wal_bytes / 1048576:.1f} MB"
                 else:
-                    wal_size_str = f"  (WAL: {wal_bytes / 1024:.0f} KB)"
+                    wal_size_str = f" + WAL {wal_bytes / 1024:.0f} KB"
         except:
             pass
 
-        engine_items = [
-            ("SQLite 版本:", sqlite_ver),
-            ("数据库大小:", f"{db_size_str}{wal_size_str}"),
-        ]
-
-        # Redis 信息
+        # Redis 状态
         if self.use_redis:
             try:
                 info = self.redis_manager.redis_client.info('server')
                 redis_ver = info.get('redis_version', 'N/A')
                 mem_info = self.redis_manager.redis_client.info('memory')
                 used = mem_info.get('used_memory_human', 'N/A')
-                redis_status = f"v{redis_ver}  ({used})"
+                redis_text = f"v{redis_ver} ({used})"
                 redis_fg = "#27ae60"
             except:
-                redis_status = "连接异常"
+                redis_text = "连接异常"
                 redis_fg = "#e74c3c"
         else:
-            # 根据初始化消息判断状态
             if "连接失败" in self.redis_init_message or "初始化失败" in self.redis_init_message:
-                redis_status = "连接失败 (回退 SQLite)"
+                redis_text = "连接失败 (回退 SQLite)"
                 redis_fg = "#e74c3c"
             elif "禁用" in self.redis_init_message:
-                redis_status = "已禁用 (SQLite 独立模式)"
+                redis_text = "已禁用"
                 redis_fg = "#95a5a6"
             else:
-                redis_status = "未连接"
+                redis_text = "未连接"
                 redis_fg = "#95a5a6"
-        engine_items.append(("Redis 状态:", redis_status))
 
-        for i, (lbl, val) in enumerate(engine_items):
-            tk.Label(left, text=lbl, bg="white", fg="#666",
-                     font=("Microsoft YaHei", 9)).grid(row=i + 1, column=0, sticky="w", padx=(8, 4))
-            # Redis 状态行使用动态颜色
-            fg = redis_fg if lbl == "Redis 状态:" else val_fg
-            tk.Label(left, text=val, bg="white", fg=fg,
-                     font=info_font).grid(row=i + 1, column=1, sticky="w")
+        # 水平排列引擎信息
+        items = [
+            ("SQLite", f"v{sqlite_ver}", "#2980b9"),
+            ("数据库", f"{db_size_str}{wal_size_str}", val_fg),
+            ("Redis", redis_text, redis_fg),
+        ]
+        for idx, (lbl, val, fg) in enumerate(items):
+            tk.Label(engine_row, text=f" {lbl}: ", bg="#f8f8f8", fg="#666",
+                     font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(8 if idx == 0 else 0, 0), pady=4)
+            tk.Label(engine_row, text=val, bg="#f8f8f8", fg=fg,
+                     font=("Consolas", 10, "bold")).pack(side=tk.LEFT, padx=(0, 12), pady=4)
 
-        # ── 右列：各表数据条目数 ──
-        right = tk.Frame(self.db_info_container, bg="white")
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        tk.Label(right, text="数据库表统计", bg="white", fg="#8e44ad",
-                 font=label_font).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        # ── 下方：各表数据条目数（全宽表格） ──
+        table_frame = tk.Frame(self.db_info_container, bg="white")
+        table_frame.pack(fill=tk.X)
 
         # 表头
-        for ci, h in enumerate(["表名", "条目数", "估算大小"]):
-            tk.Label(right, text=h, bg="#f0f0f0", fg="#333",
-                     font=("Microsoft YaHei", 9, "bold"), padx=8, pady=2,
-                     relief=tk.GROOVE).grid(row=1, column=ci, sticky="nsew")
+        for ci, (h, w) in enumerate([("表名", 16), ("条目数", 10), ("估算大小", 10)]):
+            tk.Label(table_frame, text=h, bg="#f0f0f0", fg="#333",
+                     font=("Microsoft YaHei", 9, "bold"), width=w, padx=8, pady=2,
+                     relief=tk.GROOVE).grid(row=0, column=ci, sticky="nsew")
 
         tables = [
             ("cves", "CVE 漏洞"),
             ("dell_advisories", "Dell 安全公告"),
+            ("dell_kb_articles", "Dell 技术库"),
             ("collection_history", "采集历史"),
             ("ai_solutions", "AI 解决方案"),
             ("news_briefs", "新闻简报"),
@@ -3835,7 +3828,7 @@ foreach ($tokenName in $targets.Keys) {
                 cnt = 0
             total_rows += cnt
 
-            # 估算大小：使用 page_count * page_size 近似
+            # 估算大小
             try:
                 pages = self.conn.execute(
                     f"SELECT COUNT(*) FROM dbstat WHERE name = ?", (tbl,)
@@ -3852,29 +3845,29 @@ foreach ($tokenName in $targets.Keys) {
                 size_str = "-"
 
             bg = "white" if ri % 2 == 0 else "#fafafa"
-            tk.Label(right, text=display_name, bg=bg, fg=val_fg,
+            tk.Label(table_frame, text=display_name, bg=bg, fg=val_fg,
                      font=("Microsoft YaHei", 9), padx=8, pady=1,
-                     anchor="w").grid(row=ri + 2, column=0, sticky="nsew")
-            tk.Label(right, text=f"{cnt:,}", bg=bg, fg=val_fg,
+                     anchor="w").grid(row=ri + 1, column=0, sticky="nsew")
+            tk.Label(table_frame, text=f"{cnt:,}", bg=bg, fg=val_fg,
                      font=info_font, padx=8, pady=1,
-                     anchor="e").grid(row=ri + 2, column=1, sticky="nsew")
-            tk.Label(right, text=size_str, bg=bg, fg="#888",
+                     anchor="e").grid(row=ri + 1, column=1, sticky="nsew")
+            tk.Label(table_frame, text=size_str, bg=bg, fg="#888",
                      font=info_font, padx=8, pady=1,
-                     anchor="e").grid(row=ri + 2, column=2, sticky="nsew")
+                     anchor="e").grid(row=ri + 1, column=2, sticky="nsew")
 
         # 合计行
-        tk.Label(right, text="合计", bg="#e8e8e8", fg="#333",
+        tk.Label(table_frame, text="合计", bg="#e8e8e8", fg="#333",
                  font=("Microsoft YaHei", 9, "bold"), padx=8, pady=2,
-                 anchor="w").grid(row=len(tables) + 2, column=0, sticky="nsew")
-        tk.Label(right, text=f"{total_rows:,}", bg="#e8e8e8", fg="#333",
+                 anchor="w").grid(row=len(tables) + 1, column=0, sticky="nsew")
+        tk.Label(table_frame, text=f"{total_rows:,}", bg="#e8e8e8", fg="#333",
                  font=("Consolas", 10, "bold"), padx=8, pady=2,
-                 anchor="e").grid(row=len(tables) + 2, column=1, sticky="nsew")
-        tk.Label(right, text=db_size_str, bg="#e8e8e8", fg="#333",
+                 anchor="e").grid(row=len(tables) + 1, column=1, sticky="nsew")
+        tk.Label(table_frame, text=db_size_str, bg="#e8e8e8", fg="#333",
                  font=("Consolas", 10, "bold"), padx=8, pady=2,
-                 anchor="e").grid(row=len(tables) + 2, column=2, sticky="nsew")
+                 anchor="e").grid(row=len(tables) + 1, column=2, sticky="nsew")
 
         for ci in range(3):
-            right.columnconfigure(ci, weight=1)
+            table_frame.columnconfigure(ci, weight=1)
 
     def create_learn_view(self):
         """创建智能学习（费曼学习法）标签页内容"""
