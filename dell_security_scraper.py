@@ -382,7 +382,7 @@ class DellSecurityScraper:
                 break
 
         # Impact / Severity
-        impact = self._extract_impact(content)
+        impact = self._extract_impact(content, html)
 
         # Summary: 提取 "Summary" 区域内容
         summary = self._extract_summary_section(content)
@@ -559,7 +559,7 @@ class DellSecurityScraper:
 
         return products, "\n".join(solution_parts)
 
-    def _extract_impact(self, content):
+    def _extract_impact(self, content, html=""):
         """
         从页面内容提取 Impact / Severity 等级
 
@@ -569,17 +569,80 @@ class DellSecurityScraper:
           - Critical severity
           - Severity: Medium
           - CVSS ... High
+          - CVSS 分数转换（9.0-10.0=Critical, 7.0-8.9=High, 4.0-6.9=Medium, 0.1-3.9=Low）
         """
+        # 第一轮：直接文本匹配等级关键词
         patterns = [
             r'Impact\s*[\n:]\s*(Critical|High|Medium|Low)',
+            r'影响\s*[\n:]\s*(Critical|High|Medium|Low)',
             r'\b(Critical|High|Medium|Low)\b\s+severity',
             r'[Ss]everity\s*[:\s]\s*(Critical|High|Medium|Low)',
             r'CVSS.*?\b(Critical|High|Medium|Low)\b',
+            r'[Oo]verall\s+[Ss]everity\s*[:\s]\s*(Critical|High|Medium|Low)',
+            r'[Rr]ating\s*[:\s]\s*(Critical|High|Medium|Low)',
         ]
         for pat in patterns:
             m = re.search(pat, content, re.IGNORECASE)
             if m:
                 return m.group(1).capitalize()
+
+        # 第二轮：从 HTML 属性/类名中提取（Dell 页面常用 data-severity 等属性）
+        if html:
+            html_patterns = [
+                r'data-severity="(Critical|High|Medium|Low)"',
+                r'class="[^"]*\b(critical|high|medium|low)\b[^"]*severity[^"]*"',
+                r'class="[^"]*severity[^"]*\b(critical|high|medium|low)\b[^"]*"',
+                r'<span[^>]*>\s*(Critical|High|Medium|Low)\s*</span>\s*(?:severity|impact)',
+                r'(?:severity|impact)\s*<span[^>]*>\s*(Critical|High|Medium|Low)\s*</span>',
+            ]
+            for pat in html_patterns:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m:
+                    return m.group(1).capitalize()
+
+        # 第三轮：从 CVSS 分数推断等级
+        cvss_patterns = [
+            r'CVSS\s*(?:v?\d[\d.]*\s*)?(?:Base\s*)?[Ss]core\s*[:\s]\s*(\d+\.?\d*)',
+            r'CVSS\s*[:\s]\s*(\d+\.?\d*)',
+            r'[Bb]ase\s*[Ss]core\s*[:\s]\s*(\d+\.?\d*)',
+            r'(\d+\.\d+)\s*/\s*10(?:\.0)?',
+            r'Score\s*[:\s]\s*(\d+\.?\d*)\s*(?:\(|/|$)',
+        ]
+        for pat in cvss_patterns:
+            m = re.search(pat, content)
+            if m:
+                try:
+                    score = float(m.group(1))
+                    if 0.0 < score <= 10.0:
+                        return self._cvss_to_severity(score)
+                except (ValueError, IndexError):
+                    continue
+
+        # 第四轮：从 HTML 中提取 CVSS 分数
+        if html:
+            for pat in cvss_patterns:
+                m = re.search(pat, html)
+                if m:
+                    try:
+                        score = float(m.group(1))
+                        if 0.0 < score <= 10.0:
+                            return self._cvss_to_severity(score)
+                    except (ValueError, IndexError):
+                        continue
+
+        return ""
+
+    @staticmethod
+    def _cvss_to_severity(score: float) -> str:
+        """CVSS 分数转换为严重等级（CVSS v3.x 标准）"""
+        if score >= 9.0:
+            return "Critical"
+        elif score >= 7.0:
+            return "High"
+        elif score >= 4.0:
+            return "Medium"
+        elif score > 0.0:
+            return "Low"
         return ""
 
     def _extract_dsa_id(self, url, text=""):

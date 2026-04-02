@@ -17,6 +17,12 @@ from pathlib import Path
 import threading
 import queue
 import os
+# 加载 .env 环境变量（Exa API Key 等）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+except ImportError:
+    pass
 import atexit
 import signal
 import sys
@@ -5278,9 +5284,16 @@ foreach ($tokenName in $targets.Keys) {
             response = req.get(
                 url,
                 headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
                 },
                 timeout=30,
             )
@@ -5340,18 +5353,8 @@ foreach ($tokenName in $targets.Keys) {
                     except ValueError:
                         continue
                 break
-        # 影响级别（匹配 Dell 页面 Impact 区域及 severity 描述）
-        impact = ""
-        impact_patterns = [
-            re.search(r'Impact\s*[\n:]\s*(Critical|High|Medium|Low)', content, re.IGNORECASE),
-            re.search(r'\b(Critical|High|Medium|Low)\b\s+severity', content, re.IGNORECASE),
-            re.search(r'[Ss]everity\s*[:\s]\s*(Critical|High|Medium|Low)', content, re.IGNORECASE),
-            re.search(r'CVSS.*?\b(Critical|High|Medium|Low)\b', content, re.IGNORECASE),
-        ]
-        for impact_match in impact_patterns:
-            if impact_match:
-                impact = impact_match.group(1).capitalize()
-                break
+        # 影响级别：调用 scraper 统一方法（支持文本/HTML/CVSS分数多策略提取）
+        impact = scraper._extract_impact(content, html)
         # 摘要：提取 "Summary" 区域内容
         summary = scraper._extract_summary_section(content)
         # 产品和解决方案：从 "Affected Products & Remediation" 表格提取
