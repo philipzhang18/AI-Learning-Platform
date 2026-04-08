@@ -28,6 +28,7 @@ import signal
 import sys
 import urllib.request
 import urllib.parse
+import urllib.error
 
 # 日历组件（可选）
 try:
@@ -161,7 +162,6 @@ class CVEIntegratedGUI:
 
         # 创建数据库连接（允许多线程）
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.db_conn = self.conn  # 为了兼容旧代码，设置db_conn别名
 
         # SQLite 性能优化配置
         optimizations = [
@@ -284,6 +284,25 @@ class CVEIntegratedGUI:
                 )
             ''')
 
+            # 闪卡与知识问答表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS flashcards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    options TEXT,
+                    correct_option INTEGER,
+                    card_type TEXT DEFAULT 'flashcard',
+                    difficulty INTEGER DEFAULT 1,
+                    review_count INTEGER DEFAULT 0,
+                    correct_count INTEGER DEFAULT 0,
+                    next_review TEXT,
+                    source_session_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             # Create indexes for better query performance
             # Index on published_date for date-based queries
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_cves_published_date ON cves(published_date)")
@@ -305,6 +324,11 @@ class CVEIntegratedGUI:
             # Index for learn sessions
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_sessions_topic ON learn_sessions(topic)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_sessions_created ON learn_sessions(created_at)")
+
+            # Index for flashcards
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_flashcards_topic ON flashcards(topic)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_flashcards_type ON flashcards(card_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_flashcards_next_review ON flashcards(next_review)")
 
             # Index for Dell KB articles
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_kb_collected_date ON dell_kb_articles(collected_date)")
@@ -889,7 +913,7 @@ class CVEIntegratedGUI:
                     data = json.loads(record[0])
                     cve_ids = data.get('cve_ids', [])
                     all_dell_cve_ids.update(cve_ids)
-                except:
+                except Exception:
                     continue
 
             if not all_dell_cve_ids:
@@ -2333,8 +2357,32 @@ foreach ($tokenName in $targets.Keys) {
                     f"&past_days={past_days}&forecast_days={forecast_days}"
                     f"&timezone=auto"
                 )
-                resp = urllib.request.urlopen(url, timeout=15)
-                data = json.loads(resp.read().decode())
+
+                # 重试机制：最多3次，应对502等临时服务端错误
+                data = None
+                last_error = None
+                for attempt in range(3):
+                    try:
+                        resp = urllib.request.urlopen(url, timeout=15)
+                        data = json.loads(resp.read().decode())
+                        break
+                    except urllib.error.HTTPError as e:
+                        last_error = e
+                        if e.code in (502, 503, 504) and attempt < 2:
+                            import time
+                            time.sleep(2 * (attempt + 1))
+                            continue
+                        raise
+                    except (urllib.error.URLError, OSError) as e:
+                        last_error = e
+                        if attempt < 2:
+                            import time
+                            time.sleep(2 * (attempt + 1))
+                            continue
+                        raise
+
+                if data is None:
+                    raise last_error or Exception("天气API请求失败")
 
                 # 缓存每日数据
                 daily = data.get("daily", {})
@@ -2390,7 +2438,74 @@ foreach ($tokenName in $targets.Keys) {
             else:
                 self.root.after(0, self._weather_info_label.config, {"text": f"暂无 {target_date} 天气数据（超出预报范围）"})
         except Exception as e:
-            self.root.after(0, self._weather_info_label.config, {"text": f"获取天气失败: {e}"})
+            # Open-Meteo 失败，尝试 wttr.in 备用源（仅支持当天实时天气）
+            try:
+                self._fetch_weather_fallback(city_name, target_date)
+            except Exception:
+                self.root.after(0, self._weather_info_label.config, {"text": f"获取天气失败: {e}"})
+
+    def _fetch_weather_fallback(self, city_name: str, target_date: str):
+        """备用天气源：wttr.in（当 Open-Meteo 不可用时）"""
+        import time as _time
+
+        # wttr.in 天气描述映射
+        wttr_desc_map = {
+            "Sunny": "晴", "Clear": "晴", "Partly cloudy": "多云",
+            "Cloudy": "阴", "Overcast": "阴", "Mist": "薄雾",
+            "Fog": "雾", "Light rain": "小雨", "Moderate rain": "中雨",
+            "Heavy rain": "大雨", "Light snow": "小雪", "Moderate snow": "中雪",
+            "Heavy snow": "大雪", "Thunderstorm": "雷暴", "Patchy rain possible": "可能有雨",
+            "Light drizzle": "毛毛雨", "Patchy light rain": "零星小雨",
+        }
+        wttr_icon_map = {
+            "晴": "☀️", "多云": "⛅", "阴": "☁️", "薄雾": "🌫️", "雾": "🌫️",
+            "小雨": "🌦️", "中雨": "🌧️", "大雨": "🌧️", "小雪": "🌨️",
+            "中雪": "🌨️", "大雪": "❄️", "雷暴": "⛈️",
+        }
+
+        last_error = None
+        for attempt in range(2):
+            try:
+                wttr_url = f"https://wttr.in/{urllib.parse.quote(city_name)}?format=j1"
+                req = urllib.request.Request(wttr_url, headers={"User-Agent": "Mozilla/5.0"})
+                resp = urllib.request.urlopen(req, timeout=15)
+                wdata = json.loads(resp.read().decode())
+
+                cur = wdata.get("current_condition", [{}])[0]
+                temp = cur.get("temp_C", "?")
+                humidity = cur.get("humidity", "?")
+                wind = cur.get("windspeedKmph", "?")
+                weather_en = cur.get("weatherDesc", [{}])[0].get("value", "")
+                desc = wttr_desc_map.get(weather_en, weather_en)
+                icon = wttr_icon_map.get(desc, "🌈")
+
+                try:
+                    avg_temp = int(temp)
+                except (ValueError, TypeError):
+                    avg_temp = None
+                outfit = self._get_outfit_suggestion(avg_temp, desc) if avg_temp is not None else ""
+
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                if target_date == today_str:
+                    info_text = (
+                        f"{icon} {city_name} · {temp}°C · {desc} · "
+                        f"湿度{humidity}% · 风速{wind}km/h   |   "
+                        f"穿搭建议：{outfit}"
+                    )
+                else:
+                    info_text = (
+                        f"{icon} {city_name}（仅实时）· {temp}°C · {desc}   |   "
+                        f"穿搭建议：{outfit}"
+                    )
+                self.root.after(0, self._weather_info_label.config, {"text": info_text})
+                return
+            except Exception as e:
+                last_error = e
+                if attempt < 1:
+                    _time.sleep(2)
+                    continue
+
+        raise last_error or Exception("备用天气API也失败")
 
     def _get_outfit_suggestion(self, temp, description):
         """根据温度和天气描述生成简短穿搭建议"""
@@ -3425,7 +3540,7 @@ foreach ($tokenName in $targets.Keys) {
             self.kb_url_entry.config(fg="black")
 
     def create_stats_view(self):
-        """创建统计视图（图表 + 详情列表）— 15.6寸屏幕布局"""
+        """创建统计视图（数据可视化为主）"""
         # 顶部可滚动容器
         canvas = tk.Canvas(self.stats_frame, bg="white", highlightthickness=0)
         scrollbar = tk.Scrollbar(self.stats_frame, orient=tk.VERTICAL, command=canvas.yview)
@@ -3447,6 +3562,26 @@ foreach ($tokenName in $targets.Keys) {
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         content = self.stats_scroll_frame
+
+        # ── 缩放控制（右下角浮动）──
+        self.stats_chart_scale = 1.1  # 默认 110%（卡片增大10%）
+        zoom_bar = tk.Frame(self.stats_frame, bg="#f0f0f0", relief=tk.RAISED, bd=1, padx=6, pady=3)
+        zoom_bar.place(relx=1.0, rely=1.0, anchor="se", x=-30, y=-10)
+        zoom_bar.lift()
+        tk.Label(zoom_bar, text="缩放", bg="#f0f0f0",
+                 font=("Microsoft YaHei", 8), fg="#666").pack(side=tk.LEFT)
+        tk.Button(zoom_bar, text="−", command=lambda: self._stats_zoom(-0.1),
+                  font=("Microsoft YaHei", 9, "bold"), relief=tk.FLAT,
+                  bg="#e0e0e0", cursor="hand2", width=2).pack(side=tk.LEFT, padx=(4, 1))
+        self.stats_zoom_label = tk.Label(zoom_bar, text="110%", bg="#f0f0f0",
+                                          font=("Microsoft YaHei", 8, "bold"), fg=self.primary_color, width=4)
+        self.stats_zoom_label.pack(side=tk.LEFT)
+        tk.Button(zoom_bar, text="+", command=lambda: self._stats_zoom(0.1),
+                  font=("Microsoft YaHei", 9, "bold"), relief=tk.FLAT,
+                  bg="#e0e0e0", cursor="hand2", width=2).pack(side=tk.LEFT, padx=(1, 1))
+        tk.Button(zoom_bar, text="↺", command=lambda: self._stats_zoom(0, reset=True),
+                  font=("Microsoft YaHei", 8), relief=tk.FLAT,
+                  bg="#e0e0e0", cursor="hand2", width=2).pack(side=tk.LEFT, padx=(1, 0))
 
         # ── 第一行：统计卡片 ──
         cards_frame = tk.Frame(content, bg="white")
@@ -3470,35 +3605,61 @@ foreach ($tokenName in $targets.Keys) {
         for i in range(len(cards_info)):
             cards_frame.columnconfigure(i, weight=1)
 
-        # ── 第二行：图表区域（三列：CVE饼图 + Dell饼图 + 柱状图） ──
-        charts_frame = tk.Frame(content, bg="white")
-        charts_frame.pack(fill=tk.X, padx=15, pady=5)
-        charts_frame.columnconfigure(0, weight=1)
-        charts_frame.columnconfigure(1, weight=1)
-        charts_frame.columnconfigure(2, weight=1)
+        # ── 第二行：严重等级分布饼图（2列）+ 数据汇聚图（1列）──
+        pies_frame = tk.Frame(content, bg="white")
+        pies_frame.pack(fill=tk.X, padx=15, pady=5)
+        for i in range(3):
+            pies_frame.columnconfigure(i, weight=1, uniform="chart_col")
 
         # 左：CVE严重等级饼图
         self.chart_cve_pie_frame = tk.LabelFrame(
-            charts_frame, text="  CVE 严重等级分布  ", bg="white",
+            pies_frame, text="  CVE 严重等级分布  ", bg="white",
             font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
         )
-        self.chart_cve_pie_frame.grid(row=0, column=0, padx=(0, 4), pady=5, sticky="nsew")
+        self.chart_cve_pie_frame.grid(row=0, column=0, padx=4, pady=5, sticky="nsew")
 
         # 中：Dell公告影响等级饼图
         self.chart_dell_pie_frame = tk.LabelFrame(
-            charts_frame, text="  Dell 公告影响等级分布  ", bg="white",
+            pies_frame, text="  Dell 公告影响等级分布  ", bg="white",
             font=("Microsoft YaHei", 10, "bold"), fg=self.info_color
         )
         self.chart_dell_pie_frame.grid(row=0, column=1, padx=4, pady=5, sticky="nsew")
 
-        # 右：数据概览柱状图
+        # 右：数据汇聚匹配图
         self.chart_bar_frame = tk.LabelFrame(
-            charts_frame, text="  数据概览与分类统计  ", bg="white",
+            pies_frame, text="  数据汇聚与匹配关系  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.success_color
+        )
+        self.chart_bar_frame.grid(row=0, column=2, padx=4, pady=5, sticky="nsew")
+
+        # ── 第三行：月度增长趋势图（3列）──
+        trends_frame = tk.Frame(content, bg="white")
+        trends_frame.pack(fill=tk.X, padx=15, pady=5)
+        for i in range(3):
+            trends_frame.columnconfigure(i, weight=1, uniform="chart_col")
+
+        # 左：CVE 月度增长
+        self.chart_cve_trend_frame = tk.LabelFrame(
+            trends_frame, text="  CVE 月度增长趋势  ", bg="white",
             font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
         )
-        self.chart_bar_frame.grid(row=0, column=2, padx=(4, 0), pady=5, sticky="nsew")
+        self.chart_cve_trend_frame.grid(row=0, column=0, padx=4, pady=5, sticky="nsew")
 
-        # ── 第三行：数据库信息 ──
+        # 中：Dell 公告月度增长
+        self.chart_dell_trend_frame = tk.LabelFrame(
+            trends_frame, text="  Dell 公告月度增长趋势  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.info_color
+        )
+        self.chart_dell_trend_frame.grid(row=0, column=1, padx=4, pady=5, sticky="nsew")
+
+        # 右：关联月度增长
+        self.chart_matched_trend_frame = tk.LabelFrame(
+            trends_frame, text="  CVE-Dell 关联月度增长  ", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.success_color
+        )
+        self.chart_matched_trend_frame.grid(row=0, column=2, padx=4, pady=5, sticky="nsew")
+
+        # ── 第四行：数据库信息 ──
         db_info_frame = tk.LabelFrame(
             content, text="  数据库信息  ", bg="white",
             font=("Microsoft YaHei", 10, "bold"), fg="#8e44ad"
@@ -3508,7 +3669,7 @@ foreach ($tokenName in $targets.Keys) {
         self.db_info_container = tk.Frame(db_info_frame, bg="white")
         self.db_info_container.pack(fill=tk.X, padx=10, pady=8)
 
-        # ── 第四行：最新 CVE 前10 ──
+        # ── 第五行：最新 CVE 前10 ──
         cve_list_frame = tk.LabelFrame(
             content, text="  最新 CVE 漏洞 (前10)  ", bg="white",
             font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
@@ -3536,7 +3697,7 @@ foreach ($tokenName in $targets.Keys) {
         self.stats_cve_tree.tag_configure("MEDIUM", foreground="#f39c12")
         self.stats_cve_tree.tag_configure("LOW", foreground="#27ae60")
 
-        # ── 第五行：最新 Dell 安全公告 前10 ──
+        # ── 第六行：最新 Dell 安全公告 前10 ──
         dell_list_frame = tk.LabelFrame(
             content, text="  最新 Dell 安全公告 (前10)  ", bg="white",
             font=("Microsoft YaHei", 10, "bold"), fg=self.info_color
@@ -3565,27 +3726,64 @@ foreach ($tokenName in $targets.Keys) {
 
     def _create_stat_card(self, parent, title, value, color, icon=""):
         """创建统计卡片（带图标和彩色左边框）"""
+        s = getattr(self, 'stats_chart_scale', 1.0)
         card = tk.Frame(parent, bg="white", relief=tk.GROOVE, borderwidth=1)
 
         # 彩色左侧条
-        color_bar = tk.Frame(card, bg=color, width=5)
+        color_bar = tk.Frame(card, bg=color, width=max(4, int(5 * s)))
         color_bar.pack(side=tk.LEFT, fill=tk.Y)
 
-        inner = tk.Frame(card, bg="white", padx=8, pady=6)
+        pad_x = max(6, int(8 * s))
+        pad_y = max(4, int(6 * s))
+        inner = tk.Frame(card, bg="white", padx=pad_x, pady=pad_y)
         inner.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        title_size = max(8, int(9 * s))
+        value_size = max(18, int(22 * s))
         tk.Label(inner, text=f"{icon} {title}", bg="white", fg="#666",
-                 font=("Microsoft YaHei", 9)).pack(anchor="w")
+                 font=("Microsoft YaHei", title_size)).pack(anchor="w")
 
         value_label = tk.Label(inner, text=value, bg="white", fg=color,
-                               font=("Microsoft YaHei", 22, "bold"))
+                               font=("Microsoft YaHei", value_size, "bold"))
         value_label.pack(anchor="w")
 
         card.value_label = value_label
         return card
 
-    def _draw_charts(self, cve_severity, dell_severity, nvd_total, dell_total, matched_count):
-        """使用 matplotlib 绘制三张图表（CVE饼图、Dell饼图、柱状图）并嵌入 tkinter"""
+    def _stats_zoom(self, delta, reset=False):
+        """统计分析页面缩放"""
+        if reset:
+            self.stats_chart_scale = 1.0
+        else:
+            self.stats_chart_scale = max(0.7, min(1.6, self.stats_chart_scale + delta))
+        pct = int(self.stats_chart_scale * 100)
+        self.stats_zoom_label.config(text=f"{pct}%")
+        # 重建卡片
+        cards_frame = None
+        for title, card in self.stats_cards.items():
+            if cards_frame is None:
+                cards_frame = card.master
+            card.destroy()
+        if cards_frame:
+            cards_info = [
+                ("NVD CVE总数", "0", self.primary_color, "📊"),
+                ("Dell公告数", "0", self.info_color, "🔔"),
+                ("关联匹配数", "0", self.success_color, "🔗"),
+                ("Dell 严重", "0", "#c0392b", "🔴"),
+                ("Dell 高危", "0", "#e67e22", "🟠"),
+                ("Dell 中危", "0", "#f1c40f", "🟡"),
+                ("Dell 低危", "0", "#27ae60", "🟢"),
+            ]
+            self.stats_cards = {}
+            for i, (title, value, color, icon) in enumerate(cards_info):
+                card = self._create_stat_card(cards_frame, title, value, color, icon)
+                card.grid(row=0, column=i, padx=6, pady=5, sticky="nsew")
+                self.stats_cards[title] = card
+        # 刷新数据（会重绘图表）
+        self.update_stats()
+
+    def _draw_pie_charts(self, cve_severity, dell_severity):
+        """绘制 CVE 和 Dell 严重等级饼图（白色背景）"""
         try:
             import matplotlib
             matplotlib.use('Agg')
@@ -3598,29 +3796,31 @@ foreach ($tokenName in $targets.Keys) {
                 w.destroy()
             for w in self.chart_dell_pie_frame.winfo_children():
                 w.destroy()
-            for w in self.chart_bar_frame.winfo_children():
-                w.destroy()
 
-            # 15.6寸屏幕适配：每张图 ~450px 宽, ~380px 高
-            fig_w, fig_h, fig_dpi = 4.6, 3.8, 100
+            s = getattr(self, 'stats_chart_scale', 1.0)
+            fig_w, fig_h, fig_dpi = 4.2 * s, 3.0 * s, 100
+
+            # 原始严重等级颜色
+            severity_colors = {
+                "CRITICAL": "#c0392b", "Critical": "#c0392b",
+                "HIGH": "#e67e22", "High": "#e67e22",
+                "MEDIUM": "#f1c40f", "Medium": "#f1c40f",
+                "LOW": "#27ae60", "Low": "#27ae60",
+                "N/A": "#95a5a6",
+            }
 
             # ── CVE 严重等级饼图 ──
             fig_cve = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
             ax_cve = fig_cve.add_subplot(111)
 
             cve_labels, cve_sizes, cve_colors = [], [], []
-            cve_level_map = [
-                ("Critical", cve_severity.get("CRITICAL", 0), "#c0392b"),
-                ("High", cve_severity.get("HIGH", 0), "#e67e22"),
-                ("Medium", cve_severity.get("MEDIUM", 0), "#f1c40f"),
-                ("Low", cve_severity.get("LOW", 0), "#27ae60"),
-                ("N/A", cve_severity.get("N/A", 0), "#95a5a6"),
-            ]
-            for lbl, cnt, clr in cve_level_map:
+            for lbl, key in [("Critical", "CRITICAL"), ("High", "HIGH"), ("Medium", "MEDIUM"),
+                              ("Low", "LOW"), ("N/A", "N/A")]:
+                cnt = cve_severity.get(key, 0)
                 if cnt > 0:
                     cve_labels.append(f"{lbl}\n{cnt}")
                     cve_sizes.append(cnt)
-                    cve_colors.append(clr)
+                    cve_colors.append(severity_colors[key])
 
             if cve_sizes:
                 wedges, texts, autotexts = ax_cve.pie(
@@ -3652,18 +3852,12 @@ foreach ($tokenName in $targets.Keys) {
             ax_dell = fig_dell.add_subplot(111)
 
             dell_labels, dell_sizes, dell_colors = [], [], []
-            dell_level_map = [
-                ("Critical", dell_severity.get("Critical", 0), "#c0392b"),
-                ("High", dell_severity.get("High", 0), "#e67e22"),
-                ("Medium", dell_severity.get("Medium", 0), "#f1c40f"),
-                ("Low", dell_severity.get("Low", 0), "#27ae60"),
-                ("N/A", dell_severity.get("N/A", 0), "#95a5a6"),
-            ]
-            for lbl, cnt, clr in dell_level_map:
+            for lbl in ["Critical", "High", "Medium", "Low", "N/A"]:
+                cnt = dell_severity.get(lbl, 0)
                 if cnt > 0:
                     dell_labels.append(f"{lbl}\n{cnt}")
                     dell_sizes.append(cnt)
-                    dell_colors.append(clr)
+                    dell_colors.append(severity_colors[lbl])
 
             if dell_sizes:
                 wedges, texts, autotexts = ax_dell.pie(
@@ -3690,42 +3884,310 @@ foreach ($tokenName in $targets.Keys) {
             canvas_dell.draw()
             canvas_dell.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-            # ── 柱状图：数据概览（仅 NVD/Dell/关联） ──
-            fig_bar = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
-            ax_bar = fig_bar.add_subplot(111)
-
-            bar_labels = ['NVD\nCVE', 'Dell\n公告', '关联\n匹配']
-            bar_values = [nvd_total, dell_total, matched_count]
-            bar_colors = [self.primary_color, self.info_color, self.success_color]
-
-            bars = ax_bar.bar(bar_labels, bar_values, color=bar_colors, width=0.5, edgecolor='white')
-            for bar, val in zip(bars, bar_values):
-                if val > 0:
-                    ax_bar.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
-                                str(val), ha='center', va='bottom', fontsize=11,
-                                fontweight='bold', fontfamily='Microsoft YaHei')
-
-            ax_bar.set_ylabel('数量', fontsize=10, fontfamily='Microsoft YaHei')
-            ax_bar.set_title('数据分类统计', fontsize=11, fontfamily='Microsoft YaHei', fontweight='bold', pad=10)
-            ax_bar.spines['top'].set_visible(False)
-            ax_bar.spines['right'].set_visible(False)
-            ax_bar.tick_params(axis='x', labelsize=9)
-            ax_bar.tick_params(axis='y', labelsize=9)
-            for label in ax_bar.get_xticklabels():
-                label.set_fontfamily('Microsoft YaHei')
-            fig_bar.tight_layout(pad=1.0)
-
-            canvas_bar = FigureCanvasTkAgg(fig_bar, master=self.chart_bar_frame)
-            canvas_bar.draw()
-            canvas_bar.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
         except ImportError:
-            for frame in (self.chart_cve_pie_frame, self.chart_dell_pie_frame, self.chart_bar_frame):
+            for frame in (self.chart_cve_pie_frame, self.chart_dell_pie_frame):
                 tk.Label(frame, text="需要 matplotlib\npip install matplotlib",
                          bg="white", fg="#999", font=("Microsoft YaHei", 10)).pack(expand=True)
         except Exception as e:
             tk.Label(self.chart_cve_pie_frame, text=f"图表渲染失败:\n{e}",
                      bg="white", fg="#c0392b", font=("Microsoft YaHei", 9)).pack(expand=True)
+
+    def _draw_monthly_trends(self, cve_monthly, dell_monthly, matched_monthly):
+        """绘制 3 张月度增长趋势图（折线图 + 柱状图组合）"""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
+
+            # 清空旧图表
+            for w in self.chart_cve_trend_frame.winfo_children():
+                w.destroy()
+            for w in self.chart_dell_trend_frame.winfo_children():
+                w.destroy()
+            for w in self.chart_matched_trend_frame.winfo_children():
+                w.destroy()
+
+            s = getattr(self, 'stats_chart_scale', 1.0)
+            fig_w, fig_h, fig_dpi = 4.2 * s, 3.0 * s, 100
+
+            # ── CVE 月度趋势 ──
+            fig_cve = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
+            ax_cve = fig_cve.add_subplot(111)
+
+            if cve_monthly:
+                months = [m[0] for m in cve_monthly]
+                counts = [m[1] for m in cve_monthly]
+
+                bars = ax_cve.bar(range(len(months)), counts, color=self.primary_color, alpha=0.6, width=0.6)
+                ax_cve.plot(range(len(months)), counts, color=self.primary_color, marker='o',
+                            linewidth=2, markersize=6)
+
+                for i, (bar, val) in enumerate(zip(bars, counts)):
+                    if val > 0:
+                        ax_cve.text(i, val + max(counts) * 0.02, str(val), ha='center', va='bottom',
+                                    fontsize=9, fontweight='bold', fontfamily='Microsoft YaHei')
+
+                ax_cve.set_xticks(range(len(months)))
+                ax_cve.set_xticklabels(months, rotation=45, ha='right', fontsize=8, fontfamily='Microsoft YaHei')
+                ax_cve.set_ylabel('数量', fontsize=9, fontfamily='Microsoft YaHei')
+                ax_cve.set_title(f'CVE 月度增长 (最近{len(months)}个月)', fontsize=10,
+                                 fontfamily='Microsoft YaHei', fontweight='bold', pad=8)
+                ax_cve.grid(axis='y', alpha=0.3, linestyle='--')
+                ax_cve.spines['top'].set_visible(False)
+                ax_cve.spines['right'].set_visible(False)
+            else:
+                ax_cve.text(0.5, 0.5, '暂无月度数据', ha='center', va='center',
+                            fontsize=12, fontfamily='Microsoft YaHei', color='#999')
+                ax_cve.set_xlim(0, 1)
+                ax_cve.set_ylim(0, 1)
+
+            fig_cve.tight_layout()
+            canvas_cve = FigureCanvasTkAgg(fig_cve, master=self.chart_cve_trend_frame)
+            canvas_cve.draw()
+            canvas_cve.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            # ── Dell 月度趋势 ──
+            fig_dell = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
+            ax_dell = fig_dell.add_subplot(111)
+
+            if dell_monthly:
+                months = [m[0] for m in dell_monthly]
+                counts = [m[1] for m in dell_monthly]
+
+                bars = ax_dell.bar(range(len(months)), counts, color=self.info_color, alpha=0.6, width=0.6)
+                ax_dell.plot(range(len(months)), counts, color=self.info_color, marker='o',
+                             linewidth=2, markersize=6)
+
+                for i, (bar, val) in enumerate(zip(bars, counts)):
+                    if val > 0:
+                        ax_dell.text(i, val + max(counts) * 0.02, str(val), ha='center', va='bottom',
+                                     fontsize=9, fontweight='bold', fontfamily='Microsoft YaHei')
+
+                ax_dell.set_xticks(range(len(months)))
+                ax_dell.set_xticklabels(months, rotation=45, ha='right', fontsize=8, fontfamily='Microsoft YaHei')
+                ax_dell.set_ylabel('数量', fontsize=9, fontfamily='Microsoft YaHei')
+                ax_dell.set_title(f'Dell 公告月度增长 (最近{len(months)}个月)', fontsize=10,
+                                  fontfamily='Microsoft YaHei', fontweight='bold', pad=8)
+                ax_dell.grid(axis='y', alpha=0.3, linestyle='--')
+                ax_dell.spines['top'].set_visible(False)
+                ax_dell.spines['right'].set_visible(False)
+            else:
+                ax_dell.text(0.5, 0.5, '暂无月度数据', ha='center', va='center',
+                             fontsize=12, fontfamily='Microsoft YaHei', color='#999')
+                ax_dell.set_xlim(0, 1)
+                ax_dell.set_ylim(0, 1)
+
+            fig_dell.tight_layout()
+            canvas_dell = FigureCanvasTkAgg(fig_dell, master=self.chart_dell_trend_frame)
+            canvas_dell.draw()
+            canvas_dell.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            # ── 关联月度趋势 ──
+            fig_matched = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
+            ax_matched = fig_matched.add_subplot(111)
+
+            if matched_monthly:
+                months = [m[0] for m in matched_monthly]
+                counts = [m[1] for m in matched_monthly]
+
+                bars = ax_matched.bar(range(len(months)), counts, color=self.success_color, alpha=0.6, width=0.6)
+                ax_matched.plot(range(len(months)), counts, color=self.success_color, marker='o',
+                                linewidth=2, markersize=6)
+
+                for i, (bar, val) in enumerate(zip(bars, counts)):
+                    if val > 0:
+                        ax_matched.text(i, val + max(counts) * 0.02, str(val), ha='center', va='bottom',
+                                        fontsize=9, fontweight='bold', fontfamily='Microsoft YaHei')
+
+                ax_matched.set_xticks(range(len(months)))
+                ax_matched.set_xticklabels(months, rotation=45, ha='right', fontsize=8, fontfamily='Microsoft YaHei')
+                ax_matched.set_ylabel('数量', fontsize=9, fontfamily='Microsoft YaHei')
+                ax_matched.set_title(f'CVE-Dell 关联月度增长 (最近{len(months)}个月)', fontsize=10,
+                                     fontfamily='Microsoft YaHei', fontweight='bold', pad=8)
+                ax_matched.grid(axis='y', alpha=0.3, linestyle='--')
+                ax_matched.spines['top'].set_visible(False)
+                ax_matched.spines['right'].set_visible(False)
+            else:
+                ax_matched.text(0.5, 0.5, '暂无月度数据', ha='center', va='center',
+                                fontsize=12, fontfamily='Microsoft YaHei', color='#999')
+                ax_matched.set_xlim(0, 1)
+                ax_matched.set_ylim(0, 1)
+
+            fig_matched.tight_layout()
+            canvas_matched = FigureCanvasTkAgg(fig_matched, master=self.chart_matched_trend_frame)
+            canvas_matched.draw()
+            canvas_matched.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        except ImportError:
+            for frame in (self.chart_cve_trend_frame, self.chart_dell_trend_frame, self.chart_matched_trend_frame):
+                tk.Label(frame, text="需要 matplotlib\npip install matplotlib",
+                         bg="white", fg="#999", font=("Microsoft YaHei", 10)).pack(expand=True)
+        except Exception as e:
+            tk.Label(self.chart_cve_trend_frame, text=f"图表渲染失败:\n{e}",
+                     bg="white", fg="#c0392b", font=("Microsoft YaHei", 9)).pack(expand=True)
+
+    def _draw_overview_bar(self, nvd_total, dell_total, matched_count):
+        """绘制数据汇聚匹配关系图（椭圆式展示）"""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
+            from matplotlib.patches import Ellipse, FancyArrowPatch
+            import matplotlib.path as mpath
+
+            # 清空旧图表
+            for w in self.chart_bar_frame.winfo_children():
+                w.destroy()
+
+            s = getattr(self, 'stats_chart_scale', 1.0)
+            fig = Figure(figsize=(4.2 * s, 3.0 * s), dpi=100, facecolor='white')
+            ax = fig.add_subplot(111)
+            ax.set_xlim(0, 10)
+            ax.set_ylim(0, 10)
+            ax.set_aspect('equal')
+            ax.axis('off')
+
+            # 顶部：CVE 椭圆
+            cve_ellipse = Ellipse((2.5, 7.8), 4, 2.2,
+                                   edgecolor=self.primary_color, facecolor=self.primary_color,
+                                   alpha=0.15, linewidth=2)
+            ax.add_patch(cve_ellipse)
+            ax.text(2.5, 7.8, f'NVD CVE\n{nvd_total:,}', ha='center', va='center',
+                    fontsize=10, fontweight='bold', fontfamily='Microsoft YaHei',
+                    color=self.primary_color)
+
+            # 顶部：Dell 椭圆
+            dell_ellipse = Ellipse((7.5, 7.8), 4, 2.2,
+                                    edgecolor=self.info_color, facecolor=self.info_color,
+                                    alpha=0.15, linewidth=2)
+            ax.add_patch(dell_ellipse)
+            ax.text(7.5, 7.8, f'Dell 公告\n{dell_total:,}', ha='center', va='center',
+                    fontsize=10, fontweight='bold', fontfamily='Microsoft YaHei',
+                    color=self.info_color)
+
+            # 中间：关联匹配椭圆（更大、更醒目）
+            matched_ellipse = Ellipse((5, 3.5), 5, 2.8,
+                                       edgecolor=self.success_color, facecolor=self.success_color,
+                                       alpha=0.15, linewidth=2.5)
+            ax.add_patch(matched_ellipse)
+            ax.text(5, 3.5, f'关联匹配\n{matched_count:,}', ha='center', va='center',
+                    fontsize=10, fontweight='bold', fontfamily='Microsoft YaHei',
+                    color=self.success_color)
+
+            # PPT 风格粗箭头：CVE → 关联
+            arrow1 = FancyArrowPatch((2.5, 6.6), (4.2, 4.9),
+                                      arrowstyle='fancy,head_length=8,head_width=6,tail_width=3',
+                                      mutation_scale=1, linewidth=0,
+                                      facecolor=self.primary_color, edgecolor=self.primary_color,
+                                      alpha=0.35)
+            ax.add_patch(arrow1)
+
+            # PPT 风格粗箭头：Dell → 关联
+            arrow2 = FancyArrowPatch((7.5, 6.6), (5.8, 4.9),
+                                      arrowstyle='fancy,head_length=8,head_width=6,tail_width=3',
+                                      mutation_scale=1, linewidth=0,
+                                      facecolor=self.info_color, edgecolor=self.info_color,
+                                      alpha=0.35)
+            ax.add_patch(arrow2)
+
+            # 底部：匹配系数说明
+            if nvd_total > 0 and dell_total > 0:
+                cve_coeff = matched_count / nvd_total
+                dell_coeff = matched_count / dell_total
+                ax.text(5, 1.2, f'CVE 匹配系数 {cve_coeff:.2f}  |  Dell 公告匹配系数 {dell_coeff:.2f}',
+                        ha='center', va='center', fontsize=9, fontfamily='Microsoft YaHei',
+                        color='#666')
+
+            fig.tight_layout()
+
+            canvas = FigureCanvasTkAgg(fig, master=self.chart_bar_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        except ImportError:
+            tk.Label(self.chart_bar_frame, text="需要 matplotlib\npip install matplotlib",
+                     bg="white", fg="#999", font=("Microsoft YaHei", 10)).pack(expand=True)
+        except Exception as e:
+            tk.Label(self.chart_bar_frame, text=f"图表渲染失败:\n{e}",
+                     bg="white", fg="#c0392b", font=("Microsoft YaHei", 9)).pack(expand=True)
+
+    def _get_monthly_cve_stats(self):
+        """查询 CVE 最近 13 个月的统计数据"""
+        try:
+            with self.db_lock:
+                rows = self.conn.execute("""
+                    SELECT strftime('%Y-%m', published_date) as month, COUNT(*) as count
+                    FROM cves
+                    WHERE published_date IS NOT NULL AND published_date != ''
+                    GROUP BY month
+                    ORDER BY month DESC
+                    LIMIT 13
+                """).fetchall()
+            result = [(row[0], row[1]) for row in reversed(rows)]
+            return result
+        except Exception as e:
+            print(f"查询 CVE 月度统计失败: {e}")
+            return []
+
+    def _get_monthly_dell_stats(self):
+        """查询 Dell 公告最近 13 个月的统计数据"""
+        try:
+            with self.db_lock:
+                rows = self.conn.execute("""
+                    SELECT strftime('%Y-%m', published_date) as month, COUNT(*) as count
+                    FROM dell_advisories
+                    WHERE published_date IS NOT NULL AND published_date != ''
+                    GROUP BY month
+                    ORDER BY month DESC
+                    LIMIT 13
+                """).fetchall()
+            result = [(row[0], row[1]) for row in reversed(rows)]
+            return result
+        except Exception as e:
+            print(f"查询 Dell 月度统���失败: {e}")
+            return []
+
+    def _get_monthly_matched_stats(self):
+        """查询 CVE-Dell 关联最近 13 个月的统计数据（从 dell_advisories.cve_ids 解析）"""
+        try:
+            with self.db_lock:
+                # 检查是否有 cve_dell_mapping 表
+                has_mapping = self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='cve_dell_mapping'"
+                ).fetchone()
+
+                if has_mapping:
+                    rows = self.conn.execute("""
+                        SELECT strftime('%Y-%m', c.published_date) as month, COUNT(DISTINCT m.id) as count
+                        FROM cve_dell_mapping m
+                        JOIN cves c ON m.cve_id = c.cve_id
+                        WHERE c.published_date IS NOT NULL AND c.published_date != ''
+                        GROUP BY month
+                        ORDER BY month DESC
+                        LIMIT 13
+                    """).fetchall()
+                else:
+                    # 从 dell_advisories.cve_ids 统计关联 CVE 数量（按 Dell 公告发布月份）
+                    rows = self.conn.execute("""
+                        SELECT strftime('%Y-%m', published_date) as month,
+                               SUM(LENGTH(cve_ids) - LENGTH(REPLACE(cve_ids, ',', '')) + 1) as count
+                        FROM dell_advisories
+                        WHERE published_date IS NOT NULL AND published_date != ''
+                          AND cve_ids IS NOT NULL AND cve_ids != ''
+                        GROUP BY month
+                        ORDER BY month DESC
+                        LIMIT 13
+                    """).fetchall()
+
+            result = [(row[0], row[1]) for row in reversed(rows)]
+            return result
+        except Exception as e:
+            print(f"查询关联月度统计失败: {e}")
+            return []
+            return []
 
     def _update_db_info(self):
         """更新数据库信息面板（版本、表条目数、占用空间）"""
@@ -3742,8 +4204,9 @@ foreach ($tokenName in $targets.Keys) {
 
         # SQLite 版本
         try:
-            sqlite_ver = self.conn.execute("SELECT sqlite_version()").fetchone()[0]
-        except:
+            with self.db_lock:
+                sqlite_ver = self.conn.execute("SELECT sqlite_version()").fetchone()[0]
+        except Exception:
             sqlite_ver = "N/A"
 
         # 数据库文件大小
@@ -3753,7 +4216,7 @@ foreach ($tokenName in $targets.Keys) {
                 db_size_str = f"{db_size_bytes / 1048576:.1f} MB"
             else:
                 db_size_str = f"{db_size_bytes / 1024:.0f} KB"
-        except:
+        except Exception:
             db_size_str = "N/A"
             db_size_bytes = 0
 
@@ -3767,7 +4230,7 @@ foreach ($tokenName in $targets.Keys) {
                     wal_size_str = f" + WAL {wal_bytes / 1048576:.1f} MB"
                 else:
                     wal_size_str = f" + WAL {wal_bytes / 1024:.0f} KB"
-        except:
+        except Exception:
             pass
 
         # Redis 状态
@@ -3779,7 +4242,7 @@ foreach ($tokenName in $targets.Keys) {
                 used = mem_info.get('used_memory_human', 'N/A')
                 redis_text = f"v{redis_ver} ({used})"
                 redis_fg = "#27ae60"
-            except:
+            except Exception:
                 redis_text = "连接异常"
                 redis_fg = "#e74c3c"
         else:
@@ -3828,13 +4291,14 @@ foreach ($tokenName in $targets.Keys) {
         # 获取实际数据库文件大小作为合计基准
         try:
             actual_db_bytes = self.db_path.stat().st_size
-        except:
+        except Exception:
             actual_db_bytes = 0
 
         page_size = 4096
         try:
-            page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
-        except:
+            with self.db_lock:
+                page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
+        except Exception:
             pass
 
         # 第一轮：收集每个表的 dbstat 原始页数
@@ -3844,18 +4308,20 @@ foreach ($tokenName in $targets.Keys) {
 
         for tbl, display_name in tables:
             try:
-                cnt = self.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
-            except:
+                with self.db_lock:
+                    cnt = self.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            except Exception:
                 cnt = 0
             total_rows += cnt
 
             tbl_bytes = 0
             try:
-                pages = self.conn.execute(
-                    "SELECT COUNT(*) FROM dbstat WHERE name = ?", (tbl,)
-                ).fetchone()[0]
+                with self.db_lock:
+                    pages = self.conn.execute(
+                        "SELECT COUNT(*) FROM dbstat WHERE name = ?", (tbl,)
+                    ).fetchone()[0]
                 tbl_bytes = pages * page_size
-            except:
+            except Exception:
                 tbl_bytes = max(cnt * 512, page_size) if cnt > 0 else page_size
             raw_total += tbl_bytes
             raw_table_bytes.append((display_name, cnt, tbl_bytes))
@@ -3931,7 +4397,7 @@ foreach ($tokenName in $targets.Keys) {
 
         # ── 左侧控制面板 ──────────────────────────────────────────────
         left_outer = tk.Frame(main_paned, bg="white")
-        main_paned.add(left_outer, width=300, minsize=220)
+        main_paned.add(left_outer, width=200, minsize=150)
 
         left_canvas = tk.Canvas(left_outer, bg="white", highlightthickness=0)
         left_scroll = tk.Scrollbar(left_outer, orient=tk.VERTICAL, command=left_canvas.yview)
@@ -3981,7 +4447,7 @@ foreach ($tokenName in $targets.Keys) {
         ).pack(side=tk.LEFT)
         self.learn_url_entry = tk.Entry(
             self.learn_url_frame, font=("Microsoft YaHei", 9),
-            relief=tk.SOLID, bd=1, width=22
+            relief=tk.SOLID, bd=1, width=14
         )
         self.learn_url_entry.pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
         self.learn_url_fetch_btn = tk.Button(
@@ -4003,11 +4469,38 @@ foreach ($tokenName in $targets.Keys) {
         self.learn_db_type_combo = ttk.Combobox(
             self.learn_db_type_frame,
             values=["IT新闻简报", "Dell安全公告", "Dell技术库", "CVE漏洞数据", "AI分析记录", "学习对话记录"],
-            state="readonly", width=13, font=("Microsoft YaHei", 9)
+            state="readonly", width=10, font=("Microsoft YaHei", 9)
         )
         self.learn_db_type_combo.current(0)
         self.learn_db_type_combo.pack(side=tk.LEFT, padx=4)
         self.learn_db_type_combo.bind("<<ComboboxSelected>>", self._on_learn_db_type_change)
+
+        # 关键字搜索行
+        self.learn_search_frame = tk.Frame(data_frame, bg="white")
+        self.learn_search_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
+        tk.Label(
+            self.learn_search_frame, text="关键字:", bg="white",
+            font=("Microsoft YaHei", 9)
+        ).pack(side=tk.LEFT)
+        self.learn_search_var = tk.StringVar()
+        self.learn_search_entry = tk.Entry(
+            self.learn_search_frame, textvariable=self.learn_search_var,
+            font=("Microsoft YaHei", 9), width=10, relief=tk.SOLID, bd=1
+        )
+        self.learn_search_entry.pack(side=tk.LEFT, padx=4)
+        self.learn_search_entry.bind("<Return>", lambda e: self._refresh_learn_sub_items())
+        tk.Button(
+            self.learn_search_frame, text="搜索", command=self._refresh_learn_sub_items,
+            bg=self.primary_color, fg="white",
+            font=("Microsoft YaHei", 8, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=6
+        ).pack(side=tk.LEFT, padx=(2, 0))
+        tk.Button(
+            self.learn_search_frame, text="清除", command=self._clear_learn_search,
+            bg="#95a5a6", fg="white",
+            font=("Microsoft YaHei", 8),
+            relief=tk.FLAT, cursor="hand2", padx=6
+        ).pack(side=tk.LEFT, padx=(2, 0))
 
         # 下一级选择区域
         self.learn_sub_frame = tk.Frame(data_frame, bg="white")
@@ -4018,7 +4511,7 @@ foreach ($tokenName in $targets.Keys) {
         ).pack(side=tk.LEFT)
         self.learn_sub_combo = ttk.Combobox(
             self.learn_sub_frame,
-            state="readonly", width=28, font=("Microsoft YaHei", 9)
+            state="readonly", width=18, font=("Microsoft YaHei", 9)
         )
         self.learn_sub_combo.pack(side=tk.LEFT, padx=4)
         # 初始化下一级菜单
@@ -4107,6 +4600,40 @@ foreach ($tokenName in $targets.Keys) {
         )
         self.learn_save_btn.pack(fill=tk.X, pady=(4, 0))
 
+        # 5. 知识巩固区
+        consolidate_frame = tk.LabelFrame(
+            left_panel, text="🧩 知识巩固", bg="white",
+            font=("Microsoft YaHei", 9, "bold"), fg=self.primary_color
+        )
+        consolidate_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        self.learn_gen_cards_btn = tk.Button(
+            consolidate_frame, text="🃏 AI 生成闪卡",
+            command=self._generate_flashcards,
+            bg="#8e44ad", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_gen_cards_btn.pack(fill=tk.X, padx=8, pady=(6, 2))
+
+        self.learn_quiz_btn = tk.Button(
+            consolidate_frame, text="📝 知识问答",
+            command=self._open_quiz_window,
+            bg="#e67e22", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_quiz_btn.pack(fill=tk.X, padx=8, pady=2)
+
+        self.learn_flashcard_btn = tk.Button(
+            consolidate_frame, text="🔄 闪卡复习",
+            command=self._open_flashcard_window,
+            bg="#16a085", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_flashcard_btn.pack(fill=tk.X, padx=8, pady=(2, 6))
+
         # ── 右侧对话区域 ──────────────────────────────────────────────
         right_panel = tk.Frame(main_paned, bg="white")
         main_paned.add(right_panel)
@@ -4187,79 +4714,132 @@ foreach ($tokenName in $targets.Keys) {
         src = self.learn_source_var.get()
         if src == "db":
             self.learn_db_type_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
+            self.learn_search_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
             self.learn_sub_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
             self.learn_url_frame.pack_forget()
             self._refresh_learn_sub_items()
         elif src == "url":
             self.learn_db_type_frame.pack_forget()
+            self.learn_search_frame.pack_forget()
             self.learn_sub_frame.pack_forget()
             self.learn_url_frame.pack(fill=tk.X, padx=16, pady=(0, 4))
         else:
             self.learn_db_type_frame.pack_forget()
+            self.learn_search_frame.pack_forget()
             self.learn_sub_frame.pack_forget()
             self.learn_url_frame.pack_forget()
 
     def _on_learn_db_type_change(self, event=None):
-        """数据源下拉切换时刷新下一级菜单"""
+        """数据源下拉切换时清空搜索并刷新下一级菜单"""
+        self.learn_search_var.set("")
         self._refresh_learn_sub_items()
 
     def _refresh_learn_sub_items(self):
-        """根据当前数据源类型刷新下一级选择菜单"""
+        """根据当前数据源类型和关键字刷新下一级选择菜单"""
         db_type = self.learn_db_type_combo.get()
+        keyword = self.learn_search_var.get().strip()
         items = []
+        limit = 500 if keyword else 200
         try:
             with self.db_lock:
                 cursor = self.conn.cursor()
                 if db_type == "IT新闻简报":
-                    cursor.execute(
-                        "SELECT DISTINCT brief_date FROM news_briefs ORDER BY brief_date DESC LIMIT 120"
-                    )
+                    if keyword:
+                        cursor.execute(
+                            "SELECT DISTINCT brief_date FROM news_briefs WHERE brief_date LIKE ? OR content LIKE ? ORDER BY brief_date DESC LIMIT ?",
+                            (f"%{keyword}%", f"%{keyword}%", limit)
+                        )
+                    else:
+                        cursor.execute(
+                            "SELECT DISTINCT brief_date FROM news_briefs ORDER BY brief_date DESC LIMIT ?", (limit,)
+                        )
                     for (d,) in cursor.fetchall():
                         items.append(d)
                 elif db_type == "Dell安全公告":
-                    cursor.execute(
-                        "SELECT dsa_id, title FROM dell_advisories ORDER BY published_date DESC LIMIT 200"
-                    )
+                    if keyword:
+                        cursor.execute(
+                            "SELECT dsa_id, title FROM dell_advisories WHERE dsa_id LIKE ? OR title LIKE ? OR cve_ids LIKE ? ORDER BY published_date DESC LIMIT ?",
+                            (f"%{keyword}%", f"%{keyword}%", f"%{keyword}%", limit)
+                        )
+                    else:
+                        cursor.execute(
+                            "SELECT dsa_id, title FROM dell_advisories ORDER BY published_date DESC LIMIT ?", (limit,)
+                        )
                     for dsa_id, title in cursor.fetchall():
                         display = f"{dsa_id} - {(title or '')[:35]}"
                         items.append(display)
                 elif db_type == "Dell技术库":
-                    cursor.execute(
-                        "SELECT article_id, title FROM dell_kb_articles ORDER BY collected_date DESC LIMIT 200"
-                    )
+                    if keyword:
+                        cursor.execute(
+                            "SELECT article_id, title FROM dell_kb_articles WHERE article_id LIKE ? OR title LIKE ? ORDER BY collected_date DESC LIMIT ?",
+                            (f"%{keyword}%", f"%{keyword}%", limit)
+                        )
+                    else:
+                        cursor.execute(
+                            "SELECT article_id, title FROM dell_kb_articles ORDER BY collected_date DESC LIMIT ?", (limit,)
+                        )
                     for aid, title in cursor.fetchall():
                         display = f"{aid} - {(title or '')[:35]}"
                         items.append(display)
                 elif db_type == "CVE漏洞数据":
-                    cursor.execute(
-                        "SELECT cve_id FROM cves ORDER BY published_date DESC LIMIT 200"
-                    )
-                    for (cve_id,) in cursor.fetchall():
-                        items.append(cve_id)
+                    if keyword:
+                        cursor.execute(
+                            "SELECT cve_id FROM cves WHERE cve_id LIKE ? ORDER BY published_date DESC LIMIT ?",
+                            (f"%{keyword}%", limit)
+                        )
+                        for (cve_id,) in cursor.fetchall():
+                            items.append(cve_id)
+                    else:
+                        cursor.execute(
+                            "SELECT cve_id FROM cves ORDER BY published_date DESC LIMIT ?", (limit,)
+                        )
+                        for (cve_id,) in cursor.fetchall():
+                            items.append(cve_id)
                 elif db_type == "AI分析记录":
-                    cursor.execute(
-                        "SELECT cve_id, dell_advisory_id, analysis_time FROM ai_solutions "
-                        "ORDER BY analysis_time DESC LIMIT 100"
-                    )
+                    if keyword:
+                        cursor.execute(
+                            "SELECT cve_id, dell_advisory_id, analysis_time FROM ai_solutions "
+                            "WHERE cve_id LIKE ? OR dell_advisory_id LIKE ? "
+                            "ORDER BY analysis_time DESC LIMIT ?",
+                            (f"%{keyword}%", f"%{keyword}%", limit)
+                        )
+                    else:
+                        cursor.execute(
+                            "SELECT cve_id, dell_advisory_id, analysis_time FROM ai_solutions "
+                            "ORDER BY analysis_time DESC LIMIT ?", (limit,)
+                        )
                     for cve_id, dsa_id, ts in cursor.fetchall():
                         ts_short = (ts or "")[:16]
                         items.append(f"{cve_id} / {dsa_id or 'N/A'} ({ts_short})")
                 elif db_type == "学习对话记录":
-                    cursor.execute(
-                        "SELECT id, topic, level, created_at FROM learn_sessions "
-                        "ORDER BY created_at DESC LIMIT 100"
-                    )
+                    if keyword:
+                        cursor.execute(
+                            "SELECT id, topic, level, created_at FROM learn_sessions "
+                            "WHERE topic LIKE ? ORDER BY created_at DESC LIMIT ?",
+                            (f"%{keyword}%", limit)
+                        )
+                    else:
+                        cursor.execute(
+                            "SELECT id, topic, level, created_at FROM learn_sessions "
+                            "ORDER BY created_at DESC LIMIT ?", (limit,)
+                        )
                     for sid, topic, level, ts in cursor.fetchall():
                         ts_short = (ts or "")[:16]
                         items.append(f"#{sid} {(topic or '')[:20]} [{level or ''}] ({ts_short})")
         except Exception as e:
             self.log(f"刷新学习子菜单失败: {e}")
 
-        self.learn_sub_combo['values'] = items if items else ["(暂无数据)"]
+        hint = f"(搜索 '{keyword}' 共 {len(items)} 条)" if keyword else "(暂无数据)"
+        self.learn_sub_combo['values'] = items if items else [hint]
         if items:
             self.learn_sub_combo.current(0)
         else:
-            self.learn_sub_combo.set("(暂无数据)")
+            self.learn_sub_combo.set(hint)
+
+    def _clear_learn_search(self):
+        """清除关键字搜索并刷新列表"""
+        self.learn_search_var.set("")
+        self._refresh_learn_sub_items()
 
     def _load_learn_content(self):
         """加载学习内容到预览框"""
@@ -4378,8 +4958,8 @@ foreach ($tokenName in $targets.Keys) {
                     topic_hint = f"Dell技术文档学习 ({article_id})"
 
                 elif db_type == "CVE漏洞数据":
-                    # sub_val 是 CVE ID 如 "CVE-2026-1234"
-                    cve_id = sub_val.strip()
+                    # sub_val 可能是 "CVE-2026-1234" 或 "CVE-2026-1234 - desc..."
+                    cve_id = sub_val.split(" - ")[0].strip()
                     cursor.execute(
                         "SELECT data FROM cves WHERE cve_id = ?", (cve_id,)
                     )
@@ -4387,25 +4967,32 @@ foreach ($tokenName in $targets.Keys) {
                     if row and row[0]:
                         try:
                             d = json.loads(row[0])
-                            desc = ""
-                            descs = d.get("descriptions", [])
-                            for item in descs:
-                                if item.get("lang") == "en":
-                                    desc = item.get("value", "")
-                                    break
-                            metrics = d.get("metrics", {})
-                            cvss = metrics.get("cvssMetricV31", metrics.get("cvssMetricV30", []))
-                            severity, score, vector = "", "", ""
-                            if cvss:
-                                cvss_data = cvss[0].get("cvssData", {})
-                                severity = cvss_data.get("baseSeverity", "")
-                                score = cvss_data.get("baseScore", "")
-                                vector = cvss_data.get("vectorString", "")
+                            # 兼容扁平格式（collect_cves 生成）和 NVD 原始嵌套格式
+                            desc = d.get("description", "")
+                            if not desc:
+                                for item in d.get("descriptions", []):
+                                    if isinstance(item, dict) and item.get("lang") == "en":
+                                        desc = item.get("value", "")
+                                        break
+                            severity = d.get("cvss_severity", "")
+                            score = d.get("cvss_score", "")
+                            vector = d.get("cvss_vector", "")
+                            if not severity:
+                                metrics = d.get("metrics", {})
+                                cvss = metrics.get("cvssMetricV31", metrics.get("cvssMetricV30", []))
+                                if cvss:
+                                    cvss_data = cvss[0].get("cvssData", {})
+                                    severity = cvss_data.get("baseSeverity", "")
+                                    score = cvss_data.get("baseScore", "")
+                                    vector = cvss_data.get("vectorString", "")
                             weaknesses = []
                             for w in d.get("weaknesses", []):
-                                for wd in w.get("description", []):
-                                    if wd.get("lang") == "en":
-                                        weaknesses.append(wd.get("value", ""))
+                                if isinstance(w, str):
+                                    weaknesses.append(w)
+                                elif isinstance(w, dict):
+                                    for wd in w.get("description", []):
+                                        if isinstance(wd, dict) and wd.get("lang") == "en":
+                                            weaknesses.append(wd.get("value", ""))
                             refs = d.get("references", [])
 
                             content_lines.append(f"【CVE漏洞: {cve_id}】")
@@ -4894,6 +5481,561 @@ foreach ($tokenName in $targets.Keys) {
             ),
         }
         return prompts.get(level, prompts["入门"])
+
+    # ==================== 知识巩固：闪卡 & 问答 ====================
+
+    def _generate_flashcards(self):
+        """基于当前学习对话，让 AI 生成闪卡和选择题"""
+        if not self.learn_messages or len(self.learn_messages) < 3:
+            messagebox.showwarning("提示", "请先进行至少一轮学习对话，再生成闪卡。")
+            return
+
+        self.learn_gen_cards_btn.config(state=tk.DISABLED, text="正在生成...")
+        self.learn_status_label.config(text="AI 正在生成闪卡和选择题...")
+        threading.Thread(
+            target=self._generate_flashcards_thread, daemon=True
+        ).start()
+
+    def _generate_flashcards_thread(self):
+        """后台线程：调用 AI 生成闪卡和选择题"""
+        try:
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                self.root.after(0, messagebox.showerror, "配置错误",
+                                "未设置 QWEN_API_KEY，无法调用 AI")
+                return
+
+            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            base_url = os.getenv(
+                "QWEN_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+
+            # 提取对话内容摘要
+            conv_text = ""
+            for m in self.learn_messages:
+                if m["role"] in ("user", "assistant"):
+                    conv_text += f"{m['content']}\n\n"
+            conv_text = conv_text[:4000]  # 限制长度
+
+            topic = getattr(self, 'learn_topic', '') or "未知主题"
+
+            prompt = (
+                f"基于以下关于「{topic}」的学习对话内容，生成学习卡片。\n\n"
+                f"对话内容：\n{conv_text}\n\n"
+                "请严格按以下 JSON 格式返回，不要添加任何其他文字、markdown标记或代码块标记：\n"
+                '{"flashcards": [\n'
+                '  {"question": "概念问题", "answer": "简明解释"}\n'
+                '],\n'
+                '"quizzes": [\n'
+                '  {"question": "题目", "options": ["A. 选项1", "B. 选项2", "C. 选项3", "D. 选项4"], '
+                '"correct": 0, "explanation": "解析"}\n'
+                ']}\n\n'
+                "要求：\n"
+                "1. 生成 3-5 张闪卡（概念→解释），覆盖对话中的核心知识点\n"
+                "2. 生成 3-5 道四选一选择题，correct 为正确选项索引(0-3)\n"
+                "3. 题目应覆盖不同难度和知识点\n"
+                "4. 仅返回 JSON，不要有任何其他内容"
+            )
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一位教育专家，擅长将学习内容转化为闪卡和选择题。仅返回纯JSON，不要使用markdown代码块。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=3000,
+            )
+            reply = response.choices[0].message.content.strip()
+
+            # 清理 markdown 代码块标记
+            if reply.startswith("```"):
+                lines = reply.split("\n")
+                # 移除首尾的 ``` 行
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                reply = "\n".join(lines)
+
+            data = json.loads(reply)
+            flashcards = data.get("flashcards", [])
+            quizzes = data.get("quizzes", [])
+
+            saved_count = 0
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                for card in flashcards:
+                    cursor.execute(
+                        """INSERT INTO flashcards (topic, question, answer, card_type, difficulty)
+                           VALUES (?, ?, ?, 'flashcard', 1)""",
+                        (topic, card["question"], card["answer"])
+                    )
+                    saved_count += 1
+
+                for quiz in quizzes:
+                    options_json = json.dumps(quiz["options"], ensure_ascii=False)
+                    explanation = quiz.get("explanation", "")
+                    cursor.execute(
+                        """INSERT INTO flashcards
+                           (topic, question, answer, options, correct_option, card_type, difficulty)
+                           VALUES (?, ?, ?, ?, ?, 'quiz', 2)""",
+                        (topic, quiz["question"], explanation,
+                         options_json, quiz["correct"])
+                    )
+                    saved_count += 1
+                self.conn.commit()
+
+            msg = f"已生成 {len(flashcards)} 张闪卡 + {len(quizzes)} 道选择题，共 {saved_count} 条"
+            self.root.after(0, self._learn_append_message,
+                            f"【知识巩固】{msg}\n可点击「知识问答」或「闪卡复习」进行练习。",
+                            "system")
+            self.root.after(0, self.learn_status_label.config, {"text": msg})
+            self.root.after(0, messagebox.showinfo, "生成完成", msg)
+
+        except json.JSONDecodeError as e:
+            err = f"AI 返回格式解析失败: {e}"
+            self.root.after(0, self._learn_append_message, err, "system")
+            self.root.after(0, self.learn_status_label.config, {"text": err})
+        except Exception as e:
+            err = f"生成闪卡失败: {e}"
+            self.root.after(0, self._learn_append_message, err, "system")
+            self.root.after(0, self.learn_status_label.config, {"text": err})
+        finally:
+            self.root.after(0, self.learn_gen_cards_btn.config,
+                            {"state": tk.NORMAL, "text": "🃏 AI 生成闪卡"})
+
+    def _open_quiz_window(self):
+        """打开知识问答窗口（选择题模式）"""
+        topic = getattr(self, 'learn_topic', '') or self.learn_topic_entry.get().strip()
+
+        # 从数据库获取该主题的选择题
+        quizzes = []
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                if topic:
+                    cursor.execute(
+                        "SELECT id, question, answer, options, correct_option "
+                        "FROM flashcards WHERE card_type='quiz' AND topic=? "
+                        "ORDER BY RANDOM()", (topic,))
+                else:
+                    cursor.execute(
+                        "SELECT id, question, answer, options, correct_option "
+                        "FROM flashcards WHERE card_type='quiz' "
+                        "ORDER BY RANDOM() LIMIT 20")
+                quizzes = cursor.fetchall()
+        except Exception as e:
+            messagebox.showerror("错误", f"加载题目失败: {e}")
+            return
+
+        if not quizzes:
+            messagebox.showinfo("提示",
+                                "当前主题暂无选择题。\n请先进行学习对话，然后点击「AI 生成闪卡」。")
+            return
+
+        # 创建问答窗口
+        quiz_win = tk.Toplevel(self.root)
+        quiz_win.title(f"知识问答 — {topic or '全部主题'}")
+        quiz_win.geometry("650x520")
+        quiz_win.configure(bg="white")
+        quiz_win.transient(self.root)
+        quiz_win.grab_set()
+
+        # 状态变量
+        quiz_state = {
+            "index": 0,
+            "score": 0,
+            "total": len(quizzes),
+            "answered": False,
+        }
+
+        # 顶部进度条
+        progress_frame = tk.Frame(quiz_win, bg="#f0f0f0")
+        progress_frame.pack(fill=tk.X, padx=15, pady=(12, 0))
+        progress_label = tk.Label(
+            progress_frame, text=f"第 1/{len(quizzes)} 题",
+            bg="#f0f0f0", font=("Microsoft YaHei", 10, "bold"),
+            fg=self.primary_color
+        )
+        progress_label.pack(side=tk.LEFT, padx=5)
+        score_label = tk.Label(
+            progress_frame, text="得分: 0",
+            bg="#f0f0f0", font=("Microsoft YaHei", 10, "bold"),
+            fg=self.success_color
+        )
+        score_label.pack(side=tk.RIGHT, padx=5)
+
+        # 题目区域
+        question_frame = tk.Frame(quiz_win, bg="white")
+        question_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
+
+        question_label = tk.Label(
+            question_frame, text="", bg="white",
+            font=("Microsoft YaHei", 12), wraplength=580,
+            justify=tk.LEFT, anchor="nw"
+        )
+        question_label.pack(fill=tk.X, pady=(5, 15))
+
+        # 选项按钮容器
+        options_frame = tk.Frame(question_frame, bg="white")
+        options_frame.pack(fill=tk.X)
+        option_buttons = []
+
+        # 解析区域
+        explain_label = tk.Label(
+            question_frame, text="", bg="#f8f9fa",
+            font=("Microsoft YaHei", 10), wraplength=580,
+            justify=tk.LEFT, anchor="nw", padx=10, pady=8
+        )
+
+        def load_question(idx):
+            """加载指定索引的题目"""
+            if idx >= len(quizzes):
+                show_result()
+                return
+
+            quiz_state["answered"] = False
+            qid, question, explanation, options_json, correct = quizzes[idx]
+
+            progress_label.config(text=f"第 {idx + 1}/{len(quizzes)} 题")
+            question_label.config(text=question)
+            explain_label.pack_forget()
+            explain_label.config(text="")
+
+            try:
+                options = json.loads(options_json)
+            except Exception:
+                options = ["A. ?", "B. ?", "C. ?", "D. ?"]
+
+            # 清除旧按钮
+            for btn in option_buttons:
+                btn.destroy()
+            option_buttons.clear()
+
+            for i, opt_text in enumerate(options):
+                btn = tk.Button(
+                    options_frame, text=opt_text,
+                    font=("Microsoft YaHei", 10), bg="#f5f5f5",
+                    fg="#333", anchor="w", padx=15, pady=8,
+                    relief=tk.GROOVE, cursor="hand2",
+                    command=lambda ci=i: on_answer(ci, correct, explanation)
+                )
+                btn.pack(fill=tk.X, pady=3)
+                option_buttons.append(btn)
+
+            next_btn.config(state=tk.DISABLED)
+
+        def on_answer(chosen, correct, explanation):
+            """用户选择答案"""
+            if quiz_state["answered"]:
+                return
+            quiz_state["answered"] = True
+
+            is_correct = (chosen == correct)
+            if is_correct:
+                quiz_state["score"] += 1
+
+            score_label.config(text=f"得分: {quiz_state['score']}")
+
+            # 高亮显示
+            for i, btn in enumerate(option_buttons):
+                if i == correct:
+                    btn.config(bg="#27ae60", fg="white")
+                elif i == chosen and not is_correct:
+                    btn.config(bg="#e74c3c", fg="white")
+                btn.config(state=tk.DISABLED)
+
+            # 显示解析
+            result_text = "正确! " if is_correct else "错误! "
+            if explanation:
+                result_text += f"\n解析: {explanation}"
+            explain_label.config(
+                text=result_text,
+                bg="#e8f8f5" if is_correct else "#fdf2e9"
+            )
+            explain_label.pack(fill=tk.X, pady=(10, 0))
+
+            # 更新数据库统计
+            try:
+                qid = quizzes[quiz_state["index"]][0]
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        "UPDATE flashcards SET review_count = review_count + 1"
+                        + (", correct_count = correct_count + 1" if is_correct else "")
+                        + " WHERE id = ?", (qid,))
+                    self.conn.commit()
+            except Exception:
+                pass
+
+            next_btn.config(state=tk.NORMAL)
+
+        def next_question():
+            """下一题"""
+            quiz_state["index"] += 1
+            load_question(quiz_state["index"])
+
+        def show_result():
+            """显示最终结果"""
+            for btn in option_buttons:
+                btn.destroy()
+            option_buttons.clear()
+
+            total = quiz_state["total"]
+            score = quiz_state["score"]
+            pct = round(score / total * 100) if total > 0 else 0
+
+            if pct >= 80:
+                emoji, comment = "🎉", "优秀！知识掌握扎实！"
+            elif pct >= 60:
+                emoji, comment = "👍", "不错！还有提升空间。"
+            else:
+                emoji, comment = "💪", "继续加油！建议复习闪卡。"
+
+            question_label.config(
+                text=f"\n{emoji} 答题完成！\n\n"
+                     f"总题数: {total}\n"
+                     f"正确数: {score}\n"
+                     f"正确率: {pct}%\n\n"
+                     f"{comment}",
+                font=("Microsoft YaHei", 14), anchor="center"
+            )
+            explain_label.pack_forget()
+            next_btn.config(state=tk.DISABLED)
+
+        # 底部按钮栏
+        bottom_frame = tk.Frame(quiz_win, bg="white")
+        bottom_frame.pack(fill=tk.X, padx=15, pady=(0, 12))
+
+        next_btn = tk.Button(
+            bottom_frame, text="下一题 →",
+            command=next_question,
+            bg=self.primary_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=20, pady=6
+        )
+        next_btn.pack(side=tk.RIGHT)
+
+        tk.Button(
+            bottom_frame, text="关闭",
+            command=quiz_win.destroy,
+            bg="#95a5a6", fg="white",
+            font=("Microsoft YaHei", 10),
+            relief=tk.FLAT, cursor="hand2", padx=20, pady=6
+        ).pack(side=tk.LEFT)
+
+        # 加载第一题
+        load_question(0)
+
+    def _open_flashcard_window(self):
+        """打开闪卡复习窗口（卡片翻转模式）"""
+        topic = getattr(self, 'learn_topic', '') or self.learn_topic_entry.get().strip()
+
+        # 从数据库获取闪卡
+        cards = []
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                if topic:
+                    cursor.execute(
+                        "SELECT id, question, answer, review_count, correct_count "
+                        "FROM flashcards WHERE card_type='flashcard' AND topic=? "
+                        "ORDER BY RANDOM()", (topic,))
+                else:
+                    cursor.execute(
+                        "SELECT id, question, answer, review_count, correct_count "
+                        "FROM flashcards WHERE card_type='flashcard' "
+                        "ORDER BY RANDOM() LIMIT 30")
+                cards = cursor.fetchall()
+        except Exception as e:
+            messagebox.showerror("错误", f"加载闪卡失败: {e}")
+            return
+
+        if not cards:
+            messagebox.showinfo("提示",
+                                "当前主题暂无闪卡。\n请先进行学习对话，然后点击「AI 生成闪卡」。")
+            return
+
+        # 创建闪卡窗口
+        fc_win = tk.Toplevel(self.root)
+        fc_win.title(f"闪卡复习 — {topic or '全部主题'}")
+        fc_win.geometry("580x450")
+        fc_win.configure(bg="#f0f4f8")
+        fc_win.transient(self.root)
+        fc_win.grab_set()
+
+        fc_state = {
+            "index": 0,
+            "flipped": False,
+            "stats": {"know": 0, "fuzzy": 0, "unknown": 0},
+        }
+
+        # 顶部进度
+        top_frame = tk.Frame(fc_win, bg="#f0f4f8")
+        top_frame.pack(fill=tk.X, padx=15, pady=(12, 0))
+        fc_progress = tk.Label(
+            top_frame, text=f"第 1/{len(cards)} 张",
+            bg="#f0f4f8", font=("Microsoft YaHei", 10, "bold"),
+            fg=self.primary_color
+        )
+        fc_progress.pack(side=tk.LEFT)
+        fc_stats_label = tk.Label(
+            top_frame, text="",
+            bg="#f0f4f8", font=("Microsoft YaHei", 9), fg="#666"
+        )
+        fc_stats_label.pack(side=tk.RIGHT)
+
+        # 卡片区域
+        card_frame = tk.Frame(
+            fc_win, bg="white", relief=tk.RAISED, bd=2,
+            padx=30, pady=25
+        )
+        card_frame.pack(fill=tk.BOTH, expand=True, padx=25, pady=15)
+
+        card_side_label = tk.Label(
+            card_frame, text="问题", bg="white",
+            font=("Microsoft YaHei", 9), fg="#999"
+        )
+        card_side_label.pack(anchor="nw")
+
+        card_content = tk.Label(
+            card_frame, text="", bg="white",
+            font=("Microsoft YaHei", 13), wraplength=480,
+            justify=tk.LEFT, anchor="nw"
+        )
+        card_content.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        # 翻转按钮
+        flip_btn = tk.Button(
+            card_frame, text="点击翻转查看答案",
+            font=("Microsoft YaHei", 9), bg="#ecf0f1", fg="#666",
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        flip_btn.pack(fill=tk.X, pady=(10, 0))
+
+        def load_card(idx):
+            if idx >= len(cards):
+                show_summary()
+                return
+
+            fc_state["flipped"] = False
+            cid, question, answer, rev_cnt, cor_cnt = cards[idx]
+
+            fc_progress.config(text=f"第 {idx + 1}/{len(cards)} 张")
+            card_side_label.config(text="问题", fg="#3498db")
+            card_content.config(text=question, fg="#2c3e50")
+            flip_btn.config(text="点击翻转查看答案", state=tk.NORMAL)
+
+            for btn in rating_buttons:
+                btn.config(state=tk.DISABLED)
+
+        def flip_card():
+            if fc_state["flipped"]:
+                return
+            fc_state["flipped"] = True
+
+            cid, question, answer, rev_cnt, cor_cnt = cards[fc_state["index"]]
+            card_side_label.config(text="答案", fg="#27ae60")
+            card_content.config(text=answer, fg="#2c3e50")
+            flip_btn.config(text="已翻转", state=tk.DISABLED)
+
+            for btn in rating_buttons:
+                btn.config(state=tk.NORMAL)
+
+        flip_btn.config(command=flip_card)
+
+        def rate_card(rating):
+            """评分并进入下一张"""
+            cid = cards[fc_state["index"]][0]
+            fc_state["stats"][rating] += 1
+
+            is_correct = rating == "know"
+
+            # 更新数据库
+            try:
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    # 根据评分设置下次复习间隔
+                    if rating == "know":
+                        interval_days = 7
+                    elif rating == "fuzzy":
+                        interval_days = 2
+                    else:
+                        interval_days = 0  # 明天复习
+
+                    next_review = (datetime.now() + timedelta(days=interval_days)).isoformat()
+                    cursor.execute(
+                        "UPDATE flashcards SET review_count = review_count + 1"
+                        + (", correct_count = correct_count + 1" if is_correct else "")
+                        + ", next_review = ? WHERE id = ?",
+                        (next_review, cid))
+                    self.conn.commit()
+            except Exception:
+                pass
+
+            # 更新统计显示
+            s = fc_state["stats"]
+            fc_stats_label.config(
+                text=f"掌握:{s['know']}  模糊:{s['fuzzy']}  不熟:{s['unknown']}"
+            )
+
+            fc_state["index"] += 1
+            load_card(fc_state["index"])
+
+        def show_summary():
+            card_side_label.config(text="复习完成", fg="#8e44ad")
+            s = fc_state["stats"]
+            total = s["know"] + s["fuzzy"] + s["unknown"]
+            pct = round(s["know"] / total * 100) if total > 0 else 0
+
+            card_content.config(
+                text=f"共复习 {total} 张闪卡\n\n"
+                     f"掌握: {s['know']}  ({pct}%)\n"
+                     f"模糊: {s['fuzzy']}\n"
+                     f"不熟: {s['unknown']}\n\n"
+                     f"{'很好！继续保持！' if pct >= 70 else '建议重新复习不熟的卡片。'}",
+                font=("Microsoft YaHei", 13)
+            )
+            flip_btn.pack_forget()
+            for btn in rating_buttons:
+                btn.config(state=tk.DISABLED)
+
+        # 底部评分按钮
+        bottom_frame = tk.Frame(fc_win, bg="#f0f4f8")
+        bottom_frame.pack(fill=tk.X, padx=15, pady=(0, 12))
+
+        rating_buttons = []
+        ratings = [
+            ("不熟", "unknown", "#e74c3c"),
+            ("模糊", "fuzzy", "#f39c12"),
+            ("掌握", "know", "#27ae60"),
+        ]
+        for text, key, color in ratings:
+            btn = tk.Button(
+                bottom_frame, text=text,
+                command=lambda k=key: rate_card(k),
+                bg=color, fg="white",
+                font=("Microsoft YaHei", 10, "bold"),
+                relief=tk.FLAT, cursor="hand2", padx=15, pady=6,
+                state=tk.DISABLED
+            )
+            btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=4)
+            rating_buttons.append(btn)
+
+        tk.Button(
+            bottom_frame, text="关闭",
+            command=fc_win.destroy,
+            bg="#95a5a6", fg="white",
+            font=("Microsoft YaHei", 9),
+            relief=tk.FLAT, cursor="hand2", padx=10, pady=6
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        # 加载第一张
+        load_card(0)
 
     # ==================== 操作日志 ====================
 
@@ -5901,9 +7043,10 @@ foreach ($tokenName in $targets.Keys) {
             if dell_total > 0:
                 self.log("⚡ 正在自动加载Dell安全公告数据...")
                 try:
-                    cursor = self.conn.cursor()
-                    cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
-                    records = cursor.fetchall()
+                    with self.db_lock:
+                        cursor = self.conn.cursor()
+                        cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
+                        records = cursor.fetchall()
                     self.dell_advisories = []
 
                     for record in records:
@@ -6540,16 +7683,17 @@ foreach ($tokenName in $targets.Keys) {
             # 检查Dell数据
             if not hasattr(self, 'dell_advisories') or not self.dell_advisories:
                 # 如果内存中没有Dell数据，从数据库加载
-                cursor = self.conn.cursor()
-                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
-                records = cursor.fetchall()
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
+                    records = cursor.fetchall()
                 dell_advisories = []
                 for record in records:
                     try:
                         if record[0]:
                             data = json.loads(record[0])
                             dell_advisories.append(data)
-                    except:
+                    except Exception:
                         continue
 
                 if not dell_advisories:
@@ -6570,12 +7714,12 @@ foreach ($tokenName in $targets.Keys) {
                 return
 
             # 从数据库查询这些CVE的详细信息
-            cursor = self.conn.cursor()
-            placeholders = ','.join(['?' for _ in all_dell_cve_ids])
-            query = f'SELECT data FROM cves WHERE cve_id IN ({placeholders})'
-            cursor.execute(query, list(all_dell_cve_ids))
-
-            cve_records = cursor.fetchall()
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                placeholders = ','.join(['?' for _ in all_dell_cve_ids])
+                query = f'SELECT data FROM cves WHERE cve_id IN ({placeholders})'
+                cursor.execute(query, list(all_dell_cve_ids))
+                cve_records = cursor.fetchall()
             cve_dict = {}
             for record in cve_records:
                 try:
@@ -6584,7 +7728,7 @@ foreach ($tokenName in $targets.Keys) {
                         cve_id = cve_data.get("cve_id", "")
                         if cve_id:
                             cve_dict[cve_id] = cve_data
-                except:
+                except Exception:
                     continue
 
             if not cve_dict:
@@ -6674,16 +7818,17 @@ foreach ($tokenName in $targets.Keys) {
             # 检查Dell数据
             if not hasattr(self, 'dell_advisories') or not self.dell_advisories:
                 # 如果内存中没有Dell数据，从数据库加载
-                cursor = self.conn.cursor()
-                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
-                records = cursor.fetchall()
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
+                    records = cursor.fetchall()
                 dell_advisories = []
                 for record in records:
                     try:
                         if record[0]:
                             data = json.loads(record[0])
                             dell_advisories.append(data)
-                    except:
+                    except Exception:
                         continue
 
                 if not dell_advisories:
@@ -6704,12 +7849,12 @@ foreach ($tokenName in $targets.Keys) {
                 return
 
             # 从数据库查询这些CVE的详细信息
-            cursor = self.conn.cursor()
-            placeholders = ','.join(['?' for _ in all_dell_cve_ids])
-            query = f'SELECT data FROM cves WHERE cve_id IN ({placeholders})'
-            cursor.execute(query, list(all_dell_cve_ids))
-
-            cve_records = cursor.fetchall()
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                placeholders = ','.join(['?' for _ in all_dell_cve_ids])
+                query = f'SELECT data FROM cves WHERE cve_id IN ({placeholders})'
+                cursor.execute(query, list(all_dell_cve_ids))
+                cve_records = cursor.fetchall()
             cve_dict = {}
             for record in cve_records:
                 try:
@@ -6718,7 +7863,7 @@ foreach ($tokenName in $targets.Keys) {
                         cve_id = cve_data.get("cve_id", "")
                         if cve_id:
                             cve_dict[cve_id] = cve_data
-                except:
+                except Exception:
                     continue
 
             if not cve_dict:
@@ -7601,7 +8746,7 @@ Dell 安全公告详细信息
             if not cve_detail:
                 try:
                     with self.db_lock:
-                        cursor = self.db_conn.cursor()
+                        cursor = self.conn.cursor()
                         cursor.execute("SELECT data FROM cves WHERE cve_id = ?", (cve_id,))
                         row = cursor.fetchone()
                         if row and row[0]:
@@ -7623,7 +8768,7 @@ Dell 安全公告详细信息
                 if not dell_detail:
                     try:
                         with self.db_lock:
-                            cursor = self.db_conn.cursor()
+                            cursor = self.conn.cursor()
                             cursor.execute("SELECT data FROM dell_advisories WHERE dsa_id = ?", (advisory_id,))
                             row = cursor.fetchone()
                             if row and row[0]:
@@ -7957,7 +9102,7 @@ Qwen API密钥未设置。
         """保存AI分析结果到数据库"""
         try:
             with self.db_lock:
-                cursor = self.db_conn.cursor()
+                cursor = self.conn.cursor()
                 # 兼容两种Dell公告ID字段名：dell_security_advisory 或 dsa_id
                 advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id')
 
@@ -7977,10 +9122,54 @@ Qwen API密钥未设置。
                         status
                     )
                 )
-                self.db_conn.commit()
+                self.conn.commit()
         except sqlite3.OperationalError as e:
             # 表可能不存在，尝试创建
             self.log(f"数据库操作失败，尝试创建ai_solutions表: {str(e)}")
+            try:
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS ai_solutions (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            cve_id TEXT NOT NULL,
+                            dell_advisory_id TEXT NOT NULL,
+                            analysis_time TEXT NOT NULL,
+                            model_name TEXT,
+                            prompt TEXT,
+                            result TEXT,
+                            status TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_cve ON ai_solutions(cve_id)")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_advisory ON ai_solutions(dell_advisory_id)")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_time ON ai_solutions(analysis_time)")
+                    self.conn.commit()
+                    self.log("ai_solutions表创建成功，重试插入数据")
+
+                    # 重试插入
+                    advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id')
+                    cursor.execute(
+                        """
+                        INSERT INTO ai_solutions
+                        (cve_id, dell_advisory_id, analysis_time, model_name, prompt, result, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            cve_data.get('cve_id'),
+                            advisory_id,
+                            datetime.now().isoformat(),
+                            os.getenv("QWEN_MODEL", "qwen3.5-plus"),
+                            "",
+                            result[:10000],
+                            status
+                        )
+                    )
+                    self.conn.commit()
+                    self.log("AI分析结果保存成功")
+            except Exception as retry_error:
+                self.log(f"创建表并重试插入失败: {str(retry_error)}")
 
     def load_ai_solution_history(self):
         """从数据库加载历史记录"""
@@ -7990,7 +9179,7 @@ Qwen API密钥未设置。
                 self.solution_tree.delete(item)
 
             with self.db_lock:
-                cursor = self.db_conn.cursor()
+                cursor = self.conn.cursor()
                 cursor.execute(
                     """
                     SELECT id, cve_id, dell_advisory_id, analysis_time, status, result
@@ -8012,7 +9201,7 @@ Qwen API密钥未设置。
                     try:
                         dt = datetime.fromisoformat(analysis_time)
                         time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
-                    except:
+                    except Exception:
                         time_str = analysis_time
 
                     # 生成结果预览
@@ -8242,9 +9431,9 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
 
         try:
             with self.db_lock:
-                cursor = self.db_conn.cursor()
+                cursor = self.conn.cursor()
                 cursor.execute("DELETE FROM ai_solutions")
-                self.db_conn.commit()
+                self.conn.commit()
 
             self.solution_history = []
             self.load_ai_solution_history()
@@ -8295,7 +9484,7 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
 
         try:
             with self.db_lock:
-                cursor = self.db_conn.cursor()
+                cursor = self.conn.cursor()
                 if db_ids:
                     # 使用精确 id 删除（走主键索引，快速且精确）
                     cursor.executemany(
@@ -8309,7 +9498,7 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
                             "DELETE FROM ai_solutions WHERE cve_id = ? AND dell_advisory_id = ? AND analysis_time = ?",
                             (item['cve_id'], item['advisory_id'], item['time'])
                         )
-                self.db_conn.commit()
+                self.conn.commit()
         except sqlite3.Error as e:
             messagebox.showerror("删除失败", f"数据库操作失败：{e}")
             return
@@ -8332,27 +9521,48 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
     def on_matched_item_double_click(self, event):
         """处理关联项目双击事件"""
         selection = self.matched_tree.selection()
-        if selection:
-            item = self.matched_tree.item(selection[0])
-            cve_id = item['values'][0]
-            advisory_id = item['values'][3]
+        if not selection:
+            return
+        item = self.matched_tree.item(selection[0])
+        cve_id = str(item['values'][0]).strip()
+        advisory_id = str(item['values'][3]).strip()
 
-            # 查找详细数据
-            cve_detail = None
-            dell_detail = None
+        # 优先从内存查找，找不到则从数据库加载
+        cve_detail = None
+        dell_detail = None
 
-            for cve in self.cve_data:
-                if cve.get('cve_id') == cve_id:
-                    cve_detail = cve
-                    break
+        for cve in self.cve_data:
+            if cve.get('cve_id') == cve_id:
+                cve_detail = cve
+                break
 
-            for advisory in self.dell_advisories:
-                if advisory.get('dell_security_advisory') == advisory_id:
-                    dell_detail = advisory
-                    break
+        for advisory in self.dell_advisories:
+            if advisory.get('dell_security_advisory') == advisory_id or advisory.get('dsa_id') == advisory_id:
+                dell_detail = advisory
+                break
 
-            if cve_detail and dell_detail:
-                self.show_matched_detail(cve_detail, dell_detail)
+        # 从数据库加载缺失的数据
+        try:
+            with self.db_lock:
+                if not cve_detail:
+                    row = self.conn.execute("SELECT data FROM cves WHERE cve_id = ?", (cve_id,)).fetchone()
+                    if row and row[0]:
+                        cve_detail = json.loads(row[0])
+
+                if not dell_detail:
+                    row = self.conn.execute("SELECT data FROM dell_advisories WHERE dsa_id = ?", (advisory_id,)).fetchone()
+                    if row and row[0]:
+                        dell_detail = json.loads(row[0])
+        except Exception as e:
+            self.log(f"加载关联详情失败: {e}")
+
+        if cve_detail and dell_detail:
+            self.show_matched_detail(cve_detail, dell_detail)
+        elif cve_detail:
+            # 只有 CVE 数据，也显示
+            self.show_matched_detail(cve_detail, {"dell_security_advisory": advisory_id, "title": str(item['values'][5]), "cve_ids": [cve_id]})
+        else:
+            messagebox.showinfo("提示", f"未找到 {cve_id} / {advisory_id} 的详细数据。\n请先刷新关联数据。")
 
     def show_matched_detail(self, cve, advisory):
         """显示关联数据的详细信息"""
@@ -8431,9 +9641,11 @@ CVE 描述:
         # ── CVE 严重等级统计（全量数据库，含未分级） ──
         cve_severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "N/A": 0}
         try:
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT data FROM cves")
-            for (raw,) in cursor.fetchall():
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM cves")
+                cve_rows = cursor.fetchall()
+            for (raw,) in cve_rows:
                 try:
                     d = json.loads(raw)
                     s = d.get("cvss_severity", "")
@@ -8441,17 +9653,19 @@ CVE 描述:
                         cve_severity[s] += 1
                     else:
                         cve_severity["N/A"] += 1
-                except:
+                except Exception:
                     cve_severity["N/A"] += 1
-        except:
+        except Exception:
             pass
 
         # ── Dell 公告影响等级统计（全量数据库，含未分级） ──
         dell_severity = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "N/A": 0}
         try:
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT data FROM dell_advisories")
-            for (raw,) in cursor.fetchall():
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM dell_advisories")
+                dell_rows = cursor.fetchall()
+            for (raw,) in dell_rows:
                 try:
                     d = json.loads(raw)
                     impact = d.get('impact', '')
@@ -8463,9 +9677,9 @@ CVE 描述:
                         dell_severity[impact] += 1
                     else:
                         dell_severity["N/A"] += 1
-                except:
+                except Exception:
                     dell_severity["N/A"] += 1
-        except:
+        except Exception:
             pass
 
         # 更新卡片数值（严重/高危/中危/低危 = Dell 影响等级）
@@ -8482,8 +9696,19 @@ CVE 描述:
             text=f"NVD CVE: {nvd_total} | Dell 公告: {dell_total} | 关联: {matched_count}"
         )
 
-        # 绘制图表（CVE饼图 + Dell饼图 + 柱状图）
-        self._draw_charts(cve_severity, dell_severity, nvd_total, dell_total, matched_count)
+        # 查询月度趋势数据
+        cve_monthly = self._get_monthly_cve_stats()
+        dell_monthly = self._get_monthly_dell_stats()
+        matched_monthly = self._get_monthly_matched_stats()
+
+        # 绘制月度趋势图
+        self._draw_monthly_trends(cve_monthly, dell_monthly, matched_monthly)
+
+        # 绘制数据概览柱状图
+        self._draw_overview_bar(nvd_total, dell_total, matched_count)
+
+        # 绘制饼图
+        self._draw_pie_charts(cve_severity, dell_severity)
 
         # ── 更新数据库信息 ──
         self._update_db_info()
@@ -8497,14 +9722,16 @@ CVE 描述:
             top_cves = self.cve_data[:10]
         else:
             try:
-                cursor = self.conn.cursor()
-                cursor.execute("SELECT data FROM cves ORDER BY published_date DESC LIMIT 10")
-                for (raw,) in cursor.fetchall():
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT data FROM cves ORDER BY published_date DESC LIMIT 10")
+                    rows = cursor.fetchall()
+                for (raw,) in rows:
                     try:
                         top_cves.append(json.loads(raw))
-                    except:
+                    except Exception:
                         continue
-            except:
+            except Exception:
                 pass
 
         for cve in top_cves:
@@ -8529,14 +9756,16 @@ CVE 描述:
             top_dells = self.dell_advisories[:10]
         else:
             try:
-                cursor = self.conn.cursor()
-                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC LIMIT 10")
-                for (raw,) in cursor.fetchall():
+                with self.db_lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC LIMIT 10")
+                    rows = cursor.fetchall()
+                for (raw,) in rows:
                     try:
                         top_dells.append(json.loads(raw))
-                    except:
+                    except Exception:
                         continue
-            except:
+            except Exception:
                 pass
 
         for adv in top_dells:
@@ -8674,7 +9903,7 @@ CVE 描述:
                             if percent_str.isdigit():
                                 progress_val = int(percent_str)
                                 self.root.after(0, self.update_progress, progress_val, message)
-                        except:
+                        except Exception:
                             pass  # If parsing fails, just log the message
 
                 self.log(message)
