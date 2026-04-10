@@ -3491,9 +3491,12 @@ foreach ($tokenName in $targets.Keys) {
             padx=10, pady=3, relief=tk.FLAT, cursor="hand2"
         ).pack(side=tk.RIGHT, padx=(10, 0))
 
-        # 数据展示区
-        data_container = tk.Frame(self.dell_kb_frame, bg="white")
-        data_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        # 使用 PanedWindow 分割上下区域
+        paned = tk.PanedWindow(self.dell_kb_frame, orient=tk.VERTICAL, bg="#dcdcdc", sashwidth=5)
+        paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        # ── 上半部分：数据展示区 ──
+        data_container = tk.Frame(paned, bg="white")
 
         columns = ("文章编号", "标题", "解决方案预览", "采集时间")
 
@@ -3507,7 +3510,7 @@ foreach ($tokenName in $targets.Keys) {
             selectmode="extended",
             yscrollcommand=tree_scroll_y.set,
             xscrollcommand=tree_scroll_x.set,
-            height=20
+            height=12
         )
 
         tree_scroll_y.config(command=self.kb_tree.yview)
@@ -3529,6 +3532,142 @@ foreach ($tokenName in $targets.Keys) {
 
         self.kb_tree.bind("<Double-1>", self.on_dell_kb_item_double_click)
 
+        paned.add(data_container, stretch="always")
+
+        # ── 下半部分：数据导入导出面板 ──
+        export_panel = tk.Frame(paned, bg="white", bd=1, relief=tk.GROOVE)
+
+        # 标题栏
+        title_bar = tk.Frame(export_panel, bg=self.primary_color, pady=6)
+        title_bar.pack(fill=tk.X)
+        tk.Label(
+            title_bar, text="📦 数据导入 / 导出", bg=self.primary_color, fg="white",
+            font=("Microsoft YaHei", 11, "bold")
+        ).pack(side=tk.LEFT, padx=12)
+
+        # 内容区
+        body = tk.Frame(export_panel, bg="white", padx=15, pady=10)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # 第一行：数据源 + 导出格式
+        row1 = tk.Frame(body, bg="white")
+        row1.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Label(
+            row1, text="数据源:", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.export_source_var = tk.StringVar(value="Dell技术库")
+        source_options = [
+            "IT新闻简报", "NVD CVE 数据", "Dell 安全公告",
+            "CVE-Dell 关联", "AI解决方案", "Dell技术库",
+            "学习对话记录", "闪卡知识库"
+        ]
+        self.export_source_combo = ttk.Combobox(
+            row1, textvariable=self.export_source_var,
+            values=source_options, state="readonly",
+            font=("Microsoft YaHei", 10), width=18
+        )
+        self.export_source_combo.pack(side=tk.LEFT, padx=(0, 20))
+
+        tk.Label(
+            row1, text="导出格式:", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.export_format_var = tk.StringVar(value="Markdown")
+        for fmt in ("Markdown", "TXT", "HTML"):
+            tk.Radiobutton(
+                row1, text=fmt, variable=self.export_format_var, value=fmt,
+                bg="white", font=("Microsoft YaHei", 10),
+                activebackground="white"
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+        # 第二行：指定编号 + 数量
+        row2 = tk.Frame(body, bg="white")
+        row2.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Label(
+            row2, text="指定编号:", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.export_id_entry = tk.Entry(
+            row2, font=("Microsoft YaHei", 10),
+            relief=tk.SOLID, bd=1, width=22
+        )
+        self.export_id_entry.pack(side=tk.LEFT, padx=(0, 6))
+        self.export_id_entry.insert(0, "留空则按数量导出")
+        self.export_id_entry.config(fg="gray")
+        self.export_id_entry.bind("<FocusIn>", lambda e: self._export_id_focus_in())
+
+        tk.Label(
+            row2, text="导出数量:", bg="white",
+            font=("Microsoft YaHei", 10, "bold"), fg=self.primary_color
+        ).pack(side=tk.LEFT, padx=(10, 6))
+
+        self.export_limit_var = tk.StringVar(value="全部")
+        ttk.Combobox(
+            row2, textvariable=self.export_limit_var,
+            values=["全部", "最近50条", "最近100条", "最近200条", "最近500条"],
+            state="readonly", font=("Microsoft YaHei", 10), width=12
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        # 第三行：操作按钮
+        row3 = tk.Frame(body, bg="white")
+        row3.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Button(
+            row3, text="👁 预览", command=self._preview_export_data,
+            bg="#8e44ad", fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=14, pady=3, relief=tk.FLAT, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Button(
+            row3, text="📤 导出数据", command=self._do_export_data,
+            bg=self.info_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=14, pady=3, relief=tk.FLAT, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Button(
+            row3, text="📤 导出选中项", command=self._do_export_selected,
+            bg="#e67e22", fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=14, pady=3, relief=tk.FLAT, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Button(
+            row3, text="📥 导入数据", command=self._do_import_data,
+            bg=self.success_color, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=14, pady=3, relief=tk.FLAT, cursor="hand2"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        self.export_status_label = tk.Label(
+            row3, text="", bg="white",
+            font=("Microsoft YaHei", 9), fg=self.info_color
+        )
+        self.export_status_label.pack(side=tk.LEFT, padx=(10, 0))
+
+        # 预览区
+        preview_frame = tk.LabelFrame(
+            body, text="导出预览", bg="white",
+            font=("Microsoft YaHei", 9, "bold"), fg=self.primary_color,
+            padx=8, pady=5
+        )
+        preview_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.export_preview_text = scrolledtext.ScrolledText(
+            preview_frame, font=("Consolas", 9), wrap=tk.WORD,
+            height=5, state=tk.DISABLED, bg="#fafafa", relief=tk.FLAT
+        )
+        self.export_preview_text.pack(fill=tk.BOTH, expand=True)
+
+        paned.add(export_panel, stretch="always")
+
         # 延迟加载，避免 log_text 尚未创建
         self.dell_kb_frame.after(500, self.load_dell_kb_from_database)
 
@@ -3538,6 +3677,480 @@ foreach ($tokenName in $targets.Keys) {
         if self.kb_url_entry.get() == placeholder:
             self.kb_url_entry.delete(0, tk.END)
             self.kb_url_entry.config(fg="black")
+
+    # ==================== 数据导入导出功能 ====================
+
+    def _export_id_focus_in(self):
+        """指定编号输入框获取焦点时清除占位符"""
+        placeholder = "留空则按数量导出"
+        if self.export_id_entry.get() == placeholder:
+            self.export_id_entry.delete(0, tk.END)
+            self.export_id_entry.config(fg="black")
+
+    def _get_export_limit(self):
+        """解析导出数量限制"""
+        val = self.export_limit_var.get()
+        if val == "全部":
+            return None
+        import re as _re
+        m = _re.search(r'\d+', val)
+        return int(m.group()) if m else None
+
+    def _get_export_id(self):
+        """获取用户输入的指定编号，返回 None 或字符串"""
+        val = self.export_id_entry.get().strip()
+        if not val or val == "留空则按数量导出":
+            return None
+        return val
+
+    def _fetch_export_rows(self, single_id=None):
+        """根据选择的数据源从数据库查询完整数据，返回 (headers, rows)
+        single_id: 可选，指定单条编号/ID 查询
+        """
+        source = self.export_source_var.get()
+        if single_id is None:
+            single_id = self._get_export_id()
+        limit = self._get_export_limit()
+        limit_sql = f" LIMIT {limit}" if (limit and not single_id) else ""
+
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+
+                if source == "IT新闻简报":
+                    if single_id:
+                        cursor.execute("SELECT id, brief_date, content, articles_json, created_at FROM news_briefs WHERE id = ? OR brief_date LIKE ?", (single_id, f"%{single_id}%"))
+                    else:
+                        cursor.execute(f"SELECT id, brief_date, content, articles_json, created_at FROM news_briefs ORDER BY brief_date DESC{limit_sql}")
+                    return ["ID", "日期", "简报内容", "文章数据(JSON)", "创建时间"], cursor.fetchall()
+
+                elif source == "NVD CVE 数据":
+                    if single_id:
+                        cursor.execute("SELECT cve_id, published_date, last_modified, data FROM cves WHERE cve_id LIKE ?", (f"%{single_id}%",))
+                    else:
+                        cursor.execute(f"SELECT cve_id, published_date, last_modified, data FROM cves ORDER BY published_date DESC{limit_sql}")
+                    raw_rows = cursor.fetchall()
+                    rows = []
+                    for r in raw_rows:
+                        try:
+                            d = json.loads(r[3]) if r[3] else {}
+                            # 提取所有描述
+                            descs = []
+                            for dd in d.get("descriptions", []):
+                                descs.append(f"[{dd.get('lang', '?')}] {dd.get('value', '')}")
+                            desc_full = "\n".join(descs) if descs else ""
+                            # 严重等级 + 评分
+                            severity_parts = []
+                            for m in d.get("metrics", {}).get("cvssMetricV31", []):
+                                cd = m.get("cvssData", {})
+                                severity_parts.append(f"{cd.get('baseSeverity', '')} (评分: {cd.get('baseScore', '')})")
+                            for m in d.get("metrics", {}).get("cvssMetricV2", []):
+                                cd = m.get("cvssData", {})
+                                severity_parts.append(f"V2评分: {cd.get('baseScore', '')}")
+                            severity = "; ".join(severity_parts)
+                            # 参考链接
+                            refs = []
+                            for ref in d.get("references", []):
+                                refs.append(ref.get("url", ""))
+                            refs_full = "\n".join(refs) if refs else ""
+                            # 受影响配置
+                            configs = json.dumps(d.get("configurations", []), ensure_ascii=False) if d.get("configurations") else ""
+                        except Exception:
+                            desc_full, severity, refs_full, configs = "", "", "", ""
+                        rows.append((r[0], r[1], r[2], severity, desc_full, refs_full, configs))
+                    return ["CVE ID", "发布日期", "最后修改", "严重等级", "完整描述", "参考链接", "受影响配置"], rows
+
+                elif source == "Dell 安全公告":
+                    if single_id:
+                        cursor.execute("SELECT dsa_id, title, cve_ids, data, published_date, collected_date, link FROM dell_advisories WHERE dsa_id LIKE ?", (f"%{single_id}%",))
+                    else:
+                        cursor.execute(f"SELECT dsa_id, title, cve_ids, data, published_date, collected_date, link FROM dell_advisories ORDER BY published_date DESC{limit_sql}")
+                    raw_rows = cursor.fetchall()
+                    rows = []
+                    for r in raw_rows:
+                        # 解析 data JSON 提取完整内容
+                        full_content = ""
+                        try:
+                            d = json.loads(r[3]) if r[3] else {}
+                            parts = []
+                            for key in ["description", "impact", "details", "remediation", "severity", "affected_products"]:
+                                if d.get(key):
+                                    parts.append(f"【{key}】\n{d[key]}")
+                            full_content = "\n\n".join(parts) if parts else str(d)
+                        except Exception:
+                            full_content = str(r[3]) if r[3] else ""
+                        rows.append((r[0], r[1], r[2], full_content, r[4], r[5], r[6]))
+                    return ["DSA ID", "标题", "关联CVE", "详细内容", "发布日期", "采集日期", "链接"], rows
+
+                elif source == "CVE-Dell 关联":
+                    if single_id:
+                        cursor.execute(f"""
+                            SELECT c.cve_id, d.dsa_id, d.title, d.cve_ids, d.published_date, d.link
+                            FROM cves c
+                            JOIN dell_advisories d ON d.cve_ids LIKE '%' || c.cve_id || '%'
+                            WHERE c.cve_id LIKE ? OR d.dsa_id LIKE ?
+                            ORDER BY d.published_date DESC
+                        """, (f"%{single_id}%", f"%{single_id}%"))
+                    else:
+                        cursor.execute(f"""
+                            SELECT c.cve_id, d.dsa_id, d.title, d.cve_ids, d.published_date, d.link
+                            FROM cves c
+                            JOIN dell_advisories d ON d.cve_ids LIKE '%' || c.cve_id || '%'
+                            ORDER BY d.published_date DESC{limit_sql}
+                        """)
+                    return ["CVE ID", "DSA ID", "Dell公告标题", "所有关联CVE", "发布日期", "链接"], cursor.fetchall()
+
+                elif source == "AI解决方案":
+                    if single_id:
+                        cursor.execute("SELECT id, cve_id, dell_advisory_id, model_name, prompt, result, analysis_time, status FROM ai_solutions WHERE cve_id LIKE ? OR dell_advisory_id LIKE ? OR id = ?",
+                                       (f"%{single_id}%", f"%{single_id}%", single_id))
+                    else:
+                        cursor.execute(f"SELECT id, cve_id, dell_advisory_id, model_name, prompt, result, analysis_time, status FROM ai_solutions ORDER BY analysis_time DESC{limit_sql}")
+                    return ["ID", "CVE ID", "Dell公告ID", "模型", "提示词", "分析结果", "分析时间", "状态"], cursor.fetchall()
+
+                elif source == "Dell技术库":
+                    if single_id:
+                        cursor.execute("SELECT article_id, title, content, solution, url, collected_date FROM dell_kb_articles WHERE article_id LIKE ? OR title LIKE ?",
+                                       (f"%{single_id}%", f"%{single_id}%"))
+                    else:
+                        cursor.execute(f"SELECT article_id, title, content, solution, url, collected_date FROM dell_kb_articles ORDER BY collected_date DESC{limit_sql}")
+                    return ["文章编号", "标题", "完整内容", "解决方案", "URL", "采集时间"], cursor.fetchall()
+
+                elif source == "学习对话记录":
+                    if single_id:
+                        cursor.execute("SELECT id, topic, level, source_type, source_content, conversation, summary, created_at FROM learn_sessions WHERE id = ? OR topic LIKE ?",
+                                       (single_id, f"%{single_id}%"))
+                    else:
+                        cursor.execute(f"SELECT id, topic, level, source_type, source_content, conversation, summary, created_at FROM learn_sessions ORDER BY created_at DESC{limit_sql}")
+                    return ["ID", "主题", "级别", "来源类型", "来源内容", "完整对话", "摘要", "创建时间"], cursor.fetchall()
+
+                elif source == "闪卡知识库":
+                    if single_id:
+                        cursor.execute("SELECT id, topic, question, answer, options, card_type, difficulty, review_count, correct_count, created_at FROM flashcards WHERE id = ? OR topic LIKE ?",
+                                       (single_id, f"%{single_id}%"))
+                    else:
+                        cursor.execute(f"SELECT id, topic, question, answer, options, card_type, difficulty, review_count, correct_count, created_at FROM flashcards ORDER BY created_at DESC{limit_sql}")
+                    return ["ID", "主题", "问题", "答案", "选项", "类型", "难度", "复习次数", "正确次数", "创建时间"], cursor.fetchall()
+
+                else:
+                    return [], []
+        except Exception as e:
+            self.log(f"导出查询失败: {e}")
+            return [], []
+
+    def _format_export_content(self, headers, rows, fmt, source=None):
+        """将数据格式化为指定格式的文本（输出完整内容，不截断）"""
+        if source is None:
+            source = self.export_source_var.get()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if fmt == "Markdown":
+            lines = [f"# {source} 数据导出", "", f"> 导出时间: {now}  |  共 {len(rows)} 条记录", ""]
+            if not rows:
+                lines.append("*暂无数据*")
+                return "\n".join(lines)
+            # 使用分条详情格式（适合长内容）
+            for i, row in enumerate(rows, 1):
+                lines.append(f"## 记录 {i}")
+                lines.append("")
+                for h, v in zip(headers, row):
+                    val = str(v).strip() if v else ""
+                    if "\n" in val or len(val) > 200:
+                        # 长内容使用代码块
+                        lines.append(f"**{h}:**")
+                        lines.append("")
+                        lines.append(val)
+                        lines.append("")
+                    else:
+                        lines.append(f"- **{h}:** {val}")
+                lines.append("")
+                lines.append("---")
+                lines.append("")
+            return "\n".join(lines)
+
+        elif fmt == "TXT":
+            lines = [f"{'=' * 70}", f"  {source} 数据导出", f"  导出时间: {now}  |  共 {len(rows)} 条记录", f"{'=' * 70}", ""]
+            if not rows:
+                lines.append("暂无数据")
+                return "\n".join(lines)
+            for i, row in enumerate(rows, 1):
+                lines.append(f"[{i}] " + "=" * 60)
+                for h, v in zip(headers, row):
+                    val = str(v).strip() if v else ""
+                    lines.append(f"  {h}:")
+                    if "\n" in val:
+                        for vl in val.split("\n"):
+                            lines.append(f"    {vl}")
+                    else:
+                        lines.append(f"    {val}")
+                lines.append("")
+            return "\n".join(lines)
+
+        elif fmt == "HTML":
+            import html as _html
+            html_parts = [
+                "<!DOCTYPE html>",
+                '<html lang="zh-CN"><head><meta charset="UTF-8">',
+                f"<title>{_html.escape(source)} 数据导出</title>",
+                "<style>",
+                "body{font-family:'Microsoft YaHei',sans-serif;margin:30px;background:#f8f9fa;color:#333;line-height:1.6}",
+                "h1{color:#2c3e50;border-bottom:3px solid #3498db;padding-bottom:10px}",
+                ".meta{color:#7f8c8d;margin-bottom:20px}",
+                ".record{background:#fff;border-radius:8px;padding:20px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.08)}",
+                ".record h3{color:#2c3e50;margin-top:0;border-left:4px solid #3498db;padding-left:10px}",
+                ".field{margin-bottom:8px}",
+                ".field-name{font-weight:bold;color:#2c3e50;display:inline-block;min-width:100px}",
+                ".field-value{color:#333}",
+                "pre{background:#f4f4f4;padding:12px;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;font-size:13px}",
+                "</style></head><body>",
+                f"<h1>📦 {_html.escape(source)} 数据导出</h1>",
+                f'<p class="meta">导出时间: {now} | 共 {len(rows)} 条记录</p>',
+            ]
+            if not rows:
+                html_parts.append("<p>暂无数据</p>")
+            else:
+                for i, row in enumerate(rows, 1):
+                    html_parts.append(f'<div class="record">')
+                    html_parts.append(f"<h3>记录 {i}</h3>")
+                    for h, v in zip(headers, row):
+                        val = str(v).strip() if v else ""
+                        escaped = _html.escape(val)
+                        if "\n" in val or len(val) > 300:
+                            html_parts.append(f'<div class="field"><span class="field-name">{_html.escape(h)}:</span><pre>{escaped}</pre></div>')
+                        else:
+                            html_parts.append(f'<div class="field"><span class="field-name">{_html.escape(h)}:</span> <span class="field-value">{escaped}</span></div>')
+                    html_parts.append("</div>")
+            html_parts.append("</body></html>")
+            return "\n".join(html_parts)
+
+        return ""
+
+    def _preview_export_data(self):
+        """预览导出数据"""
+        headers, rows = self._fetch_export_rows()
+        fmt = self.export_format_var.get()
+        content = self._format_export_content(headers, rows, fmt)
+
+        # 预览只显示前 5000 字符
+        preview = content[:5000]
+        if len(content) > 5000:
+            preview += f"\n\n... (共 {len(content)} 字符，已截断预览)"
+
+        self.export_preview_text.config(state=tk.NORMAL)
+        self.export_preview_text.delete("1.0", tk.END)
+        self.export_preview_text.insert(tk.END, preview)
+        self.export_preview_text.config(state=tk.DISABLED)
+
+        self.export_status_label.config(
+            text=f"预览完成: {len(rows)} 条记录", fg=self.info_color
+        )
+
+    def _do_export_data(self):
+        """导出数据到文件"""
+        headers, rows = self._fetch_export_rows()
+        if not rows:
+            messagebox.showinfo("提示", "所选数据源暂无数据可导出")
+            return
+        self._save_export_file(headers, rows)
+
+    def _do_export_selected(self):
+        """导出 Dell技术库 TreeView 中选中的记录"""
+        selected = self.kb_tree.selection()
+        if not selected:
+            messagebox.showinfo("提示", "请先在上方列表中选中要导出的记录")
+            return
+
+        # 收集选中行的文章编号
+        article_ids = []
+        for item in selected:
+            vals = self.kb_tree.item(item, "values")
+            if vals:
+                article_ids.append(vals[0])  # 第一列是文章编号
+
+        if not article_ids:
+            return
+
+        # 查询选中记录的完整数据
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                placeholders = ",".join(["?"] * len(article_ids))
+                cursor.execute(f"SELECT article_id, title, content, solution, url, collected_date FROM dell_kb_articles WHERE article_id IN ({placeholders})", article_ids)
+                rows = cursor.fetchall()
+        except Exception as e:
+            messagebox.showerror("查询失败", f"查询选中记录失败: {e}")
+            return
+
+        if not rows:
+            messagebox.showinfo("提示", "未找到选中记录的完整数据")
+            return
+
+        headers = ["文章编号", "标题", "完整内容", "解决方案", "URL", "采集时间"]
+        self._save_export_file(headers, rows, source_name="Dell技术库(选中项)")
+
+    def _save_export_file(self, headers, rows, source_name=None):
+        """通用保存导出文件"""
+        fmt = self.export_format_var.get()
+        source = source_name or self.export_source_var.get()
+        content = self._format_export_content(headers, rows, fmt, source=source)
+
+        ext_map = {"Markdown": (".md", "Markdown 文件"), "TXT": (".txt", "文本文件"), "HTML": (".html", "HTML 文件")}
+        ext, desc = ext_map.get(fmt, (".txt", "文本文件"))
+
+        default_name = f"{source}_导出_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+        filepath = filedialog.asksaveasfilename(
+            title="导出数据",
+            defaultextension=ext,
+            initialfile=default_name,
+            filetypes=[(desc, f"*{ext}"), ("所有文件", "*.*")]
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            self.export_status_label.config(
+                text=f"✅ 已导出 {len(rows)} 条到 {Path(filepath).name}", fg=self.success_color
+            )
+            self.log(f"数据导出成功: {filepath} ({len(rows)} 条)")
+        except Exception as e:
+            messagebox.showerror("导出失败", f"写入文件失败: {e}")
+            self.log(f"数据导出失败: {e}")
+
+    def _do_import_data(self):
+        """导入数据（仅支持 Dell技术库 的 Markdown/TXT 导入）"""
+        source = self.export_source_var.get()
+        if source != "Dell技术库":
+            messagebox.showinfo("提示", "目前仅支持导入 Dell技术库 数据。\n请将数据源切换为「Dell技术库」后重试。")
+            return
+
+        filepath = filedialog.askopenfilename(
+            title="导入数据",
+            filetypes=[("Markdown 文件", "*.md"), ("文本文件", "*.txt"), ("所有文件", "*.*")]
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception as e:
+            messagebox.showerror("导入失败", f"读取文件失败: {e}")
+            return
+
+        # 解析 Markdown 详情格式或 TXT 格式
+        imported = 0
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                lines = text.strip().split("\n")
+
+                # 解析分条详情格式（Markdown / TXT）
+                current = {}
+                field_map = {
+                    "文章编号": "article_id", "标题": "title",
+                    "完整内容": "content", "解决方案": "solution",
+                    "URL": "url", "采集时间": "collected_date"
+                }
+                multiline_field = None
+                multiline_buf = []
+
+                def _flush_current():
+                    nonlocal current, imported
+                    if current.get("article_id"):
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO dell_kb_articles
+                            (article_id, title, content, solution, url, collected_date)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (current.get("article_id", ""), current.get("title", ""),
+                              current.get("content", ""), current.get("solution", ""),
+                              current.get("url", ""),
+                              current.get("collected_date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))))
+                        imported += 1
+                    current = {}
+
+                for line in lines:
+                    stripped = line.strip()
+
+                    # 检测新记录开始
+                    if stripped.startswith("## 记录") or (stripped.startswith("[") and "]" in stripped and "=" * 5 in stripped):
+                        # 保存多行缓冲
+                        if multiline_field and multiline_buf:
+                            current[multiline_field] = "\n".join(multiline_buf).strip()
+                            multiline_field = None
+                            multiline_buf = []
+                        _flush_current()
+                        continue
+
+                    # 检测字段
+                    matched_field = False
+                    for label, key in field_map.items():
+                        # Markdown 格式: - **字段:** 值 或 **字段:**
+                        md_prefix = f"- **{label}:**"
+                        md_prefix2 = f"**{label}:**"
+                        # TXT 格式: 字段:
+                        txt_prefix = f"{label}:"
+
+                        if stripped.startswith(md_prefix):
+                            if multiline_field and multiline_buf:
+                                current[multiline_field] = "\n".join(multiline_buf).strip()
+                                multiline_buf = []
+                            val = stripped[len(md_prefix):].strip()
+                            if val:
+                                current[key] = val
+                                multiline_field = None
+                            else:
+                                multiline_field = key
+                            matched_field = True
+                            break
+                        elif stripped.startswith(md_prefix2):
+                            if multiline_field and multiline_buf:
+                                current[multiline_field] = "\n".join(multiline_buf).strip()
+                                multiline_buf = []
+                            val = stripped[len(md_prefix2):].strip()
+                            if val:
+                                current[key] = val
+                                multiline_field = None
+                            else:
+                                multiline_field = key
+                            matched_field = True
+                            break
+                        elif stripped.startswith(txt_prefix) and not stripped.startswith("http"):
+                            if multiline_field and multiline_buf:
+                                current[multiline_field] = "\n".join(multiline_buf).strip()
+                                multiline_buf = []
+                            val = stripped[len(txt_prefix):].strip()
+                            if val:
+                                current[key] = val
+                                multiline_field = None
+                            else:
+                                multiline_field = key
+                            matched_field = True
+                            break
+
+                    if not matched_field and multiline_field:
+                        if stripped != "---":
+                            multiline_buf.append(line.rstrip())
+
+                # 最后一条
+                if multiline_field and multiline_buf:
+                    current[multiline_field] = "\n".join(multiline_buf).strip()
+                _flush_current()
+
+                self.conn.commit()
+
+            if imported > 0:
+                self.export_status_label.config(
+                    text=f"✅ 成功导入 {imported} 条记录", fg=self.success_color
+                )
+                self.log(f"Dell技术库导入成功: {imported} 条 (来源: {filepath})")
+                self.load_dell_kb_from_database()
+            else:
+                messagebox.showinfo("提示", "未能从文件中解析出有效数据。\n请确保文件格式与导出格式一致。")
+        except Exception as e:
+            messagebox.showerror("导入失败", f"导入数据失败: {e}")
+            self.log(f"Dell技术库导入失败: {e}")
 
     def create_stats_view(self):
         """创建统计视图（数据可视化为主）"""
@@ -3753,7 +4366,7 @@ foreach ($tokenName in $targets.Keys) {
     def _stats_zoom(self, delta, reset=False):
         """统计分析页面缩放"""
         if reset:
-            self.stats_chart_scale = 1.0
+            self.stats_chart_scale = 1.1  # 恢复默认 110%
         else:
             self.stats_chart_scale = max(0.7, min(1.6, self.stats_chart_scale + delta))
         pct = int(self.stats_chart_scale * 100)
@@ -3798,7 +4411,7 @@ foreach ($tokenName in $targets.Keys) {
                 w.destroy()
 
             s = getattr(self, 'stats_chart_scale', 1.0)
-            fig_w, fig_h, fig_dpi = 4.2 * s, 3.0 * s, 100
+            fig_w, fig_h, fig_dpi = 4.2, 3.0, int(100 * s)
 
             # 原始严重等级颜色
             severity_colors = {
@@ -3910,7 +4523,7 @@ foreach ($tokenName in $targets.Keys) {
                 w.destroy()
 
             s = getattr(self, 'stats_chart_scale', 1.0)
-            fig_w, fig_h, fig_dpi = 4.2 * s, 3.0 * s, 100
+            fig_w, fig_h, fig_dpi = 4.2, 3.0, int(100 * s)
 
             # ── CVE 月度趋势 ──
             fig_cve = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
@@ -4043,7 +4656,7 @@ foreach ($tokenName in $targets.Keys) {
                 w.destroy()
 
             s = getattr(self, 'stats_chart_scale', 1.0)
-            fig = Figure(figsize=(4.2 * s, 3.0 * s), dpi=100, facecolor='white')
+            fig = Figure(figsize=(5.0, 3.6), dpi=int(100 * s), facecolor='white')
             ax = fig.add_subplot(111)
             ax.set_xlim(0, 10)
             ax.set_ylim(0, 10)
@@ -4051,34 +4664,34 @@ foreach ($tokenName in $targets.Keys) {
             ax.axis('off')
 
             # 顶部：CVE 椭圆
-            cve_ellipse = Ellipse((2.5, 7.8), 4, 2.2,
+            cve_ellipse = Ellipse((2.5, 7.5), 4.2, 2.6,
                                    edgecolor=self.primary_color, facecolor=self.primary_color,
-                                   alpha=0.15, linewidth=2)
+                                   alpha=0.12, linewidth=2.5)
             ax.add_patch(cve_ellipse)
-            ax.text(2.5, 7.8, f'NVD CVE\n{nvd_total:,}', ha='center', va='center',
-                    fontsize=10, fontweight='bold', fontfamily='Microsoft YaHei',
+            ax.text(2.5, 7.5, f'NVD CVE\n{nvd_total:,}', ha='center', va='center',
+                    fontsize=11, fontweight='bold', fontfamily='Microsoft YaHei',
                     color=self.primary_color)
 
             # 顶部：Dell 椭圆
-            dell_ellipse = Ellipse((7.5, 7.8), 4, 2.2,
+            dell_ellipse = Ellipse((7.5, 7.5), 4.2, 2.6,
                                     edgecolor=self.info_color, facecolor=self.info_color,
-                                    alpha=0.15, linewidth=2)
+                                    alpha=0.12, linewidth=2.5)
             ax.add_patch(dell_ellipse)
-            ax.text(7.5, 7.8, f'Dell 公告\n{dell_total:,}', ha='center', va='center',
-                    fontsize=10, fontweight='bold', fontfamily='Microsoft YaHei',
+            ax.text(7.5, 7.5, f'Dell 公告\n{dell_total:,}', ha='center', va='center',
+                    fontsize=11, fontweight='bold', fontfamily='Microsoft YaHei',
                     color=self.info_color)
 
             # 中间：关联匹配椭圆（更大、更醒目）
-            matched_ellipse = Ellipse((5, 3.5), 5, 2.8,
+            matched_ellipse = Ellipse((5, 3.2), 5.5, 3.2,
                                        edgecolor=self.success_color, facecolor=self.success_color,
-                                       alpha=0.15, linewidth=2.5)
+                                       alpha=0.12, linewidth=3)
             ax.add_patch(matched_ellipse)
-            ax.text(5, 3.5, f'关联匹配\n{matched_count:,}', ha='center', va='center',
-                    fontsize=10, fontweight='bold', fontfamily='Microsoft YaHei',
+            ax.text(5, 3.2, f'关联匹配\n{matched_count:,}', ha='center', va='center',
+                    fontsize=12, fontweight='bold', fontfamily='Microsoft YaHei',
                     color=self.success_color)
 
             # PPT 风格粗箭头：CVE → 关联
-            arrow1 = FancyArrowPatch((2.5, 6.6), (4.2, 4.9),
+            arrow1 = FancyArrowPatch((2.5, 6.1), (4.1, 4.8),
                                       arrowstyle='fancy,head_length=8,head_width=6,tail_width=3',
                                       mutation_scale=1, linewidth=0,
                                       facecolor=self.primary_color, edgecolor=self.primary_color,
@@ -4086,7 +4699,7 @@ foreach ($tokenName in $targets.Keys) {
             ax.add_patch(arrow1)
 
             # PPT 风格粗箭头：Dell → 关联
-            arrow2 = FancyArrowPatch((7.5, 6.6), (5.8, 4.9),
+            arrow2 = FancyArrowPatch((7.5, 6.1), (5.9, 4.8),
                                       arrowstyle='fancy,head_length=8,head_width=6,tail_width=3',
                                       mutation_scale=1, linewidth=0,
                                       facecolor=self.info_color, edgecolor=self.info_color,
@@ -4391,13 +5004,13 @@ foreach ($tokenName in $targets.Keys) {
         # ── 主体水平分栏 ──────────────────────────────────────────────
         main_paned = tk.PanedWindow(
             self.learn_frame, orient=tk.HORIZONTAL,
-            sashrelief=tk.RAISED, sashwidth=5, bg="#cccccc"
+            bg="#d0d0d0", sashwidth=5, sashrelief=tk.RAISED
         )
         main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
 
         # ── 左侧控制面板 ──────────────────────────────────────────────
         left_outer = tk.Frame(main_paned, bg="white")
-        main_paned.add(left_outer, width=200, minsize=150)
+        main_paned.add(left_outer, width=140, minsize=100)
 
         left_canvas = tk.Canvas(left_outer, bg="white", highlightthickness=0)
         left_scroll = tk.Scrollbar(left_outer, orient=tk.VERTICAL, command=left_canvas.yview)
@@ -4405,11 +5018,15 @@ foreach ($tokenName in $targets.Keys) {
         left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         left_panel = tk.Frame(left_canvas, bg="white")
-        left_canvas.create_window((0, 0), window=left_panel, anchor="nw")
+        self._learn_left_canvas_win = left_canvas.create_window((0, 0), window=left_panel, anchor="nw")
         left_panel.bind(
             "<Configure>",
             lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all"))
         )
+        # 拖动分隔线时，左侧内容宽度跟随 canvas 动态变化
+        left_canvas.bind("<Configure>", lambda e: left_canvas.itemconfig(
+            self._learn_left_canvas_win, width=e.width
+        ))
 
         # 1. 学习内容来源
         data_frame = tk.LabelFrame(
@@ -4420,21 +5037,21 @@ foreach ($tokenName in $targets.Keys) {
 
         self.learn_source_var = tk.StringVar(value="db")
         rb_db = tk.Radiobutton(
-            data_frame, text="🗄️ 从数据库选取", variable=self.learn_source_var,
+            data_frame, text="💾 从数据库选取", variable=self.learn_source_var,
             value="db", bg="white", font=("Microsoft YaHei", 9),
-            command=self._on_learn_source_change
+            command=self._on_learn_source_change, padx=0
         )
         rb_db.pack(anchor="w", padx=8, pady=2)
         rb_file = tk.Radiobutton(
             data_frame, text="📁 上传本地文件", variable=self.learn_source_var,
             value="file", bg="white", font=("Microsoft YaHei", 9),
-            command=self._on_learn_source_change
+            command=self._on_learn_source_change, padx=0
         )
         rb_file.pack(anchor="w", padx=8, pady=2)
         rb_url = tk.Radiobutton(
             data_frame, text="🌐 网页链接", variable=self.learn_source_var,
             value="url", bg="white", font=("Microsoft YaHei", 9),
-            command=self._on_learn_source_change
+            command=self._on_learn_source_change, padx=0
         )
         rb_url.pack(anchor="w", padx=8, pady=2)
 
@@ -4485,7 +5102,7 @@ foreach ($tokenName in $targets.Keys) {
         self.learn_search_var = tk.StringVar()
         self.learn_search_entry = tk.Entry(
             self.learn_search_frame, textvariable=self.learn_search_var,
-            font=("Microsoft YaHei", 9), width=10, relief=tk.SOLID, bd=1
+            font=("Microsoft YaHei", 9), width=20, relief=tk.SOLID, bd=1
         )
         self.learn_search_entry.pack(side=tk.LEFT, padx=4)
         self.learn_search_entry.bind("<Return>", lambda e: self._refresh_learn_sub_items())
@@ -4511,7 +5128,7 @@ foreach ($tokenName in $targets.Keys) {
         ).pack(side=tk.LEFT)
         self.learn_sub_combo = ttk.Combobox(
             self.learn_sub_frame,
-            state="readonly", width=18, font=("Microsoft YaHei", 9)
+            state="readonly", width=24, font=("Microsoft YaHei", 9)
         )
         self.learn_sub_combo.pack(side=tk.LEFT, padx=4)
         # 初始化下一级菜单
@@ -4548,7 +5165,7 @@ foreach ($tokenName in $targets.Keys) {
             bg="white", font=("Microsoft YaHei", 8), fg="#666666"
         ).pack(anchor="w", padx=8, pady=(4, 0))
         self.learn_topic_entry = tk.Entry(
-            topic_frame, font=("Microsoft YaHei", 10),
+            topic_frame, font=("Microsoft YaHei", 9),
             relief=tk.SOLID, bd=1
         )
         self.learn_topic_entry.pack(fill=tk.X, padx=8, pady=(2, 8))
@@ -4580,7 +5197,7 @@ foreach ($tokenName in $targets.Keys) {
             btn_frame, text="🚀 开始学习",
             command=self._start_learn_session,
             bg=self.success_color, fg="white",
-            font=("Microsoft YaHei", 10, "bold"),
+            font=("Microsoft YaHei", 9, "bold"),
             relief=tk.FLAT, cursor="hand2", pady=6
         )
         self.learn_start_btn.pack(fill=tk.X, pady=(0, 4))
@@ -8176,6 +8793,13 @@ foreach ($tokenName in $targets.Keys) {
             cursor.executemany("DELETE FROM collection_history WHERE cve_id = ?", params)
             cursor.executemany("DELETE FROM cves WHERE cve_id = ?", params)
             self.conn.commit()
+            # 同步删除 Redis 缓存
+            if self.use_redis:
+                try:
+                    for cid in cve_ids_to_delete:
+                        self.redis_manager.delete_cve(cid)
+                except Exception:
+                    pass
         except sqlite3.Error as e:
             messagebox.showerror("删除失败", f"数据库操作失败：{e}")
             return

@@ -195,4 +195,4 @@ pytest tests/ -v
 
 *最后更新时间：2026-03-06*
 *文档版本：v1.2.0*
-*更新内容：路径迁移至 E 盘，移除 Docker 依赖，项目采用轻量级 SQLite + WSL Redis 架构*
+*更新内容：移除 Docker 依赖，项目采用轻量级 SQLite + WSL Redis 架构*

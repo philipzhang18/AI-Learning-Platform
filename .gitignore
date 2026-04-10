@@ -171,6 +171,7 @@ claude code Ubuntu.txt
 node_modules/
 package.json
 package-lock.json
+generate_ppt.js
 
 # ==================== Redundant / Old Files ====================
 README.txt

@@ -2,7 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-5.2.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.3.0-orange.svg)](CHANGELOG.md)
 
 以**知识管理**为核心的智能平台，通过多渠道收集学习资料（播客、文件、网页、数据库数据），采用 AI 方法进行深度学习与分析。
 
@@ -12,9 +12,9 @@
 
 | 指标 | 数值 |
 |------|------|
-| Python 总代码行数 | 12,540 行 |
-| 主程序 (cve_integrated_gui.py) | 10,066 行 |
-| 函数/方法数 | 200 个 |
+| Python 总代码行数 | 13,150 行 |
+| 主程序 (cve_integrated_gui.py) | 10,690 行 |
+| 函数/方法数 | 210 个 |
 | GUI 标签页 | 12 个 |
 | 数据库表 | 14 张 |
 | 数据库大小 | 362 MB |
@@ -45,7 +45,8 @@
 
 ### 辅助功能
 - **TTS 播报** — 新闻简报语音播放（Windows SAPI）
-- **数据导出** — CSV / TXT / HTML 导出，支持选中条目导出
+- **数据导出** — 支持全部 8 个数据源，Markdown / TXT / HTML 格式，指定编号单条导出、选中项导出、按数量批量导出，输出完整内容不截断
+- **数据导入** — Dell技术库 Markdown/TXT 格式导入（含多行内容解析）
 
 ---
 
@@ -158,7 +159,7 @@ EXA_API_KEY=your_exa_api_key
 | v5.0.0 | 2026-03-14 | 重命名为"智能知识管理平台"，项目清理，架构优化 |
 | v4.4.0 | 2025-11-05 | SQLite 主存储 + 双写一致性架构 |
 | v4.3.0 | 2025-11-04 | 智能学习 Web URL 来源，保存对话 |
-| v4.2.0 | 2025-11-03 | 删除/搜索功能，路径迁移至 E 盘 |
+| v4.2.0 | 2025-11-03 | 删除/搜索功能，Docker 移除 |
 
 详见 [CHANGELOG.md](CHANGELOG.md)
 
