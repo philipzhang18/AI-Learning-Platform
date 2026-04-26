@@ -324,7 +324,52 @@ class DellSecurityScraper:
         if not text:
             return None
 
+        # 过滤错误页面（403/404/CDN 拦截/文档不可用）
+        if self._is_error_page(text, dsa_id):
+            logger.info(f"{dsa_id}: 检测到错误页面，跳过")
+            return None
+
         return self._parse_advisory_content(dsa_id, url, text, html)
+
+    @staticmethod
+    def _is_error_page(content: str, dsa_id: str = "") -> bool:
+        """判断内容是否为错误页面（CDN 拦截 / 404 / 文档不可用）"""
+        if not content:
+            return True
+        head = content[:2000].lower()
+
+        error_signatures = [
+            "you don't have permission to access",
+            "access denied",
+            "errors.edgesuite.net",
+            "the chosen document is not currently available",
+            "page not found",
+            "document not found",
+            "request blocked",
+            "akamai reference",
+            "reference #",
+        ]
+        hit_count = sum(1 for sig in error_signatures if sig in head)
+        if hit_count >= 1 and len(content) < 3000:
+            return True
+
+        # 极短内容且不含 DSA 标识 → 视为错误
+        if len(content) < 500:
+            return True
+
+        # 必须包含 DSA ID 或安全公告关键内容
+        content_lower = content.lower()
+        has_dsa = bool(dsa_id) and dsa_id.lower() in content_lower
+        has_advisory_keywords = any(
+            kw in content_lower for kw in [
+                "summary", "affected products", "remediation",
+                "cve-", "impact", "severity"
+            ]
+        )
+        if not has_dsa and not has_advisory_keywords:
+            return True
+
+        return False
 
     async def _fetch_raw_html(self, url):
         """HTTP 请求获取原始 HTML（用于解析表格结构）"""
@@ -832,15 +877,14 @@ class DellSecurityScraper:
         async def fetch_missing_one(index, dsa_id):
             async with semaphore:
                 try:
-                    # 策略 1: 使用 Exa 搜索该 DSA ID
+                    # 使用 Exa 搜索该 DSA ID 的真实 URL
                     url = None
                     if exa_api_key:
                         url = await self._search_dsa_via_exa(dsa_id, exa_api_key)
 
-                    # 策略 2: 直接尝试标准 URL 模式
+                    # Exa 找不到 → 跳过（直接 URL 会被 Dell CDN 拦截）
                     if not url:
-                        parts = dsa_id.split('-')
-                        url = f"https://www.dell.com/support/kbdoc/en-us/dsa-{parts[1]}-{parts[2]}"
+                        return None
 
                     log(f"[{index}/{len(missing_ids)}] 补全 {dsa_id}...")
                     advisory = await self._fetch_and_parse_detail(dsa_id, url, exa_api_key)
@@ -849,13 +893,12 @@ class DellSecurityScraper:
                     if advisory:
                         impact_str = advisory.get('impact') or 'N/A'
                         cve_count = len(advisory.get('cve_ids', []))
-                        log(f"  ✓ {dsa_id} — Impact: {impact_str}, CVE: {cve_count}")
+                        log(f"  -> {dsa_id} OK — Impact: {impact_str}, CVE: {cve_count}")
                         return advisory
                     else:
-                        log(f"  ✗ {dsa_id} — 无法获取内容")
                         return None
                 except Exception as e:
-                    log(f"  ✗ {dsa_id} — 失败: {e}")
+                    log(f"  -> {dsa_id} 失败: {e}")
                     return None
 
         tasks = [
