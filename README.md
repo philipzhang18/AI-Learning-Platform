@@ -66,12 +66,12 @@ pip install -r requirements.txt
 
 **方式一：SQLite 轻量模式（推荐）**
 ```
-双击运行：启动CVE系统-SQLite.bat
+双击运行：start_cve_gui.bat
 ```
 
 **方式二：混合模式（SQLite + WSL Redis）**
 ```
-双击运行：启动CVE系统-混合模式.bat
+双击运行：start_cve_with_wsl_redis.bat
 ```
 
 **方式三：命令行**

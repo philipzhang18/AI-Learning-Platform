@@ -268,7 +268,33 @@ class CVEIntegratedGUI:
                     source_content TEXT,
                     conversation TEXT NOT NULL,
                     summary TEXT,
+                    auto_summary TEXT,
+                    key_topics TEXT,
+                    suggested_questions TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 笔记本工作区表（Phase 2）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS notebooks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 笔记本资料源关联表（Phase 2）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS notebook_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    notebook_id INTEGER NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    source_title TEXT,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
                 )
             ''')
 
@@ -299,7 +325,23 @@ class CVEIntegratedGUI:
                     correct_count INTEGER DEFAULT 0,
                     next_review TEXT,
                     source_session_id INTEGER,
+                    source_refs TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # 学习产物表（Phase 3）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS learn_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER,
+                    topic TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source_refs TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES learn_sessions(id) ON DELETE SET NULL
                 )
             ''')
 
@@ -1289,7 +1331,7 @@ class CVEIntegratedGUI:
         self.news_brief_btn.pack(side=tk.LEFT, padx=4)
 
         self.news_podcast_btn = tk.Button(
-            btn_frame, text="🎙️ 生成播客", command=self.generate_podcast,
+            btn_frame, text="🎙 生成播客", command=self.generate_podcast,
             bg=self.warning_color, fg="white", font=("Microsoft YaHei", 10, "bold"),
             padx=12, pady=4, relief=tk.FLAT, cursor="hand2",
         )
@@ -1811,7 +1853,7 @@ foreach ($tokenName in $targets.Keys) {
                 self.root.after(0, messagebox.showerror, "配置错误", msg)
                 return
 
-            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
             base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
             today = datetime.now().strftime("%Y年%m月%d日")
@@ -1946,7 +1988,7 @@ foreach ($tokenName in $targets.Keys) {
                                 "未设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY，无法调用 AI")
                 return
 
-            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
             base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
             title = article.get('title', '未知标题')
@@ -2040,7 +2082,7 @@ foreach ($tokenName in $targets.Keys) {
                 self.root.after(0, messagebox.showerror, "配置错误", msg)
                 return
 
-            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
             base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
             today = datetime.now().strftime("%Y年%m月%d日")
@@ -2079,7 +2121,7 @@ foreach ($tokenName in $targets.Keys) {
             self.root.after(0, self.log, f"生成播客脚本失败: {e}")
             self.root.after(0, messagebox.showerror, "错误", f"生成播客脚本失败：{e}")
         finally:
-            self.root.after(0, self.news_podcast_btn.config, {"state": tk.NORMAL, "text": "🎙️ 生成播客"})
+            self.root.after(0, self.news_podcast_btn.config, {"state": tk.NORMAL, "text": "🎙 生成播客"})
 
     def _show_podcast_script(self, script):
         """在播客区域显示脚本并切换到播客子标签"""
@@ -3291,7 +3333,7 @@ foreach ($tokenName in $targets.Keys) {
 
         clear_btn = tk.Button(
             info_frame,
-            text="🗑️ 清空历史记录",
+            text="🗑 清空历史记录",
             command=self.clear_solution_history,
             bg=self.danger_color,
             fg="white",
@@ -3485,7 +3527,7 @@ foreach ($tokenName in $targets.Keys) {
 
         # 删除选中
         tk.Button(
-            action_row, text="🗑️ 删除选中", command=self.delete_dell_kb_selected,
+            action_row, text="🗑 删除选中", command=self.delete_dell_kb_selected,
             bg=self.danger_color, fg="white",
             font=("Microsoft YaHei", 10, "bold"),
             padx=10, pady=3, relief=tk.FLAT, cursor="hand2"
@@ -4177,7 +4219,7 @@ foreach ($tokenName in $targets.Keys) {
         content = self.stats_scroll_frame
 
         # ── 缩放控制（右下角浮动）──
-        self.stats_chart_scale = 1.1  # 默认 110%（卡片增大10%）
+        self.stats_chart_scale = 1.0  # 默认 100%
         zoom_bar = tk.Frame(self.stats_frame, bg="#f0f0f0", relief=tk.RAISED, bd=1, padx=6, pady=3)
         zoom_bar.place(relx=1.0, rely=1.0, anchor="se", x=-30, y=-10)
         zoom_bar.lift()
@@ -4186,7 +4228,7 @@ foreach ($tokenName in $targets.Keys) {
         tk.Button(zoom_bar, text="−", command=lambda: self._stats_zoom(-0.1),
                   font=("Microsoft YaHei", 9, "bold"), relief=tk.FLAT,
                   bg="#e0e0e0", cursor="hand2", width=2).pack(side=tk.LEFT, padx=(4, 1))
-        self.stats_zoom_label = tk.Label(zoom_bar, text="110%", bg="#f0f0f0",
+        self.stats_zoom_label = tk.Label(zoom_bar, text="100%", bg="#f0f0f0",
                                           font=("Microsoft YaHei", 8, "bold"), fg=self.primary_color, width=4)
         self.stats_zoom_label.pack(side=tk.LEFT)
         tk.Button(zoom_bar, text="+", command=lambda: self._stats_zoom(0.1),
@@ -4366,7 +4408,7 @@ foreach ($tokenName in $targets.Keys) {
     def _stats_zoom(self, delta, reset=False):
         """统计分析页面缩放"""
         if reset:
-            self.stats_chart_scale = 1.1  # 恢复默认 110%
+            self.stats_chart_scale = 1.0  # 恢复默认 100%
         else:
             self.stats_chart_scale = max(0.7, min(1.6, self.stats_chart_scale + delta))
         pct = int(self.stats_chart_scale * 100)
@@ -5154,6 +5196,28 @@ foreach ($tokenName in $targets.Keys) {
         )
         self.learn_preview_text.pack(fill=tk.X, padx=8, pady=(0, 6))
 
+        # 智能摘要区
+        self.learn_summary_frame = tk.LabelFrame(
+            left_panel, text="✨ 智能摘要", bg="white",
+            font=("Microsoft YaHei", 9, "bold"), fg=self.primary_color
+        )
+        self.learn_summary_frame.pack(fill=tk.X, padx=8, pady=(4, 4))
+
+        self.learn_summary_text = scrolledtext.ScrolledText(
+            self.learn_summary_frame, height=8, wrap=tk.WORD,
+            font=("Microsoft YaHei", 8), bg="#f8f9fa",
+            relief=tk.FLAT, state=tk.DISABLED
+        )
+        self.learn_summary_text.pack(fill=tk.X, padx=8, pady=(4, 4))
+
+        # 建议问题区
+        tk.Label(
+            self.learn_summary_frame, text="建议学习问题：", bg="white",
+            font=("Microsoft YaHei", 8), fg="#666666"
+        ).pack(anchor="w", padx=8)
+        self.learn_questions_frame = tk.Frame(self.learn_summary_frame, bg="white")
+        self.learn_questions_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
+
         # 2. 学习主题
         topic_frame = tk.LabelFrame(
             left_panel, text="🎯 学习主题", bg="white",
@@ -5250,6 +5314,58 @@ foreach ($tokenName in $targets.Keys) {
             relief=tk.FLAT, cursor="hand2", pady=4
         )
         self.learn_flashcard_btn.pack(fill=tk.X, padx=8, pady=(2, 6))
+
+        # 6. 学习产物生成区（Phase 3）
+        artifact_frame = tk.LabelFrame(
+            left_panel, text="📦 学习产物", bg="white",
+            font=("Microsoft YaHei", 9, "bold"), fg=self.primary_color
+        )
+        artifact_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        self.learn_timeline_btn = tk.Button(
+            artifact_frame, text="📅 生成时间线",
+            command=lambda: self._generate_artifact("timeline"),
+            bg="#3498db", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_timeline_btn.pack(fill=tk.X, padx=8, pady=(6, 2))
+
+        self.learn_mindmap_btn = tk.Button(
+            artifact_frame, text="🧠 生成思维导图",
+            command=lambda: self._generate_artifact("mindmap"),
+            bg="#9b59b6", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_mindmap_btn.pack(fill=tk.X, padx=8, pady=2)
+
+        self.learn_guide_btn = tk.Button(
+            artifact_frame, text="📖 生成学习指南",
+            command=lambda: self._generate_artifact("guide"),
+            bg="#27ae60", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_guide_btn.pack(fill=tk.X, padx=8, pady=2)
+
+        self.learn_faq_btn = tk.Button(
+            artifact_frame, text="❓ 生成 FAQ",
+            command=lambda: self._generate_artifact("faq"),
+            bg="#f39c12", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_faq_btn.pack(fill=tk.X, padx=8, pady=2)
+
+        self.learn_podcast_btn = tk.Button(
+            artifact_frame, text="🎙 生成对话播客",
+            command=lambda: self._generate_artifact("podcast"),
+            bg="#e74c3c", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", pady=4
+        )
+        self.learn_podcast_btn.pack(fill=tk.X, padx=8, pady=(2, 6))
 
         # ── 右侧对话区域 ──────────────────────────────────────────────
         right_panel = tk.Frame(main_paned, bg="white")
@@ -5705,6 +5821,8 @@ foreach ($tokenName in $targets.Keys) {
             self.learn_status_label.config(
                 text=f"已加载: {db_type} — {sub_val[:40]}"
             )
+            # 自动生成摘要（后台线程）
+            threading.Thread(target=self._generate_content_summary, args=(self.learn_source_content, db_type), daemon=True).start()
         except Exception as e:
             self._learn_set_preview(f"加载失败: {e}")
 
@@ -5733,6 +5851,8 @@ foreach ($tokenName in $targets.Keys) {
             self.learn_status_label.config(
                 text=f"已加载文件: {Path(path).name}  ({len(content)} 字符)"
             )
+            # 自动生成摘要（后台线程）
+            threading.Thread(target=self._generate_content_summary, args=(content, "本地文件"), daemon=True).start()
         except Exception as e:
             self._learn_set_preview(f"文件读取失败: {e}")
 
@@ -5849,6 +5969,9 @@ foreach ($tokenName in $targets.Keys) {
         )
         self.log(f"网页内容已加载用于学习: {url} ({char_count} 字符, {info})")
 
+        # 自动生成摘要（后台线程）
+        threading.Thread(target=self._generate_content_summary, args=(content, "网页"), daemon=True).start()
+
     def _learn_set_preview(self, text: str):
         """更新内容预览框"""
         self.learn_preview_text.config(state=tk.NORMAL)
@@ -5864,6 +5987,402 @@ foreach ($tokenName in $targets.Keys) {
         self.learn_chat_area.insert(tk.END, text + "\n\n", tag)
         self.learn_chat_area.see(tk.END)
         self.learn_chat_area.config(state=tk.DISABLED)
+
+    def _generate_content_summary(self, content: str, source_type: str):
+        """后台线程：生成资料的自动摘要、主题和建议问题"""
+        try:
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                return
+
+            model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
+            base_url = os.getenv(
+                "QWEN_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+
+            # 限制内容长度
+            content_preview = content[:3000] if len(content) > 3000 else content
+
+            prompt = f"""请分析以下{source_type}内容，生成结构化的学习辅助信息。
+
+内容：
+{content_preview}
+
+请严格按以下 JSON 格式返回，不要添加任何其他文字或 markdown 标记：
+{{
+  "summary": "用 2-3 句话概括核心内容",
+  "key_topics": ["提取 3-5 个核心主题或关键概念"],
+  "suggested_questions": ["生成 5 个适合学习的问题，从浅到深"]
+}}
+
+要求：
+1. 摘要要简洁准确，突出核心价值
+2. 主题要具体明确，便于后续学习
+3. 问题要有层次感，覆盖理解、应用、分析等不同层次
+4. 仅返回 JSON，不要有任何其他内容"""
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一位专业的学习内容分析专家。仅返回纯 JSON，不要使用 markdown 代码块。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1500,
+            )
+            reply = response.choices[0].message.content.strip()
+
+            # 清理 markdown 代码块标记
+            if reply.startswith("```"):
+                lines = reply.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                reply = "\n".join(lines)
+
+            result = json.loads(reply)
+
+            # 在主线程更新 UI
+            self.root.after(0, self._display_content_summary, result)
+
+        except Exception as e:
+            self.log(f"生成摘要失败: {e}")
+
+    def _display_content_summary(self, result: dict):
+        """在主线程显示摘要结果"""
+        try:
+            summary = result.get("summary", "")
+            key_topics = result.get("key_topics", [])
+            suggested_questions = result.get("suggested_questions", [])
+
+            # 显示摘要和主题
+            self.learn_summary_text.config(state=tk.NORMAL)
+            self.learn_summary_text.delete("1.0", tk.END)
+
+            if summary:
+                self.learn_summary_text.insert(tk.END, "📝 核心摘要\n", "header")
+                self.learn_summary_text.insert(tk.END, f"{summary}\n\n")
+
+            if key_topics:
+                self.learn_summary_text.insert(tk.END, "🔑 核心主题\n", "header")
+                for i, topic in enumerate(key_topics, 1):
+                    self.learn_summary_text.insert(tk.END, f"{i}. {topic}\n")
+
+            self.learn_summary_text.tag_config("header", foreground=self.primary_color, font=("Microsoft YaHei", 9, "bold"))
+            self.learn_summary_text.config(state=tk.DISABLED)
+
+            # 显示建议问题（可点击）
+            for widget in self.learn_questions_frame.winfo_children():
+                widget.destroy()
+
+            for i, question in enumerate(suggested_questions[:5], 1):
+                btn = tk.Button(
+                    self.learn_questions_frame,
+                    text=f"{i}. {question}",
+                    command=lambda q=question: self._fill_question(q),
+                    bg="#e8f4fd", fg="#2c3e50",
+                    font=("Microsoft YaHei", 8), anchor="w",
+                    relief=tk.FLAT, cursor="hand2", padx=6, pady=3
+                )
+                btn.pack(fill=tk.X, pady=1)
+
+            self.learn_status_label.config(text="✨ 智能摘要已生成")
+
+        except Exception as e:
+            self.log(f"显示摘要失败: {e}")
+
+    def _fill_question(self, question: str):
+        """将建议问题填入用户输入框"""
+        self.learn_user_input.delete("1.0", tk.END)
+        self.learn_user_input.insert("1.0", question)
+        self.learn_user_input.focus_set()
+
+    def _generate_artifact(self, artifact_type: str):
+        """生成学习产物（时间线/思维导图/学习指南/FAQ/播客）"""
+        if not self.learn_messages or len(self.learn_messages) < 3:
+            messagebox.showwarning("提示", "请先进行至少一轮学习对话，再生成学习产物。")
+            return
+
+        # 禁用按钮
+        buttons = {
+            "timeline": self.learn_timeline_btn,
+            "mindmap": self.learn_mindmap_btn,
+            "guide": self.learn_guide_btn,
+            "faq": self.learn_faq_btn,
+            "podcast": self.learn_podcast_btn
+        }
+        btn = buttons.get(artifact_type)
+        if btn:
+            btn.config(state=tk.DISABLED, text="生成中...")
+
+        self.learn_status_label.config(text=f"正在生成{self._get_artifact_name(artifact_type)}...")
+        threading.Thread(
+            target=self._generate_artifact_thread,
+            args=(artifact_type,),
+            daemon=True
+        ).start()
+
+    def _get_artifact_name(self, artifact_type: str) -> str:
+        """获取产物类型的中文名称"""
+        names = {
+            "timeline": "学习时间线",
+            "mindmap": "思维导图",
+            "guide": "学习指南",
+            "faq": "常见问题",
+            "podcast": "对话播客"
+        }
+        return names.get(artifact_type, "学习产物")
+
+    def _generate_artifact_thread(self, artifact_type: str):
+        """后台线程：生成学习产物"""
+        try:
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            if not api_key:
+                self.root.after(0, messagebox.showerror, "配置错误",
+                                "未设置 QWEN_API_KEY，无法调用 AI")
+                return
+
+            model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
+            base_url = os.getenv(
+                "QWEN_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+
+            # 提取对话内容
+            conv_text = ""
+            for m in self.learn_messages:
+                if m.get("role") in ("user", "assistant"):
+                    role_label = "学习者" if m["role"] == "user" else "导师"
+                    conv_text += f"{role_label}: {m['content']}\n\n"
+            conv_text = conv_text[:4000]  # 限制长度
+
+            topic = getattr(self, 'learn_topic', '') or "未知主题"
+
+            # 根据类型生成不同的 prompt
+            prompts = self._get_artifact_prompts(topic, conv_text, artifact_type)
+            prompt = prompts.get(artifact_type, prompts["guide"])
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "你是一位专业的学习内容组织专家，擅长将学习对话转化为结构化的学习资料。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=3000,
+            )
+            content = response.choices[0].message.content.strip()
+
+            # 保存到数据库
+            session_id = getattr(self, 'current_session_id', None)
+            artifact_name = self._get_artifact_name(artifact_type)
+            title = f"{artifact_name}：{topic}"
+
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    """INSERT INTO learn_artifacts
+                       (session_id, topic, artifact_type, title, content, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (session_id, topic, artifact_type, title, content,
+                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                )
+                self.conn.commit()
+
+            # 在主线程显示结果
+            self.root.after(0, self._show_artifact_result, artifact_type, title, content)
+
+        except Exception as e:
+            err = f"生成{self._get_artifact_name(artifact_type)}失败: {e}"
+            self.root.after(0, messagebox.showerror, "生成失败", err)
+            self.root.after(0, self.learn_status_label.config, {"text": err})
+        finally:
+            # 恢复按钮状态
+            buttons = {
+                "timeline": (self.learn_timeline_btn, "📅 生成时间线"),
+                "mindmap": (self.learn_mindmap_btn, "🧠 生成思维导图"),
+                "guide": (self.learn_guide_btn, "📖 生成学习指南"),
+                "faq": (self.learn_faq_btn, "❓ 生成 FAQ"),
+                "podcast": (self.learn_podcast_btn, "🎙 生成对话播客")
+            }
+            btn_info = buttons.get(artifact_type)
+            if btn_info:
+                btn, text = btn_info
+                self.root.after(0, btn.config, {"state": tk.NORMAL, "text": text})
+
+    def _get_artifact_prompts(self, topic: str, conv_text: str, artifact_type: str) -> dict:
+        """获取不同类型产物的生成提示词"""
+        return {
+            "timeline": f"""基于以下关于「{topic}」的学习对话，生成学习时间线。
+
+对话内容：
+{conv_text}
+
+请生成一个 Markdown 格式的学习时间线，包含：
+1. 学习的主要阶段（按时间顺序）
+2. 每个阶段的关键理解和突破
+3. 遇到的困难和解决方法
+4. 知识点之间的递进关系
+
+格式示例：
+## 学习时间线：{topic}
+
+### 阶段 1：初步理解（第 1-2 轮对话）
+- 🎯 目标：理解基本概念
+- 💡 关键突破：...
+- 🤔 困惑点：...
+
+### 阶段 2：深入探索（第 3-4 轮对话）
+...
+
+仅返回 Markdown 内容，不要有其他说明。""",
+
+            "mindmap": f"""基于以下关于「{topic}」的学习对话，生成思维导图。
+
+对话内容：
+{conv_text}
+
+请生成一个 Mermaid 格式的思维导图，展示：
+1. 核心概念及其层次结构
+2. 概念之间的关系
+3. 关键知识点
+
+格式示例：
+```mermaid
+mindmap
+  root(({topic}))
+    核心概念1
+      子概念1.1
+      子概念1.2
+    核心概念2
+      子概念2.1
+      子概念2.2
+```
+
+仅返回 Mermaid 代码，不要有其他说明。""",
+
+            "guide": f"""基于以下关于「{topic}」的学习对话，生成学习指南。
+
+对话内容：
+{conv_text}
+
+请生成一个结构化的学习指南，包含：
+1. 学习目标
+2. 前置知识
+3. 核心概念清单
+4. 学习路径（分步骤）
+5. 实践建议
+6. 进阶方向
+
+使用 Markdown 格式，清晰易读。仅返回内容，不要有其他说明。""",
+
+            "faq": f"""基于以下关于「{topic}」的学习对话，生成常见问题解答（FAQ）。
+
+对话内容：
+{conv_text}
+
+请生成 5-8 个常见问题及其解答，包含：
+1. 基础概念问题
+2. 常见误解
+3. 实际应用问题
+4. 进阶问题
+
+格式示例：
+## 常见问题解答：{topic}
+
+### Q1: [问题]
+**A:** [简洁的回答]
+
+### Q2: [问题]
+**A:** [简洁的回答]
+
+仅返回 Markdown 内容，不要有其他说明。""",
+
+            "podcast": f"""基于以下关于「{topic}」的学习对话，生成一段双人对话式播客脚本。
+
+对话内容：
+{conv_text}
+
+要求：
+1. 对话要自然流畅，像真实的播客节目
+2. 主持人 A（提问者）和主持人 B（讲解者）
+3. 时长约 3-5 分钟（约 800-1200 字）
+4. 用通俗易懂的语言解释技术概念
+
+格式示例：
+主持人 A：大家好，欢迎来到今天的节目。今天我们要聊聊{topic}。
+
+主持人 B：是的，这是一个很重要的话题。根据我们的学习...
+
+仅返回对话脚本，不要有其他说明。"""
+        }
+
+    def _show_artifact_result(self, artifact_type: str, title: str, content: str):
+        """在弹窗中显示生成的学习产物"""
+        if artifact_type == "podcast":
+            self.news_podcast_area.delete(1.0, tk.END)
+            self.news_podcast_area.insert(tk.END, content)
+            self.tts_status_label.config(text="学习播客脚本已生成，可点击播放")
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("900x700")
+        dialog.transient(self.root)
+
+        # 标题栏
+        tk.Label(
+            dialog, text=title,
+            font=("Microsoft YaHei", 11, "bold"),
+            bg="#2c3e50", fg="white", padx=10, pady=10
+        ).pack(fill=tk.X)
+
+        # 内容区域
+        text_frame = tk.Frame(dialog)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        text = scrolledtext.ScrolledText(
+            text_frame, wrap=tk.WORD, font=("Consolas", 11), bg="#f8f9fa"
+        )
+        text.pack(fill=tk.BOTH, expand=True)
+        text.insert(tk.END, content)
+        text.config(state=tk.DISABLED)
+
+        # 底部按钮
+        btn_frame = tk.Frame(dialog, bg="white", pady=10)
+        btn_frame.pack(fill=tk.X, padx=10)
+
+        tk.Button(
+            btn_frame, text="复制到剪贴板",
+            command=lambda: self._copy_to_clipboard(content),
+            bg=self.primary_color, fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Button(
+            btn_frame, text="关闭", command=dialog.destroy,
+            bg="#95a5a6", fg="white",
+            font=("Microsoft YaHei", 9),
+            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+        ).pack(side=tk.RIGHT, padx=5)
+
+        self.learn_status_label.config(text=f"✅ {self._get_artifact_name(artifact_type)}已生成")
+
+    def _copy_to_clipboard(self, text: str):
+        """复制文本到剪贴板"""
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            messagebox.showinfo("成功", "内容已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("失败", f"复制失败: {e}")
+
 
     def _start_learn_session(self):
         """开始一个新的费曼学习会话"""
@@ -5960,7 +6479,7 @@ foreach ($tokenName in $targets.Keys) {
                 )
                 return
 
-            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
             base_url = os.getenv(
                 "QWEN_BASE_URL",
                 "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -6097,7 +6616,19 @@ foreach ($tokenName in $targets.Keys) {
                 "语气：严谨、挑战性、启发式"
             ),
         }
-        return prompts.get(level, prompts["入门"])
+
+        base_prompt = prompts.get(level, prompts["入门"])
+
+        # 增强提示词：添加来源引用与防幻觉约束
+        citation_instruction = """
+
+【重要约束】
+1. 你的回答必须严格基于用户提供的学习资料，不要引入资料之外的信息
+2. 当引用资料中的具体信息时，在句子末尾添加 [📚] 标记
+3. 如果用户的问题无法从资料中找到答案，明确告知"资料中未提及此内容"
+4. 保持回答的准确性和可追溯性，这是费曼学习法的核心要求"""
+
+        return base_prompt + citation_instruction
 
     # ==================== 知识巩固：闪卡 & 问答 ====================
 
@@ -6122,7 +6653,7 @@ foreach ($tokenName in $targets.Keys) {
                                 "未设置 QWEN_API_KEY，无法调用 AI")
                 return
 
-            model = os.getenv("QWEN_MODEL", "qwen-max-latest")
+            model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
             base_url = os.getenv(
                 "QWEN_BASE_URL",
                 "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -6292,7 +6823,7 @@ foreach ($tokenName in $targets.Keys) {
 
         question_label = tk.Label(
             question_frame, text="", bg="white",
-            font=("Microsoft YaHei", 12), wraplength=580,
+            font=("Microsoft YaHei", 13), wraplength=580,
             justify=tk.LEFT, anchor="nw"
         )
         question_label.pack(fill=tk.X, pady=(5, 15))
@@ -6305,7 +6836,7 @@ foreach ($tokenName in $targets.Keys) {
         # 解析区域
         explain_label = tk.Label(
             question_frame, text="", bg="#f8f9fa",
-            font=("Microsoft YaHei", 10), wraplength=580,
+            font=("Microsoft YaHei", 11), wraplength=580,
             justify=tk.LEFT, anchor="nw", padx=10, pady=8
         )
 
@@ -6336,7 +6867,7 @@ foreach ($tokenName in $targets.Keys) {
             for i, opt_text in enumerate(options):
                 btn = tk.Button(
                     options_frame, text=opt_text,
-                    font=("Microsoft YaHei", 10), bg="#f5f5f5",
+                    font=("Microsoft YaHei", 11), bg="#f5f5f5",
                     fg="#333", anchor="w", padx=15, pady=8,
                     relief=tk.GROOVE, cursor="hand2",
                     command=lambda ci=i: on_answer(ci, correct, explanation)
@@ -6521,7 +7052,7 @@ foreach ($tokenName in $targets.Keys) {
 
         card_content = tk.Label(
             card_frame, text="", bg="white",
-            font=("Microsoft YaHei", 13), wraplength=480,
+            font=("Microsoft YaHei", 14), wraplength=480,
             justify=tk.LEFT, anchor="nw"
         )
         card_content.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
@@ -7835,16 +8366,10 @@ foreach ($tokenName in $targets.Keys) {
                     # 清空树形视图（使用队列通知主线程）
                     self.data_queue.put(('clear_nvd', None))
 
-                    # 批量添加数据 with performance optimization
-                    processed_count = 0
+                    # 批量添加数据（后台预处理，减少主线程负担）
                     for cve in self.cve_data:
-                        self.data_queue.put(('add_nvd', cve))
-                        processed_count += 1
-
-                        # Yield control periodically to prevent GUI freezing
-                        if processed_count % 50 == 0:  # Update every 50 items
-                            import time
-                            time.sleep(0.001)  # Small pause to allow other operations
+                        preprocessed = self._preprocess_nvd_row(cve)
+                        self.data_queue.put(('add_nvd', preprocessed))
 
                     # 通知加载完成
                     total_count = len(all_cves)
@@ -7892,16 +8417,10 @@ foreach ($tokenName in $targets.Keys) {
             # 清空树形视图
             self.data_queue.put(('clear_nvd', None))
 
-            # 显示数据 with performance optimization
-            processed_count = 0
+            # 批量添加数据（后台预处理，减少主线程负担）
             for cve in self.cve_data:
-                self.data_queue.put(('add_nvd', cve))
-                processed_count += 1
-
-                # Yield control periodically to prevent GUI freezing
-                if processed_count % 50 == 0:  # Update every 50 items
-                    import time
-                    time.sleep(0.001)  # Small pause to allow other operations
+                preprocessed = self._preprocess_nvd_row(cve)
+                self.data_queue.put(('add_nvd', preprocessed))
 
             # 获取总数量
             cursor.execute("SELECT COUNT(*) FROM cves")
@@ -8218,8 +8737,8 @@ foreach ($tokenName in $targets.Keys) {
             import traceback
             self.log(f"详细错误信息: {traceback.format_exc()}")
 
-    def add_nvd_to_tree(self, cve_data):
-        """添加 NVD CVE 数据到树视图"""
+    def _preprocess_nvd_row(self, cve_data):
+        """预处理 NVD 数据为 Treeview 行格式（在后台线程调用）"""
         severity = cve_data.get("cvss_severity", "未知")
         tag = severity if severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"] else ""
 
@@ -8229,8 +8748,7 @@ foreach ($tokenName in $targets.Keys) {
             try:
                 dt = datetime.fromisoformat(published.replace("Z", ""))
                 published = dt.strftime("%Y-%m-%d %H:%M")
-            except (ValueError, TypeError) as e:
-                # 日期格式无效，保持原样
+            except (ValueError, TypeError):
                 pass
 
         # 截断描述
@@ -8238,19 +8756,25 @@ foreach ($tokenName in $targets.Keys) {
         if len(description) > 150:
             description = description[:150] + "..."
 
-        self.nvd_tree.insert(
-            "",
-            "end",
-            values=(
-                cve_data.get("cve_id", ""),
-                severity,
-                cve_data.get("cvss_score", "N/A"),
-                published,
-                description,
-                cve_data.get("source", "NVD")
-            ),
-            tags=(tag,)
-        )
+        return (
+            cve_data.get("cve_id", ""),
+            severity,
+            cve_data.get("cvss_score", "N/A"),
+            published,
+            description,
+            cve_data.get("source", "NVD")
+        ), tag
+
+    def add_nvd_to_tree(self, cve_data):
+        """添加 NVD CVE 数据到树视图"""
+        # 如果传入的是预处理的 tuple，直接插入
+        if isinstance(cve_data, tuple) and len(cve_data) == 2:
+            values, tag = cve_data
+            self.nvd_tree.insert("", "end", values=values, tags=(tag,))
+        else:
+            # 兼容旧逻辑：实时处理
+            values, tag = self._preprocess_nvd_row(cve_data)
+            self.nvd_tree.insert("", "end", values=values, tags=(tag,))
 
     def add_dell_to_tree(self, advisory):
         """添加 Dell 安全公告到树视图"""
@@ -8296,28 +8820,23 @@ foreach ($tokenName in $targets.Keys) {
     def _refresh_matched_data_background(self):
         """在后台线程中刷新关联数据（避免UI阻塞）"""
         try:
-            # ✅ 修复：从数据库加载数据，不依赖内存
-            # 检查Dell数据
-            if not hasattr(self, 'dell_advisories') or not self.dell_advisories:
-                # 如果内存中没有Dell数据，从数据库加载
-                with self.db_lock:
-                    cursor = self.conn.cursor()
-                    cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
-                    records = cursor.fetchall()
-                dell_advisories = []
-                for record in records:
-                    try:
-                        if record[0]:
-                            data = json.loads(record[0])
-                            dell_advisories.append(data)
-                    except Exception:
-                        continue
+            # 始终从数据库加载全量Dell数据，避免内存limit导致遗漏
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
+                records = cursor.fetchall()
+            dell_advisories = []
+            for record in records:
+                try:
+                    if record[0]:
+                        data = json.loads(record[0])
+                        dell_advisories.append(data)
+                except Exception:
+                    continue
 
-                if not dell_advisories:
-                    self.log_queue.put("无法刷新关联数据：数据库中无Dell数据")
-                    return
-            else:
-                dell_advisories = self.dell_advisories
+            if not dell_advisories:
+                self.log_queue.put("无法刷新关联数据：数据库中无Dell数据")
+                return
 
             # ✅ 修复：从数据库加载CVE数据用于关联匹配
             # 获取所有Dell公告中的CVE IDs
@@ -8430,29 +8949,24 @@ foreach ($tokenName in $targets.Keys) {
         for item in self.matched_tree.get_children():
             self.matched_tree.delete(item)
 
-        # ✅ 修复：从数据库加载数据，不依赖内存（与 _refresh_matched_data_background 一致）
+        # 始终从数据库加载全量Dell数据，避免内存limit导致遗漏
         try:
-            # 检查Dell数据
-            if not hasattr(self, 'dell_advisories') or not self.dell_advisories:
-                # 如果内存中没有Dell数据，从数据库加载
-                with self.db_lock:
-                    cursor = self.conn.cursor()
-                    cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
-                    records = cursor.fetchall()
-                dell_advisories = []
-                for record in records:
-                    try:
-                        if record[0]:
-                            data = json.loads(record[0])
-                            dell_advisories.append(data)
-                    except Exception:
-                        continue
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM dell_advisories ORDER BY published_date DESC")
+                records = cursor.fetchall()
+            dell_advisories = []
+            for record in records:
+                try:
+                    if record[0]:
+                        data = json.loads(record[0])
+                        dell_advisories.append(data)
+                except Exception:
+                    continue
 
-                if not dell_advisories:
-                    self.log("无法刷新关联数据：数据库中无Dell数据")
-                    return
-            else:
-                dell_advisories = self.dell_advisories
+            if not dell_advisories:
+                self.log("无法刷新关联数据：数据库中无Dell数据")
+                return
 
             # 从数据库加载CVE数据用于关联匹配
             # 获取所有Dell公告中的CVE IDs
@@ -8743,8 +9257,7 @@ foreach ($tokenName in $targets.Keys) {
                     ORDER BY published_date DESC
                     LIMIT 200
                 """, (f'%{search_upper}%',))
-
-            records = cursor.fetchall()
+                records = cursor.fetchall()
             results = []
 
             for record in records:
@@ -8903,6 +9416,11 @@ foreach ($tokenName in $targets.Keys) {
                 self.dell_queue.put(('add', advisory))
 
             if results:
+                # 将数据库搜索结果合并到内存列表，确保双击能找到
+                existing_ids = {a.get('dell_security_advisory', '') for a in self.dell_advisories}
+                for advisory in results:
+                    if advisory.get('dell_security_advisory', '') not in existing_ids:
+                        self.dell_advisories.append(advisory)
                 self.log_queue.put(f"✓ 数据库中找到 {len(results)} 条匹配 '{search_term}' 的记录")
             else:
                 self.log_queue.put(f"未找到匹配 '{search_term}' 的Dell公告（已搜索全部数据库）")
@@ -8953,11 +9471,24 @@ foreach ($tokenName in $targets.Keys) {
             item = self.nvd_tree.item(selection[0])
             cve_id = item['values'][0]
 
-            # 查找详细数据
+            # 先在内存中查找
             for cve in self.cve_data:
                 if cve.get('cve_id') == cve_id:
                     self.show_nvd_detail(cve)
-                    break
+                    return
+
+            # 内存中没有，从数据库查询
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT data FROM cves WHERE cve_id = ?", (cve_id,))
+                record = cursor.fetchone()
+                if record and record[0]:
+                    cve = json.loads(record[0])
+                    self.show_nvd_detail(cve)
+                else:
+                    messagebox.showwarning("提示", f"未找到 {cve_id} 的详细数据")
+            except Exception as e:
+                messagebox.showerror("错误", f"加载详细数据失败: {e}")
 
     def show_nvd_detail(self, cve):
         """显示 NVD CVE 详细信息"""
@@ -8971,7 +9502,7 @@ foreach ($tokenName in $targets.Keys) {
             wrap=tk.WORD,
             width=90,
             height=30,
-            font=("Consolas", 10)
+            font=("Consolas", 11)
         )
         text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -9035,7 +9566,7 @@ CWE 分类:
             wrap=tk.WORD,
             width=100,
             height=35,
-            font=("Consolas", 10)
+            font=("Consolas", 11)
         )
         text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -9141,7 +9672,7 @@ Dell 安全公告详细信息
     def _call_dell_kb_ai_solution_thread(self, article):
         """后台线程调用AI分析Dell技术库文章"""
         try:
-            model_name = os.getenv("QWEN_MODEL", "qwen3.5-plus")
+            model_name = os.getenv("QWEN_MODEL", "qwen3.6-plus")
             api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
             base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
@@ -9277,7 +9808,7 @@ Dell 安全公告详细信息
         text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         text = scrolledtext.ScrolledText(
-            text_frame, wrap=tk.WORD, font=("Consolas", 10), bg="#f8f9fa"
+            text_frame, wrap=tk.WORD, font=("Consolas", 11), bg="#f8f9fa"
         )
         text.pack(fill=tk.BOTH, expand=True)
 
@@ -9425,7 +9956,7 @@ Dell 安全公告详细信息
     def _call_nvd_ai_solution_thread(self, cve_data):
         """在后台线程中调用AI分析CVE数据（无需Dell公告）"""
         try:
-            model_name = os.getenv("QWEN_MODEL", "qwen3.5-plus")
+            model_name = os.getenv("QWEN_MODEL", "qwen3.6-plus")
             api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
             base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
@@ -9519,8 +10050,8 @@ Dell 安全公告详细信息
         """在后台线程中调用AI分析"""
         try:
             # 读取环境变量配置
-            # 模型名称：从QWEN_MODEL环境变量读取，默认为qwen-max-latest
-            model_name = os.getenv("QWEN_MODEL", "qwen3.5-plus")
+            # 模型名称：从QWEN_MODEL环境变量读取，默认为qwen3.6-plus
+            model_name = os.getenv("QWEN_MODEL", "qwen3.6-plus")
 
             # API密钥：优先读取QWEN_API_KEY，回退到DASHSCOPE_API_KEY
             api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
@@ -9675,7 +10206,7 @@ Qwen API密钥未设置。
             text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
             result_text = scrolledtext.ScrolledText(
-                text_frame, wrap=tk.WORD, font=("Consolas", 11), bg="#f8f9fa"
+                text_frame, wrap=tk.WORD, font=("Consolas", 12), bg="#f8f9fa"
             )
             result_text.pack(fill=tk.BOTH, expand=True)
             result_text.insert(tk.END, result)
@@ -9740,7 +10271,7 @@ Qwen API密钥未设置。
                         cve_data.get('cve_id'),
                         advisory_id,
                         datetime.now().isoformat(),
-                        os.getenv("QWEN_MODEL", "qwen3.5-plus"),
+                        os.getenv("QWEN_MODEL", "qwen3.6-plus"),
                         "",  # 提示词可选
                         result[:10000],  # 限制长度
                         status
@@ -9784,7 +10315,7 @@ Qwen API密钥未设置。
                             cve_data.get('cve_id'),
                             advisory_id,
                             datetime.now().isoformat(),
-                            os.getenv("QWEN_MODEL", "qwen3.5-plus"),
+                            os.getenv("QWEN_MODEL", "qwen3.6-plus"),
                             "",
                             result[:10000],
                             status
@@ -10200,7 +10731,7 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
             wrap=tk.WORD,
             width=110,
             height=40,
-            font=("Consolas", 10)
+            font=("Consolas", 11)
         )
         text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -10414,6 +10945,7 @@ CVE 描述:
         """检查队列中的数据（优化版：增量更新）"""
         # 检查 NVD 数据队列
         new_nvd_items = []  # 收集本次批量新增的数据
+        new_nvd_ids = set()  # 用 set 去重，O(1) 查找
         need_clear_nvd_tree = False
 
         while not self.data_queue.empty():
@@ -10424,12 +10956,22 @@ CVE 描述:
                 if isinstance(data_type, str) and data_type == 'clear_nvd':
                     # 清空NVD树视图
                     need_clear_nvd_tree = True
+                    new_nvd_items.clear()
+                    new_nvd_ids.clear()
                 elif isinstance(data_type, str) and data_type == 'add_nvd':
-                    # 添加NVD数据
+                    # 添加NVD数据（支持预处理的 tuple 和原始 dict）
                     if data:
-                        cve_id = data.get('cve_id', '')
+                        # 预处理后的数据是 ((values_tuple), tag)
+                        if isinstance(data, tuple) and len(data) == 2:
+                            values, tag = data
+                            cve_id = values[0]  # CVE ID 是第一列
+                        else:
+                            # 原始 dict 格式（兼容旧代码）
+                            cve_id = data.get('cve_id', '')
+
                         # 只添加不重复的数据
-                        if cve_id and not any(cve.get('cve_id') == cve_id for cve in new_nvd_items):
+                        if cve_id and cve_id not in new_nvd_ids:
+                            new_nvd_ids.add(cve_id)
                             new_nvd_items.append(data)
                 elif data_type == 'nvd':
                     # ✅ 优化：直接添加到内存，无需重新加载数据库
@@ -10446,16 +10988,24 @@ CVE 描述:
             for item in self.nvd_tree.get_children():
                 self.nvd_tree.delete(item)
 
-        # ✅ 批量添加到树视图（减少 GUI 更新次数）with performance optimization
+        # ✅ 批量添加到树视图（每次最多处理500条，剩余放回队列下次处理）
         if new_nvd_items:
-            processed_count = 0
-            for cve in new_nvd_items:
-                self.add_nvd_to_tree(cve)
-                processed_count += 1
+            batch, remaining = new_nvd_items[:500], new_nvd_items[500:]
 
-                # Yield control periodically to prevent GUI freezing for large batches
-                if processed_count % 50 == 0:
-                    self.root.update_idletasks()  # Process pending GUI events
+            # 临时禁用滚动条回调，减少重绘开销
+            original_yscroll = self.nvd_tree.cget('yscrollcommand')
+            self.nvd_tree.config(yscrollcommand='')
+
+            # 批量插入
+            for cve in batch:
+                self.add_nvd_to_tree(cve)
+
+            # 恢复滚动条回调
+            self.nvd_tree.config(yscrollcommand=original_yscroll)
+
+            # 剩余数据重新入队，下次 check_queues 继续处理
+            for cve in remaining:
+                self.data_queue.put(('add_nvd', cve))
 
         # 检查 Dell 数据队列
         new_dell_items = []  # 收集新增的 Dell 数据

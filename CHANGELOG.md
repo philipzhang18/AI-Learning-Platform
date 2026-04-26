@@ -1,5 +1,46 @@
 # Changelog
 
+## [v5.4.0] - 2026-04-26
+
+### Added — 智能学习功能增强（NotebookLM 风格）
+- **Phase 1 资料自动摘要**：加载学习内容后，AI 自动生成核心摘要、3-5 个核心主题、5 个分层学习问题
+- **Phase 1 来源引用**：AI 回答带 [📚] 引用标记，要求严格基于资料回答（防幻觉约束）
+- **Phase 1 智能摘要 UI**：左侧面板新增"✨ 智能摘要"区域，建议问题可点击直接填入输入框
+- **Phase 3 学习产物生成**：左侧面板新增"📦 学习产物"区域，5 个生成按钮：
+  - 📅 学习时间线（按阶段展示进度）
+  - 🧠 思维导图（Mermaid 格式）
+  - 📖 学习指南（结构化路径）
+  - ❓ 常见问题 FAQ
+  - 🎙 对话播客（双人对话脚本，可直接 TTS 播放）
+- **数据库表扩展**：
+  - `learn_sessions` 增加 `auto_summary`、`key_topics`、`suggested_questions`
+  - 新增 `notebooks`、`notebook_sources` 表（笔记本工作区）
+  - 新增 `learn_artifacts` 表（学习产物存储）
+  - `flashcards` 增加 `source_refs` 字段
+
+### Added — 项目架构优化
+- 新增 [config.py](config.py)：集中管理颜色、字体、AI/DB/UI 配置
+- 新增 [ai_client.py](ai_client.py)：统一 OpenAI 客户端初始化
+- 新增 [db_layer.py](db_layer.py)：学习模块 DAO 层
+- 新增 [error_utils.py](error_utils.py)：统一错误处理装饰器
+- 新增 [db_backup.py](db_backup.py)：SQLite 数据库一键备份/恢复
+- 新增 [learn_enhancements.py](learn_enhancements.py)：学习增强功能模块
+
+### Added — UI 改进
+- 统计分析页面默认缩放从 110% 改为 **100%**
+- 所有弹框文本字体统一增大一号
+
+### Changed
+- 修正 README 中错误的启动脚本名称（`启动CVE系统-SQLite.bat` → `start_cve_gui.bat`）
+- 补齐 `.env.example` 模板（增加 QWEN/CLAUDE/EXA 等 AI Key 配置）
+- 系统提示词增加防幻觉约束章节
+
+### Cleanup
+- 清理根目录 18 个无关文件（演讲稿、独白、JSON、JS）至 `archive/演讲稿与脚本/`
+- 移除临时 dsa_DSA-*.json 和 FIXES_CHECKLIST.txt 等到 `archive/`
+
+---
+
 ## [v5.3.0] - 2026-04-10
 
 ### Added
