@@ -11447,8 +11447,7 @@ CVE 描述:
                 self.conn.commit()
 
             self.root.after(0, self.hide_progress)
-            self.root.after(0, self.load_cve_data_from_db)
-            self.root.after(0, self.refresh_cve_tree)
+            self.root.after(0, self.load_nvd_from_database)
             self.root.after(
                 0,
                 messagebox.showinfo,
