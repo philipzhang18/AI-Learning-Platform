@@ -45,6 +45,33 @@ from config import COLORS, AI_CONFIG, get_api_key
 from db_backup import backup_database, list_backups
 
 
+def _extract_cvss_from_metrics(metrics: dict) -> tuple:
+    """从 NVD metrics 中提取 CVSS 评分（优先级：v4.0 → v3.1 → v3.0 → v2.0）
+
+    每一级只有在 baseSeverity 有效（非 NONE/N/A/空）时才采用，
+    否则继续查下一级，确保 v4.0 为 N/A 时能回退到 v3.x 的实际评分。
+
+    Returns:
+        (severity, score, vector) 元组，未找到时返回 ("", None, "")
+    """
+    for ver_key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
+        if ver_key in metrics and metrics[ver_key]:
+            cd = metrics[ver_key][0].get("cvssData", {})
+            sev = cd.get("baseSeverity", "")
+            score = cd.get("baseScore")
+            if score is not None and sev and str(sev).upper() not in ("NONE", "N/A", ""):
+                return sev, score, cd.get("vectorString", "")
+
+    if "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
+        cd = metrics["cvssMetricV2"][0].get("cvssData", {})
+        score = cd.get("baseScore")
+        if score is not None:
+            sev = "HIGH" if score >= 7.0 else "MEDIUM" if score >= 4.0 else "LOW"
+            return sev, score, cd.get("vectorString", "")
+
+    return "", None, ""
+
+
 def _make_qwen_client(timeout: int = 60):
     """统一创建 Qwen / DashScope 兼容客户端
 
@@ -723,26 +750,16 @@ class CVEIntegratedGUI:
                         # First try to load the stored JSON data
                         if record[1]:  # The data field is not empty
                             data = json.loads(record[1])
-                            # 回填缺失的 CVSS 评分（支持 v4.0/v3.1/v3.0/v2.0）
-                            if not data.get("cvss_severity"):
+                            # 回填缺失的 CVSS 评分（v4.0→v3.1→v3.0→v2.0，跳过 NONE）
+                            sev = data.get("cvss_severity", "")
+                            if not sev or str(sev).upper() in ("NONE", "N/A", ""):
                                 metrics = data.get("metrics", {})
-                                for ver in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
-                                    if ver in metrics and metrics[ver]:
-                                        cd = metrics[ver][0].get("cvssData", {})
-                                        data["cvss_severity"] = cd.get("baseSeverity", "")
-                                        data["cvss_score"] = cd.get("baseScore", "")
-                                        data["cvss_vector"] = cd.get("vectorString", "")
-                                        break
-                                else:
-                                    if "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
-                                        cd = metrics["cvssMetricV2"][0].get("cvssData", {})
-                                        score = cd.get("baseScore")
-                                        data["cvss_score"] = score
-                                        data["cvss_vector"] = cd.get("vectorString", "")
-                                        if score is not None:
-                                            data["cvss_severity"] = "HIGH" if score >= 7.0 else "MEDIUM" if score >= 4.0 else "LOW"
-                                # 标注等待分析状态
-                                if not data.get("cvss_severity") and data.get("vuln_status") in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
+                                sev, score, vec = _extract_cvss_from_metrics(metrics)
+                                if sev:
+                                    data["cvss_severity"] = sev
+                                    data["cvss_score"] = score
+                                    data["cvss_vector"] = vec
+                                elif data.get("vuln_status") in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
                                     data["cvss_severity"] = "AWAITING"
                             cve_data.append(data)
                         else:
@@ -7332,6 +7349,14 @@ mindmap
         ).pack(side=tk.LEFT, padx=(0, 8))
 
         tk.Button(
+            toolbar, text="🌐 重查 AWAITING CVE",
+            command=self._requery_awaiting_cvss_ui,
+            bg="#2980b9", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
             toolbar, text="🗑 清空日志",
             command=self.clear_log,
             bg=self.warning_color, fg="white",
@@ -11036,21 +11061,13 @@ CVE 描述:
                 try:
                     d = json.loads(raw)
                     s = d.get("cvss_severity", "")
-                    if not s:
-                        # 尝试从 metrics 中回填
-                        metrics = d.get("metrics", {})
-                        for ver in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
-                            if ver in metrics and metrics[ver]:
-                                cd = metrics[ver][0].get("cvssData", {})
-                                s = cd.get("baseSeverity", "")
-                                if s:
-                                    break
-                        if not s and "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
-                            score = metrics["cvssMetricV2"][0].get("cvssData", {}).get("baseScore")
-                            if score is not None:
-                                s = "HIGH" if score >= 7.0 else "MEDIUM" if score >= 4.0 else "LOW"
+                    if not s or str(s).upper() in ("NONE", "N/A", ""):
+                        # 优先从 metrics 中回填（v4.0→v3.1→v3.0→v2.0，跳过 NONE）
+                        sev, _, _ = _extract_cvss_from_metrics(d.get("metrics", {}))
+                        s = sev
                         if not s and d.get("vuln_status") in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
                             s = "AWAITING"
+                    s = str(s).upper() if s else ""
                     if s in cve_severity:
                         cve_severity[s] += 1
                     else:
@@ -11529,30 +11546,21 @@ CVE 描述:
                     except Exception:
                         continue
 
-                    if data.get("cvss_severity") and data.get("cvss_score") not in (None, ""):
+                    # 跳过已有有效 severity 且非 NONE 的记录
+                    existing_sev = str(data.get("cvss_severity", "")).upper()
+                    if existing_sev and existing_sev not in ("NONE", "N/A", "", "AWAITING") and data.get("cvss_score") not in (None, ""):
                         continue
 
                     total_missing += 1
                     metrics = data.get("metrics", {})
                     filled = False
 
-                    for ver in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
-                        if ver in metrics and metrics[ver]:
-                            cd = metrics[ver][0].get("cvssData", {})
-                            data["cvss_severity"] = cd.get("baseSeverity", "")
-                            data["cvss_score"] = cd.get("baseScore", "")
-                            data["cvss_vector"] = cd.get("vectorString", "")
-                            filled = True
-                            break
-
-                    if not filled and "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
-                        cd = metrics["cvssMetricV2"][0].get("cvssData", {})
-                        score = cd.get("baseScore")
+                    sev, score, vec = _extract_cvss_from_metrics(metrics)
+                    if sev:
+                        data["cvss_severity"] = sev
                         data["cvss_score"] = score
-                        data["cvss_vector"] = cd.get("vectorString", "")
-                        if score is not None:
-                            data["cvss_severity"] = "HIGH" if score >= 7.0 else "MEDIUM" if score >= 4.0 else "LOW"
-                            filled = True
+                        data["cvss_vector"] = vec
+                        filled = True
 
                     if not filled and data.get("vuln_status") in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
                         data["cvss_severity"] = "AWAITING"
@@ -11589,6 +11597,149 @@ CVE 描述:
             self.root.after(0, self.hide_progress)
             self.root.after(0, messagebox.showerror, "回填失败", f"批量回填 CVSS 失败: {e}")
             self.log(f"批量回填 CVSS 失败: {e}")
+
+    def _requery_awaiting_cvss_ui(self):
+        """从 NVD API 重新查询 AWAITING/N/A CVE 的 CVSS 评分"""
+        # 先统计数量
+        count = 0
+        with self.db_lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT cve_id, data FROM cves")
+            for cve_id, data_str in cursor.fetchall():
+                try:
+                    d = json.loads(data_str) if data_str else {}
+                    sev = str(d.get("cvss_severity", "")).upper()
+                    if not sev or sev in ("AWAITING", "NONE", "N/A", ""):
+                        count += 1
+                except Exception:
+                    pass
+
+        if count == 0:
+            messagebox.showinfo("提示", "没有需要重查的 AWAITING/N/A CVE")
+            return
+
+        if not messagebox.askyesno(
+            "重查 AWAITING CVE",
+            f"将从 NVD API 重新查询 {count} 条 AWAITING/N/A CVE 的最新 CVSS 评分。\n\n"
+            f"需要访问外网（NVD API），预计耗时 {max(1, count // 100)} - {max(2, count // 50)} 分钟。\n\n"
+            "是否继续？"
+        ):
+            return
+
+        self.log(f"开始从 NVD API 重查 {count} 条 AWAITING/N/A CVE...")
+        self.show_progress("正在从 NVD API 重查 AWAITING CVE...")
+        threading.Thread(target=self._requery_awaiting_thread, daemon=True).start()
+
+    def _requery_awaiting_thread(self):
+        """后台线程：从 NVD API 重新查询 AWAITING/N/A CVE"""
+        import aiohttp
+
+        async def _do_requery():
+            api_key = os.getenv("NVD_API_KEY")
+            headers = {}
+            if api_key:
+                headers["apiKey"] = api_key
+
+            # 收集需要重查的 CVE ID
+            targets = []
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT cve_id, data FROM cves")
+                for cve_id, data_str in cursor.fetchall():
+                    try:
+                        d = json.loads(data_str) if data_str else {}
+                        sev = str(d.get("cvss_severity", "")).upper()
+                        if not sev or sev in ("AWAITING", "NONE", "N/A", ""):
+                            targets.append((cve_id, d))
+                    except Exception:
+                        pass
+
+            total = len(targets)
+            self.log_queue.put(f"需要重查 {total} 条 CVE")
+            updated = 0
+            still_awaiting = 0
+            errors = 0
+
+            timeout = aiohttp.ClientTimeout(total=20)
+            delay = 0.6 if api_key else 6
+
+            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+                for idx, (cve_id, data) in enumerate(targets, 1):
+                    try:
+                        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
+                        async with session.get(url) as resp:
+                            if resp.status == 200:
+                                result = await resp.json()
+                                vulns = result.get("vulnerabilities", [])
+                                if vulns:
+                                    cve_obj = vulns[0].get("cve", {})
+                                    metrics = cve_obj.get("metrics", {})
+
+                                    sev, score, vec = _extract_cvss_from_metrics(metrics)
+                                    if sev:
+                                        data["cvss_severity"] = sev
+                                        data["cvss_score"] = score
+                                        data["cvss_vector"] = vec
+                                        data["metrics"] = metrics
+                                        updated += 1
+                                    else:
+                                        vuln_status = cve_obj.get("vulnStatus", "")
+                                        if vuln_status in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
+                                            data["cvss_severity"] = "AWAITING"
+                                        data["metrics"] = metrics
+                                        still_awaiting += 1
+
+                                    with self.db_lock:
+                                        cursor = self.conn.cursor()
+                                        cursor.execute(
+                                            "UPDATE cves SET data = ? WHERE cve_id = ?",
+                                            (json.dumps(data, ensure_ascii=False), cve_id)
+                                        )
+                                        if idx % 50 == 0:
+                                            self.conn.commit()
+                            elif resp.status == 403:
+                                self.log_queue.put("NVD API 限流，等待 30 秒...")
+                                await asyncio.sleep(30)
+                                errors += 1
+                            else:
+                                errors += 1
+                    except Exception as e:
+                        errors += 1
+
+                    if idx % 50 == 0 or idx == total:
+                        pct = int(idx * 100 / max(total, 1))
+                        self.root.after(0, self.update_progress, pct,
+                                        f"已查询 {idx}/{total}，更新 {updated}，仍 AWAITING {still_awaiting}")
+                        self.log_queue.put(f"进度: {idx}/{total}，已更新 {updated} 条")
+
+                    await asyncio.sleep(delay)
+
+            with self.db_lock:
+                self.conn.commit()
+
+            return updated, still_awaiting, errors, total
+
+        try:
+            if os.name == 'nt':
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            updated, still_awaiting, errors, total = asyncio.run(_do_requery())
+
+            self.root.after(0, self.hide_progress)
+            self.root.after(0, self.load_nvd_from_database)
+            self.root.after(0, self.update_stats)
+            self.root.after(
+                0, messagebox.showinfo, "重查完成",
+                f"总计重查: {total} 条\n"
+                f"成功更新评分: {updated} 条\n"
+                f"仍为 AWAITING: {still_awaiting} 条\n"
+                f"查询失败: {errors} 条"
+            )
+            self.log(f"NVD 重查完成：总计 {total}，更新 {updated}，仍 AWAITING {still_awaiting}，失败 {errors}")
+
+        except Exception as e:
+            self.root.after(0, self.hide_progress)
+            self.root.after(0, messagebox.showerror, "重查失败", f"NVD API 重查失败: {e}")
+            self.log(f"NVD API 重查失败: {e}")
 
 
 class _StderrFilter:

@@ -170,30 +170,30 @@ class CVECollector:
         cvss_severity = None
         cvss_vector = None
 
-        # 优先使用 CVSS v4.0（NVD 2024+ 新标准）
-        if "cvssMetricV40" in metrics:
-            cvss_data = metrics["cvssMetricV40"][0].get("cvssData", {})
-            cvss_score = cvss_data.get("baseScore")
-            cvss_severity = cvss_data.get("baseSeverity")
-            cvss_vector = cvss_data.get("vectorString")
-        # 其次使用 CVSS v3.1
-        elif "cvssMetricV31" in metrics:
-            cvss_data = metrics["cvssMetricV31"][0].get("cvssData", {})
-            cvss_score = cvss_data.get("baseScore")
-            cvss_severity = cvss_data.get("baseSeverity")
-            cvss_vector = cvss_data.get("vectorString")
-        # 再次使用 CVSS v3.0
-        elif "cvssMetricV30" in metrics:
-            cvss_data = metrics["cvssMetricV30"][0].get("cvssData", {})
-            cvss_score = cvss_data.get("baseScore")
-            cvss_severity = cvss_data.get("baseSeverity")
-            cvss_vector = cvss_data.get("vectorString")
-        # 最后使用 CVSS v2.0
-        elif "cvssMetricV2" in metrics:
+        # 严重性优先级：CVSS v4.0 → v3.1 → v3.0 → v2.0
+        # 每一级只有在实际有 baseScore（且 severity 非 NONE）时才采用
+        def _is_valid_severity(sev):
+            return sev and str(sev).upper() not in ("NONE", "N/A", "")
+
+        for ver_key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
+            if ver_key in metrics and metrics[ver_key]:
+                cvss_data = metrics[ver_key][0].get("cvssData", {})
+                score = cvss_data.get("baseScore")
+                severity = cvss_data.get("baseSeverity")
+                if score is not None and _is_valid_severity(severity):
+                    cvss_score = score
+                    cvss_severity = severity
+                    cvss_vector = cvss_data.get("vectorString")
+                    break
+
+        # 回退到 CVSS v2.0
+        if cvss_severity is None and "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
             cvss_data = metrics["cvssMetricV2"][0].get("cvssData", {})
-            cvss_score = cvss_data.get("baseScore")
-            cvss_severity = self.map_cvss_v2_severity(cvss_score)
-            cvss_vector = cvss_data.get("vectorString")
+            score = cvss_data.get("baseScore")
+            if score is not None:
+                cvss_score = score
+                cvss_severity = self.map_cvss_v2_severity(score)
+                cvss_vector = cvss_data.get("vectorString")
 
         # 对于尚未评分的 CVE，根据漏洞状态标注
         vuln_status = cve.get("vulnStatus", "")
@@ -249,6 +249,7 @@ class CVECollector:
             "cvss_score": cvss_score,
             "cvss_severity": cvss_severity,
             "cvss_vector": cvss_vector,
+            "metrics": metrics,
             "references": references,
             "affected_products": affected_products,
             "weaknesses": weaknesses,
