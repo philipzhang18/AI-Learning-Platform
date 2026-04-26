@@ -10915,7 +10915,7 @@ CVE 描述:
         matched_count = self.get_matched_count_from_db()
 
         # ── CVE 严重等级统计（全量数据库，含未分级） ──
-        cve_severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "N/A": 0}
+        cve_severity = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "AWAITING": 0, "N/A": 0}
         try:
             with self.db_lock:
                 cursor = self.conn.cursor()
@@ -10925,7 +10925,22 @@ CVE 描述:
                 try:
                     d = json.loads(raw)
                     s = d.get("cvss_severity", "")
-                    if s in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+                    if not s:
+                        # 尝试从 metrics 中回填
+                        metrics = d.get("metrics", {})
+                        for ver in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
+                            if ver in metrics and metrics[ver]:
+                                cd = metrics[ver][0].get("cvssData", {})
+                                s = cd.get("baseSeverity", "")
+                                if s:
+                                    break
+                        if not s and "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
+                            score = metrics["cvssMetricV2"][0].get("cvssData", {}).get("baseScore")
+                            if score is not None:
+                                s = "HIGH" if score >= 7.0 else "MEDIUM" if score >= 4.0 else "LOW"
+                        if not s and d.get("vuln_status") in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
+                            s = "AWAITING"
+                    if s in cve_severity:
                         cve_severity[s] += 1
                     else:
                         cve_severity["N/A"] += 1
@@ -11448,6 +11463,7 @@ CVE 描述:
 
             self.root.after(0, self.hide_progress)
             self.root.after(0, self.load_nvd_from_database)
+            self.root.after(0, self.update_stats)
             self.root.after(
                 0,
                 messagebox.showinfo,
