@@ -41,6 +41,25 @@ except ImportError:
 from collect_cves import CVECollector
 from dell_security_scraper import DellSecurityScraper
 from redis_manager import RedisDataManager
+from config import COLORS, AI_CONFIG, get_api_key
+from db_backup import backup_database, list_backups
+
+
+def _make_qwen_client(timeout: int = 60):
+    """统一创建 Qwen / DashScope 兼容客户端
+
+    返回: (client, model) 元组；若未配置 API Key 则抛出 ValueError
+    """
+    from openai import OpenAI
+    api_key = get_api_key("qwen")
+    if not api_key:
+        raise ValueError("未配置 QWEN_API_KEY/DASHSCOPE_API_KEY，请在 .env 中设置")
+    client = OpenAI(
+        api_key=api_key,
+        base_url=AI_CONFIG["qwen_base_url"],
+        timeout=timeout,
+    )
+    return client, AI_CONFIG["qwen_model"]
 
 
 class CVEIntegratedGUI:
@@ -51,13 +70,13 @@ class CVEIntegratedGUI:
         self.root.title("智能知识管理平台")
         self.root.geometry("1400x900")
 
-        # 设置主题颜色
+        # 设置主题颜色（统一从 config.COLORS 读取，便于主题化）
         self.bg_color = "#f0f0f0"
-        self.primary_color = "#2c3e50"
-        self.success_color = "#27ae60"
-        self.danger_color = "#e74c3c"
-        self.warning_color = "#f39c12"
-        self.info_color = "#3498db"
+        self.primary_color = COLORS["primary"]
+        self.success_color = COLORS["success"]
+        self.danger_color = COLORS["danger"]
+        self.warning_color = COLORS["warning"]
+        self.info_color = COLORS["info"]
 
         self.root.configure(bg=self.bg_color)
 
@@ -378,6 +397,13 @@ class CVEIntegratedGUI:
             # Index for collection_history
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_history_date ON collection_history(collected_date)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_collection_history_cve ON collection_history(cve_id)")
+
+            # Index for notebooks / notebook_sources / learn_artifacts
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_notebooks_name ON notebooks(name)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_notebook_sources_nb ON notebook_sources(notebook_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_artifacts_session ON learn_artifacts(session_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_artifacts_topic ON learn_artifacts(topic)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_artifacts_type ON learn_artifacts(artifact_type)")
 
             self.conn.commit()
         except sqlite3.Error as e:
@@ -6140,17 +6166,11 @@ foreach ($tokenName in $targets.Keys) {
     def _generate_artifact_thread(self, artifact_type: str):
         """后台线程：生成学习产物"""
         try:
-            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
-            if not api_key:
-                self.root.after(0, messagebox.showerror, "配置错误",
-                                "未设置 QWEN_API_KEY，无法调用 AI")
+            try:
+                client, model = _make_qwen_client(timeout=120)
+            except ValueError as e:
+                self.root.after(0, messagebox.showerror, "配置错误", str(e))
                 return
-
-            model = os.getenv("QWEN_MODEL", "qwen3.6-plus")
-            base_url = os.getenv(
-                "QWEN_BASE_URL",
-                "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            )
 
             # 提取对话内容
             conv_text = ""
@@ -6166,8 +6186,6 @@ foreach ($tokenName in $targets.Keys) {
             prompts = self._get_artifact_prompts(topic, conv_text, artifact_type)
             prompt = prompts.get(artifact_type, prompts["guide"])
 
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key, base_url=base_url)
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -7239,6 +7257,34 @@ mindmap
 
     def create_log_view(self):
         """创建日志视图"""
+        # 顶部工具栏
+        toolbar = tk.Frame(self.log_frame, bg="#f0f0f0", pady=6)
+        toolbar.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+        tk.Button(
+            toolbar, text="💾 备份数据库",
+            command=self._backup_database_ui,
+            bg=self.success_color, fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
+            toolbar, text="📋 查看备份",
+            command=self._show_backups_ui,
+            bg=self.info_color, fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
+            toolbar, text="🗑 清空日志",
+            command=self.clear_log,
+            bg=self.warning_color, fg="white",
+            font=("Microsoft YaHei", 9),
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
+        ).pack(side=tk.RIGHT)
+
         # 日志文本区域
         self.log_text = scrolledtext.ScrolledText(
             self.log_frame,
@@ -7250,19 +7296,6 @@ mindmap
             fg="#00ff00"
         )
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # 清空日志按钮
-        clear_btn = tk.Button(
-            self.log_frame,
-            text="清空日志",
-            command=self.clear_log,
-            bg=self.warning_color,
-            fg="white",
-            font=("Microsoft YaHei", 9),
-            relief=tk.FLAT,
-            cursor="hand2"
-        )
-        clear_btn.pack(pady=(0, 10))
 
     # ==================== Progress Bar Control ====================
 
@@ -11239,6 +11272,65 @@ CVE 描述:
         """清空日志"""
         self.log_text.delete(1.0, tk.END)
         self.log("日志已清空")
+
+    def _backup_database_ui(self):
+        """一键备份数据库"""
+        self.log("正在备份数据库...")
+        try:
+            db_path = str(self.data_dir / "cve_database.db")
+            result = backup_database(db_path)
+            if result:
+                size_mb = round(Path(result).stat().st_size / 1024 / 1024, 1)
+                msg = f"数据库备份成功！\n\n路径：{result}\n大小：{size_mb} MB"
+                messagebox.showinfo("备份成功", msg)
+                self.log(f"数据库备份完成: {result} ({size_mb} MB)")
+            else:
+                messagebox.showerror("备份失败", "数据库备份失败，请检查磁盘空间。")
+        except Exception as e:
+            messagebox.showerror("备份失败", f"备份出错：{e}")
+            self.log(f"数据库备份失败: {e}")
+
+    def _show_backups_ui(self):
+        """查看备份列表"""
+        try:
+            backups = list_backups()
+        except Exception as e:
+            messagebox.showerror("错误", f"读取备份列表失败: {e}")
+            return
+
+        if not backups:
+            messagebox.showinfo("备份列表", "暂无备份文件。\n点击「💾 备份数据库」创建第一个备份。")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("数据库备份列表")
+        dialog.geometry("600x400")
+        dialog.transient(self.root)
+
+        tk.Label(
+            dialog, text=f"共 {len(backups)} 个备份",
+            font=("Microsoft YaHei", 11, "bold"),
+            bg="#2c3e50", fg="white", padx=10, pady=8
+        ).pack(fill=tk.X)
+
+        cols = ("name", "size", "created")
+        tree = ttk.Treeview(dialog, columns=cols, show="headings", height=15)
+        tree.heading("name", text="文件名")
+        tree.heading("size", text="大小 (MB)")
+        tree.heading("created", text="创建时间")
+        tree.column("name", width=280)
+        tree.column("size", width=80, anchor="center")
+        tree.column("created", width=160, anchor="center")
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        for b in backups:
+            tree.insert("", tk.END, values=(b["name"], b["size_mb"], b["created_at"]))
+
+        tk.Button(
+            dialog, text="关闭", command=dialog.destroy,
+            bg="#95a5a6", fg="white", font=("Microsoft YaHei", 9),
+            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+        ).pack(pady=(0, 10))
 
 
 class _StderrFilter:
