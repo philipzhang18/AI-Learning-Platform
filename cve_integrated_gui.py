@@ -3061,6 +3061,21 @@ foreach ($tokenName in $targets.Keys) {
         )
         load_btn.pack(side=tk.LEFT, padx=5)
 
+        # 历史 DSA 缝隙补全按钮
+        self.dell_backfill_btn = tk.Button(
+            left_control,
+            text="🔧 历史缝隙补全",
+            command=self.start_dell_backfill,
+            bg=self.warning_color,
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        self.dell_backfill_btn.pack(side=tk.LEFT, padx=5)
+
         # 加载CSV数据按钮
         load_csv_btn = tk.Button(
             left_control,
@@ -8164,6 +8179,101 @@ mindmap
         self.dell_collect_btn.config(state=tk.NORMAL)
         self.dell_stop_btn.config(state=tk.DISABLED)
         self.log("Dell 安全公告采集已停止")
+
+    def start_dell_backfill(self):
+        """启动 Dell 历史 DSA 缝隙补全"""
+        if self.is_collecting_dell:
+            messagebox.showwarning("提示", "正在采集中，请稍后再试")
+            return
+
+        # 确认对话框
+        result = messagebox.askyesno(
+            "历史 DSA 缝隙补全",
+            "此功能将分析数据库中已有的 DSA ID，找出缺失的编号并尝试补全。\n\n"
+            "范围：2019-2026 年\n"
+            "预计耗时：5-15 分钟\n\n"
+            "是否继续？"
+        )
+        if not result:
+            return
+
+        self.is_collecting_dell = True
+        self.dell_backfill_btn.config(state=tk.DISABLED)
+        self.dell_collect_btn.config(state=tk.DISABLED)
+        self.dell_stop_btn.config(state=tk.NORMAL)
+
+        # 在新线程中运行补全
+        thread = threading.Thread(target=self.run_dell_backfill)
+        thread.daemon = True
+        thread.start()
+
+        self.log("开始 Dell 历史 DSA 缝隙补全...")
+
+    def run_dell_backfill(self):
+        """在线程中运行 Dell 缝隙补全"""
+        try:
+            if os.name == 'nt':
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            asyncio.run(self.backfill_dell_advisories_async())
+        except Exception as e:
+            self.log_queue.put(f"Dell 缝隙补全出错: {str(e)}")
+        finally:
+            self.is_collecting_dell = False
+            self.root.after(0, self._finish_dell_backfill)
+
+    def _finish_dell_backfill(self):
+        """完成 Dell 缝隙补全的 UI 更新（主线程）"""
+        self.dell_backfill_btn.config(state=tk.NORMAL)
+        self.dell_collect_btn.config(state=tk.NORMAL)
+        self.dell_stop_btn.config(state=tk.DISABLED)
+        self.hide_progress()
+
+    async def backfill_dell_advisories_async(self):
+        """异步执行 Dell 历史 DSA 缝隙补全"""
+        scraper = DellSecurityScraper()
+        try:
+            # 获取数据库中已存在的 DSA IDs
+            existing_dsa_ids = self.get_existing_dell_ids()
+            self.log_queue.put(f"数据库中已有 {len(existing_dsa_ids)} 条 Dell 安全公告")
+
+            # 执行缝隙补全
+            items = await scraper.backfill_missing_dsa_ids(
+                existing_dsa_ids=existing_dsa_ids,
+                year_range=(2019, 2026),
+                log_callback=lambda msg: self.log_queue.put(msg),
+            )
+
+            if items:
+                self.log_queue.put(f"✓ 成功补全 {len(items)} 条历史 Dell 安全公告")
+
+                # 存储到数据库
+                new_count = 0
+                for i, item in enumerate(items):
+                    if not self.is_collecting_dell:
+                        self.log_queue.put(f"补全被用户中断，已处理 {i}/{len(items)} 条数据")
+                        break
+
+                    item = self.enhance_dell_advisory(item)
+                    is_new = self.store_dell_advisory(item)
+                    if is_new:
+                        new_count += 1
+
+                    if i % 5 == 0 and i > 0:
+                        progress_percent = int((i / len(items)) * 100)
+                        self.log_queue.put(f"Dell 补全数据处理: {i}/{len(items)} ({progress_percent}%)")
+                        await asyncio.sleep(0.01)
+
+                self.log_queue.put(f"✓ Dell 历史缝隙补全完成，新增 {new_count} 条公告")
+
+                # 重新加载数据
+                self.root.after(0, self.load_dell_from_database)
+            else:
+                self.log_queue.put("未发现需要补全的 DSA ID")
+
+        except Exception as e:
+            self.log_queue.put(f"Dell 缝隙补全失败: {str(e)}")
+            import traceback
+            self.log_queue.put(traceback.format_exc())
 
     def run_dell_collection(self, time_range):
         """在线程中运行 Dell 采集"""

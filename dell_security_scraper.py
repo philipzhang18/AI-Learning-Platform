@@ -81,23 +81,33 @@ class DellSecurityScraper:
 
         log(f"需要抓取 {len(new_links)} 条新公告详情...")
 
-        # ── Step 3: 逐个抓取详情页 ──
+        # ── Step 3: 并发抓取详情页 ──
         advisories = []
-        for i, (dsa_id, url) in enumerate(new_links.items()):
-            try:
-                log(f"[{i + 1}/{len(new_links)}] 正在抓取 {dsa_id}...")
-                advisory = await self._fetch_and_parse_detail(dsa_id, url, exa_api_key)
-                if advisory:
-                    advisories.append(advisory)
-                    impact_str = advisory.get('impact') or 'N/A'
-                    cve_count = len(advisory.get('cve_ids', []))
-                    log(f"  -> {dsa_id} — Impact: {impact_str}, CVE: {cve_count}")
-                else:
-                    log(f"  -> {dsa_id} — 无法解析页面内容")
-                # 请求间隔
-                await asyncio.sleep(1.5)
-            except Exception as e:
-                log(f"  -> {dsa_id} 抓取失败: {e}")
+        semaphore = asyncio.Semaphore(5)
+
+        async def fetch_one(index, dsa_id, url):
+            async with semaphore:
+                try:
+                    log(f"[{index}/{len(new_links)}] 正在抓取 {dsa_id}...")
+                    advisory = await self._fetch_and_parse_detail(dsa_id, url, exa_api_key)
+                    await asyncio.sleep(0.5)
+                    if advisory:
+                        impact_str = advisory.get('impact') or 'N/A'
+                        cve_count = len(advisory.get('cve_ids', []))
+                        log(f"  -> {dsa_id} — Impact: {impact_str}, CVE: {cve_count}")
+                    else:
+                        log(f"  -> {dsa_id} — 无法解析页面内容")
+                    return advisory
+                except Exception as e:
+                    log(f"  -> {dsa_id} 抓取失败: {e}")
+                    return None
+
+        tasks = [
+            fetch_one(i + 1, dsa_id, url)
+            for i, (dsa_id, url) in enumerate(new_links.items())
+        ]
+        results = await asyncio.gather(*tasks)
+        advisories = [advisory for advisory in results if advisory]
 
         log(f"成功抓取 {len(advisories)} 条新安全公告")
         return advisories
@@ -107,14 +117,15 @@ class DellSecurityScraper:
     # ================================================================
 
     async def _discover_advisory_links(self, days, exa_api_key, log):
-        """依次尝试 Exa 搜索 / HTTP 列表页 / Selenium 发现 DSA 链接"""
+        """依次尝试 Exa 多 query 搜索 / HTTP 列表页 / Selenium 发现 DSA 链接"""
         links = {}
 
-        # 策略 1: Exa 搜索 API
+        # 策略 1: Exa 多 query 搜索（按年份+产品线分多次搜索，覆盖长尾）
         if exa_api_key:
-            log("策略 1: 使用 Exa 搜索 API 发现公告...")
-            links = await self._discover_via_exa_search(days, exa_api_key)
+            log("策略 1: 使用 Exa 多 query 搜索 API 发现公告...")
+            links = await self._discover_via_exa_multi_query(days, exa_api_key, log)
             if links:
+                log(f"Exa 多 query 共发现 {len(links)} 个公告链接")
                 return links
 
         # 策略 2: HTTP 爬取列表页
@@ -127,6 +138,57 @@ class DellSecurityScraper:
         log("策略 3: 使用 Selenium 爬取列表页...")
         links = await self._discover_via_selenium()
         return links
+
+    async def _discover_via_exa_multi_query(self, days, api_key, log):
+        """Exa 多 query 轮询：按年份×产品线分多次搜索，合并去重"""
+        all_links = {}
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00.000Z")
+
+        queries = [
+            "Dell DSA security advisory vulnerability update",
+            "Dell security advisory PowerEdge iDRAC BIOS",
+            "Dell security advisory PowerStore PowerProtect VxRail",
+            "Dell security advisory Latitude Precision OptiPlex XPS",
+            "Dell security advisory PowerSwitch Networking firmware",
+            "Dell security advisory Avamar NetWorker Data Domain",
+        ]
+
+        async with aiohttp.ClientSession() as session:
+            for query in queries:
+                try:
+                    payload = {
+                        "query": query,
+                        "numResults": 100,
+                        "includeDomains": ["dell.com"],
+                        "startPublishedDate": start_date,
+                        "type": "auto",
+                    }
+                    async with session.post(
+                        "https://api.exa.ai/search",
+                        headers={
+                            "accept": "application/json",
+                            "content-type": "application/json",
+                            "x-api-key": api_key,
+                        },
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status == 200:
+                            results = (await resp.json()).get("results", [])
+                            new_count = 0
+                            for r in results:
+                                dsa_id = self._extract_dsa_id(r.get("url", ""), r.get("title", ""))
+                                if dsa_id and dsa_id not in all_links:
+                                    all_links[dsa_id] = r["url"]
+                                    new_count += 1
+                            log(f"  query [{query[:40]}...]: {len(results)} results, {new_count} new DSA")
+                        else:
+                            log(f"  query [{query[:40]}...]: HTTP {resp.status}")
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    log(f"  query [{query[:40]}...]: error {e}")
+
+        return all_links
 
     async def _discover_via_exa_search(self, days, api_key):
         """使用 Exa search API 搜索 Dell 安全公告页面"""
@@ -699,6 +761,141 @@ class DellSecurityScraper:
                 except ValueError:
                     filtered.append(advisory)
         return filtered
+
+    async def backfill_missing_dsa_ids(
+        self,
+        existing_dsa_ids: Set[str],
+        year_range: tuple = (2019, 2026),
+        log_callback: Callable[[str], None] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        历史 DSA ID 缝隙补全 - 按年份枚举缺失编号
+
+        Args:
+            existing_dsa_ids: 数据库中已有的 DSA ID 集合
+            year_range: 年份范围 (start_year, end_year)，默认 2019-2026
+            log_callback: 日志回调函数
+
+        Returns:
+            成功补全的公告列表
+        """
+        def log(msg):
+            logger.info(msg)
+            if log_callback:
+                log_callback(msg)
+
+        exa_api_key = os.getenv("EXA_API_KEY")
+        start_year, end_year = year_range
+        current_year = datetime.now().year
+
+        # 分析每年的缺失编号
+        log(f"分析 {start_year}-{end_year} 年的 DSA ID 缺失情况...")
+        missing_ids = []
+        existing_upper = {d.upper() for d in existing_dsa_ids}
+
+        for year in range(start_year, min(end_year + 1, current_year + 1)):
+            year_ids = [d for d in existing_upper if d.startswith(f"DSA-{year}-")]
+            if not year_ids:
+                log(f"  {year} 年: 无数据，跳过")
+                continue
+
+            # 提取已有编号
+            year_nums = set()
+            for dsa_id in year_ids:
+                m = re.match(r'DSA-\d{4}-(\d+)', dsa_id)
+                if m:
+                    year_nums.add(int(m.group(1)))
+
+            if not year_nums:
+                continue
+
+            max_num = max(year_nums)
+            # 找出缺失的编号（1 到 max_num 之间）
+            full_range = set(range(1, max_num + 1))
+            missing_nums = sorted(full_range - year_nums)
+
+            if missing_nums:
+                log(f"  {year} 年: 已有 {len(year_nums)} 条，最大编号 {max_num}，缺失 {len(missing_nums)} 条")
+                for num in missing_nums:
+                    missing_ids.append(f"DSA-{year}-{num:03d}")
+
+        if not missing_ids:
+            log("未发现缺失的 DSA ID")
+            return []
+
+        log(f"共发现 {len(missing_ids)} 个缺失的 DSA ID，开始补全...")
+
+        # 并发补全缺失的 DSA
+        advisories = []
+        semaphore = asyncio.Semaphore(5)
+
+        async def fetch_missing_one(index, dsa_id):
+            async with semaphore:
+                try:
+                    # 策略 1: 使用 Exa 搜索该 DSA ID
+                    url = None
+                    if exa_api_key:
+                        url = await self._search_dsa_via_exa(dsa_id, exa_api_key)
+
+                    # 策略 2: 直接尝试标准 URL 模式
+                    if not url:
+                        parts = dsa_id.split('-')
+                        url = f"https://www.dell.com/support/kbdoc/en-us/dsa-{parts[1]}-{parts[2]}"
+
+                    log(f"[{index}/{len(missing_ids)}] 补全 {dsa_id}...")
+                    advisory = await self._fetch_and_parse_detail(dsa_id, url, exa_api_key)
+                    await asyncio.sleep(0.5)
+
+                    if advisory:
+                        impact_str = advisory.get('impact') or 'N/A'
+                        cve_count = len(advisory.get('cve_ids', []))
+                        log(f"  ✓ {dsa_id} — Impact: {impact_str}, CVE: {cve_count}")
+                        return advisory
+                    else:
+                        log(f"  ✗ {dsa_id} — 无法获取内容")
+                        return None
+                except Exception as e:
+                    log(f"  ✗ {dsa_id} — 失败: {e}")
+                    return None
+
+        tasks = [
+            fetch_missing_one(i + 1, dsa_id)
+            for i, dsa_id in enumerate(missing_ids)
+        ]
+        results = await asyncio.gather(*tasks)
+        advisories = [advisory for advisory in results if advisory]
+
+        log(f"成功补全 {len(advisories)}/{len(missing_ids)} 条历史公告")
+        return advisories
+
+    async def _search_dsa_via_exa(self, dsa_id: str, api_key: str) -> Optional[str]:
+        """使用 Exa 搜索单个 DSA ID 的真实 URL"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "query": f"{dsa_id} Dell security advisory",
+                    "numResults": 3,
+                    "includeDomains": ["dell.com"],
+                }
+                async with session.post(
+                    "https://api.exa.ai/search",
+                    headers={
+                        "accept": "application/json",
+                        "content-type": "application/json",
+                        "x-api-key": api_key,
+                    },
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 200:
+                        results = (await resp.json()).get("results", [])
+                        for r in results:
+                            url = r.get("url", "")
+                            if dsa_id.lower() in url.lower() or dsa_id.upper() in r.get("title", "").upper():
+                                return url
+        except Exception as e:
+            logger.warning(f"Exa search for {dsa_id} failed: {e}")
+        return None
 
 
 async def main():
