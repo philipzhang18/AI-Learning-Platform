@@ -470,23 +470,53 @@ class DellSecurityScraper:
                 title = line
                 break
 
-        # 发布日期（仅日期，不含时分）
+        # 发布日期：优先取 Article Properties 中的 Last Modified
         published_date = datetime.now().strftime('%Y-%m-%d')
-        date_patterns = [
-            (r'(\w+ \d{1,2},?\s+\d{4})', ['%B %d, %Y', '%B %d %Y']),
-            (r'(\d{4}-\d{2}-\d{2})', ['%Y-%m-%d']),
-            (r'(\d{1,2}/\d{1,2}/\d{4})', ['%m/%d/%Y']),
+
+        # 优先匹配 "Last Modified: 22 May 2021" 等格式
+        last_modified_patterns = [
+            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}/\d{1,2}/\d{4})',
         ]
-        for pattern, fmts in date_patterns:
-            m = re.search(pattern, content)
+        last_modified_fmts = [
+            '%d %B %Y', '%d %b %Y',
+            '%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y',
+            '%Y-%m-%d',
+            '%m/%d/%Y',
+        ]
+        found_date = False
+        for pat in last_modified_patterns:
+            m = re.search(pat, content)
             if m:
-                for fmt in fmts:
+                for fmt in last_modified_fmts:
                     try:
-                        published_date = datetime.strptime(m.group(1), fmt).strftime('%Y-%m-%d')
+                        published_date = datetime.strptime(m.group(1).strip(), fmt).strftime('%Y-%m-%d')
+                        found_date = True
                         break
                     except ValueError:
                         continue
-                break
+                if found_date:
+                    break
+
+        # 回退：全文匹配第一个日期
+        if not found_date:
+            date_patterns = [
+                (r'(\w+ \d{1,2},?\s+\d{4})', ['%B %d, %Y', '%B %d %Y']),
+                (r'(\d{4}-\d{2}-\d{2})', ['%Y-%m-%d']),
+                (r'(\d{1,2}/\d{1,2}/\d{4})', ['%m/%d/%Y']),
+            ]
+            for pattern, fmts in date_patterns:
+                m = re.search(pattern, content)
+                if m:
+                    for fmt in fmts:
+                        try:
+                            published_date = datetime.strptime(m.group(1), fmt).strftime('%Y-%m-%d')
+                            break
+                        except ValueError:
+                            continue
+                    break
 
         # Impact / Severity
         impact = self._extract_impact(content, html)
