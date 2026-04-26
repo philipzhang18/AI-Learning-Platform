@@ -723,6 +723,27 @@ class CVEIntegratedGUI:
                         # First try to load the stored JSON data
                         if record[1]:  # The data field is not empty
                             data = json.loads(record[1])
+                            # 回填缺失的 CVSS 评分（支持 v4.0/v3.1/v3.0/v2.0）
+                            if not data.get("cvss_severity"):
+                                metrics = data.get("metrics", {})
+                                for ver in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
+                                    if ver in metrics and metrics[ver]:
+                                        cd = metrics[ver][0].get("cvssData", {})
+                                        data["cvss_severity"] = cd.get("baseSeverity", "")
+                                        data["cvss_score"] = cd.get("baseScore", "")
+                                        data["cvss_vector"] = cd.get("vectorString", "")
+                                        break
+                                else:
+                                    if "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
+                                        cd = metrics["cvssMetricV2"][0].get("cvssData", {})
+                                        score = cd.get("baseScore")
+                                        data["cvss_score"] = score
+                                        data["cvss_vector"] = cd.get("vectorString", "")
+                                        if score is not None:
+                                            data["cvss_severity"] = "HIGH" if score >= 7.0 else "MEDIUM" if score >= 4.0 else "LOW"
+                                # 标注等待分析状态
+                                if not data.get("cvss_severity") and data.get("vuln_status") in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
+                                    data["cvss_severity"] = "AWAITING"
                             cve_data.append(data)
                         else:
                             # If data is empty but we have basic info, create a minimal record
@@ -3809,9 +3830,12 @@ foreach ($tokenName in $targets.Keys) {
                             desc_full = "\n".join(descs) if descs else ""
                             # 严重等级 + 评分
                             severity_parts = []
+                            for m in d.get("metrics", {}).get("cvssMetricV40", []):
+                                cd = m.get("cvssData", {})
+                                severity_parts.append(f"V4.0 {cd.get('baseSeverity', '')} (评分: {cd.get('baseScore', '')})")
                             for m in d.get("metrics", {}).get("cvssMetricV31", []):
                                 cd = m.get("cvssData", {})
-                                severity_parts.append(f"{cd.get('baseSeverity', '')} (评分: {cd.get('baseScore', '')})")
+                                severity_parts.append(f"V3.1 {cd.get('baseSeverity', '')} (评分: {cd.get('baseScore', '')})")
                             for m in d.get("metrics", {}).get("cvssMetricV2", []):
                                 cd = m.get("cvssData", {})
                                 severity_parts.append(f"V2评分: {cd.get('baseScore', '')}")
@@ -5738,12 +5762,18 @@ foreach ($tokenName in $targets.Keys) {
                             vector = d.get("cvss_vector", "")
                             if not severity:
                                 metrics = d.get("metrics", {})
-                                cvss = metrics.get("cvssMetricV31", metrics.get("cvssMetricV30", []))
+                                # 优先使用 CVSS v4.0
+                                cvss = metrics.get("cvssMetricV40", [])
+                                if not cvss:
+                                    cvss = metrics.get("cvssMetricV31", metrics.get("cvssMetricV30", []))
                                 if cvss:
                                     cvss_data = cvss[0].get("cvssData", {})
                                     severity = cvss_data.get("baseSeverity", "")
                                     score = cvss_data.get("baseScore", "")
                                     vector = cvss_data.get("vectorString", "")
+                                # 对于尚未评分的 CVE，根据漏洞状态标注
+                                elif d.get("vuln_status", "") in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
+                                    severity = "AWAITING"
                             weaknesses = []
                             for w in d.get("weaknesses", []):
                                 if isinstance(w, str):
@@ -7273,6 +7303,14 @@ mindmap
             toolbar, text="📋 查看备份",
             command=self._show_backups_ui,
             bg=self.info_color, fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
+            toolbar, text="🔄 批量回填 CVSS",
+            command=self._backfill_cvss_ui,
+            bg="#8e44ad", fg="white",
             font=("Microsoft YaHei", 9, "bold"),
             relief=tk.FLAT, cursor="hand2", padx=12, pady=4
         ).pack(side=tk.LEFT, padx=(0, 8))
@@ -11331,6 +11369,100 @@ CVE 描述:
             bg="#95a5a6", fg="white", font=("Microsoft YaHei", 9),
             relief=tk.FLAT, cursor="hand2", padx=15, pady=5
         ).pack(pady=(0, 10))
+
+    def _backfill_cvss_ui(self):
+        """批量回填数据库中缺失的 CVSS 评分/严重等级"""
+        if not messagebox.askyesno(
+            "确认回填",
+            "将批量扫描数据库中所有严重等级/评分缺失的 NVD CVE 数据，\n"
+            "优先从已存储的 metrics(JSON) 中回填 CVSS v4.0/v3.1/v3.0/v2.0 信息。\n\n"
+            "该操作不会访问外网，只会更新本地数据库。是否继续？"
+        ):
+            return
+
+        self.log("开始批量回填 CVSS 数据...")
+        self.show_progress("正在扫描缺失的 CVSS 数据...")
+        threading.Thread(target=self._backfill_cvss_thread, daemon=True).start()
+
+    def _backfill_cvss_thread(self):
+        """后台线程：批量回填 CVSS 评分/严重等级"""
+        try:
+            updated = 0
+            awaiting = 0
+            total_missing = 0
+
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT cve_id, data FROM cves")
+                rows = cursor.fetchall()
+
+                total = len(rows)
+                for idx, (cve_id, data_str) in enumerate(rows, 1):
+                    try:
+                        data = json.loads(data_str) if data_str else {}
+                    except Exception:
+                        continue
+
+                    if data.get("cvss_severity") and data.get("cvss_score") not in (None, ""):
+                        continue
+
+                    total_missing += 1
+                    metrics = data.get("metrics", {})
+                    filled = False
+
+                    for ver in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
+                        if ver in metrics and metrics[ver]:
+                            cd = metrics[ver][0].get("cvssData", {})
+                            data["cvss_severity"] = cd.get("baseSeverity", "")
+                            data["cvss_score"] = cd.get("baseScore", "")
+                            data["cvss_vector"] = cd.get("vectorString", "")
+                            filled = True
+                            break
+
+                    if not filled and "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
+                        cd = metrics["cvssMetricV2"][0].get("cvssData", {})
+                        score = cd.get("baseScore")
+                        data["cvss_score"] = score
+                        data["cvss_vector"] = cd.get("vectorString", "")
+                        if score is not None:
+                            data["cvss_severity"] = "HIGH" if score >= 7.0 else "MEDIUM" if score >= 4.0 else "LOW"
+                            filled = True
+
+                    if not filled and data.get("vuln_status") in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
+                        data["cvss_severity"] = "AWAITING"
+                        awaiting += 1
+                        filled = True
+
+                    if filled:
+                        cursor.execute(
+                            "UPDATE cves SET data = ?, last_modified = ? WHERE cve_id = ?",
+                            (json.dumps(data, ensure_ascii=False), data.get("last_modified", "") or "", cve_id)
+                        )
+                        updated += 1
+
+                    if idx % 500 == 0 or idx == total:
+                        pct = int(idx * 100 / max(total, 1))
+                        self.root.after(0, self.update_progress, pct, f"已扫描 {idx}/{total} 条，已更新 {updated} 条")
+
+                self.conn.commit()
+
+            self.root.after(0, self.hide_progress)
+            self.root.after(0, self.load_cve_data_from_db)
+            self.root.after(0, self.refresh_cve_tree)
+            self.root.after(
+                0,
+                messagebox.showinfo,
+                "回填完成",
+                f"扫描缺失记录: {total_missing} 条\n"
+                f"成功回填: {updated} 条\n"
+                f"其中标记 AWAITING: {awaiting} 条"
+            )
+            self.log(f"批量回填完成：扫描缺失 {total_missing} 条，更新 {updated} 条，AWAITING {awaiting} 条")
+
+        except Exception as e:
+            self.root.after(0, self.hide_progress)
+            self.root.after(0, messagebox.showerror, "回填失败", f"批量回填 CVSS 失败: {e}")
+            self.log(f"批量回填 CVSS 失败: {e}")
 
 
 class _StderrFilter:

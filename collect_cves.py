@@ -170,13 +170,19 @@ class CVECollector:
         cvss_severity = None
         cvss_vector = None
 
-        # 优先使用 CVSS v3.1
-        if "cvssMetricV31" in metrics:
+        # 优先使用 CVSS v4.0（NVD 2024+ 新标准）
+        if "cvssMetricV40" in metrics:
+            cvss_data = metrics["cvssMetricV40"][0].get("cvssData", {})
+            cvss_score = cvss_data.get("baseScore")
+            cvss_severity = cvss_data.get("baseSeverity")
+            cvss_vector = cvss_data.get("vectorString")
+        # 其次使用 CVSS v3.1
+        elif "cvssMetricV31" in metrics:
             cvss_data = metrics["cvssMetricV31"][0].get("cvssData", {})
             cvss_score = cvss_data.get("baseScore")
             cvss_severity = cvss_data.get("baseSeverity")
             cvss_vector = cvss_data.get("vectorString")
-        # 其次使用 CVSS v3.0
+        # 再次使用 CVSS v3.0
         elif "cvssMetricV30" in metrics:
             cvss_data = metrics["cvssMetricV30"][0].get("cvssData", {})
             cvss_score = cvss_data.get("baseScore")
@@ -188,6 +194,11 @@ class CVECollector:
             cvss_score = cvss_data.get("baseScore")
             cvss_severity = self.map_cvss_v2_severity(cvss_score)
             cvss_vector = cvss_data.get("vectorString")
+
+        # 对于尚未评分的 CVE，根据漏洞状态标注
+        vuln_status = cve.get("vulnStatus", "")
+        if cvss_severity is None and vuln_status in ("Awaiting Analysis", "Received", "Undergoing Analysis"):
+            cvss_severity = "AWAITING"
 
         # 提取引用链接
         references = []

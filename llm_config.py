@@ -32,7 +32,7 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-opus-20240229")
 QWEN_API_KEY = os.getenv("DASHSCOPE_API_KEY", os.getenv("QWEN_API_KEY", ""))
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 # 统一使用 coder plus 系列；可与控制台实际开通的模型保持一致
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3-coder-plus")
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.6-plus")
 
 # ============================================
 # 系统配置
