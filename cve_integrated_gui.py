@@ -6253,8 +6253,8 @@ foreach ($tokenName in $targets.Keys) {
 2. 概念之间的关系
 3. 关键知识点
 
-格式示例：
-```mermaid
+**重要**：请严格按照以下格式返回，不要添加任何 markdown 代码块标记（不要用 ```mermaid）：
+
 mindmap
   root(({topic}))
     核心概念1
@@ -6263,9 +6263,8 @@ mindmap
     核心概念2
       子概念2.1
       子概念2.2
-```
 
-仅返回 Mermaid 代码，不要有其他说明。""",
+仅返回纯 Mermaid 代码，从 mindmap 开始，不要有任何其他说明或标记。""",
 
             "guide": f"""基于以下关于「{topic}」的学习对话，生成学习指南。
 
@@ -6358,7 +6357,15 @@ mindmap
         btn_frame.pack(fill=tk.X, padx=10)
 
         tk.Button(
-            btn_frame, text="复制到剪贴板",
+            btn_frame, text="💾 保存到文件",
+            command=lambda: self._save_artifact_to_file(artifact_type, title, content),
+            bg=self.success_color, fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Button(
+            btn_frame, text="📋 复制到剪贴板",
             command=lambda: self._copy_to_clipboard(content),
             bg=self.primary_color, fg="white",
             font=("Microsoft YaHei", 9, "bold"),
@@ -6382,6 +6389,49 @@ mindmap
             messagebox.showinfo("成功", "内容已复制到剪贴板")
         except Exception as e:
             messagebox.showerror("失败", f"复制失败: {e}")
+
+    def _save_artifact_to_file(self, artifact_type: str, title: str, content: str):
+        """保存学习产物到文件"""
+        # 根据类型确定文件扩展名
+        ext_map = {
+            "mindmap": ".mmd",  # Mermaid 文件
+            "timeline": ".md",
+            "guide": ".md",
+            "faq": ".md",
+            "podcast": ".txt"
+        }
+        default_ext = ext_map.get(artifact_type, ".txt")
+
+        # 生成默认文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+        default_filename = f"{safe_title}_{timestamp}{default_ext}"
+
+        # 文件类型过滤器
+        filetypes = [
+            ("Markdown 文件", "*.md"),
+            ("文本文件", "*.txt"),
+            ("Mermaid 文件", "*.mmd"),
+            ("所有文件", "*.*")
+        ]
+
+        filepath = filedialog.asksaveasfilename(
+            title="保存学习产物",
+            initialfile=default_filename,
+            defaultextension=default_ext,
+            filetypes=filetypes
+        )
+
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            messagebox.showinfo("成功", f"已保存到：\n{filepath}")
+            self.log(f"学习产物已保存: {filepath}")
+        except Exception as e:
+            messagebox.showerror("失败", f"保存失败: {e}")
 
 
     def _start_learn_session(self):
