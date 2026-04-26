@@ -4511,6 +4511,7 @@ foreach ($tokenName in $targets.Keys) {
                 "HIGH": "#e67e22", "High": "#e67e22",
                 "MEDIUM": "#f1c40f", "Medium": "#f1c40f",
                 "LOW": "#27ae60", "Low": "#27ae60",
+                "AWAITING": "#3498db",
                 "N/A": "#95a5a6",
             }
 
@@ -4520,7 +4521,7 @@ foreach ($tokenName in $targets.Keys) {
 
             cve_labels, cve_sizes, cve_colors = [], [], []
             for lbl, key in [("Critical", "CRITICAL"), ("High", "HIGH"), ("Medium", "MEDIUM"),
-                              ("Low", "LOW"), ("N/A", "N/A")]:
+                              ("Low", "LOW"), ("Awaiting", "AWAITING"), ("N/A", "N/A")]:
                 cnt = cve_severity.get(key, 0)
                 if cnt > 0:
                     cve_labels.append(f"{lbl}\n{cnt}")
