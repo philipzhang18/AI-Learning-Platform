@@ -13,7 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv  # Add this import to load .env file
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(override=True)
 
 # 配置日志
 logging.basicConfig(
@@ -177,13 +177,20 @@ class CVECollector:
 
         for ver_key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
             if ver_key in metrics and metrics[ver_key]:
-                cvss_data = metrics[ver_key][0].get("cvssData", {})
-                score = cvss_data.get("baseScore")
-                severity = cvss_data.get("baseSeverity")
-                if score is not None and _is_valid_severity(severity):
-                    cvss_score = score
-                    cvss_severity = severity
-                    cvss_vector = cvss_data.get("vectorString")
+                # 遍历所有条目（NVD Primary + CNA Secondary），取第一个有效评分
+                # 优先 Primary（NVD 官方），其次 Secondary（CNA 厂商）
+                entries = sorted(metrics[ver_key],
+                                 key=lambda e: 0 if e.get("type") == "Primary" else 1)
+                for entry in entries:
+                    cvss_data = entry.get("cvssData", {})
+                    score = cvss_data.get("baseScore")
+                    severity = cvss_data.get("baseSeverity")
+                    if score is not None and _is_valid_severity(severity):
+                        cvss_score = score
+                        cvss_severity = severity
+                        cvss_vector = cvss_data.get("vectorString")
+                        break
+                if cvss_severity is not None:
                     break
 
         # 回退到 CVSS v2.0

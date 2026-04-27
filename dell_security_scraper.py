@@ -513,10 +513,19 @@ class DellSecurityScraper:
                     for fmt in fmts:
                         try:
                             published_date = datetime.strptime(m.group(1), fmt).strftime('%Y-%m-%d')
+                            found_date = True
                             break
                         except ValueError:
                             continue
-                    break
+                    if found_date:
+                        break
+
+        # 最终回退：从 DSA ID 提取年份，避免使用当天日期
+        if not found_date:
+            dsa_year_m = re.match(r'DSA-(\d{4})-', dsa_id)
+            if dsa_year_m:
+                published_date = f"{dsa_year_m.group(1)}-01-01"
+                logger.debug(f"{dsa_id}: 无法提取日期，使用 DSA 年份回退: {published_date}")
 
         # Impact / Severity
         impact = self._extract_impact(content, html)
@@ -968,6 +977,121 @@ class DellSecurityScraper:
                                 return url
         except Exception as e:
             logger.warning(f"Exa search for {dsa_id} failed: {e}")
+        return None
+
+
+    async def requery_published_dates(
+        self,
+        advisories: list,
+        log_callback=None,
+    ) -> list:
+        """
+        重新获取 Dell 安全公告的发布日期。
+        对每条记录尝试直接 HTTP 获取页面，提取 Article Properties 中的 Last Modified。
+        如果失败则使用 Exa contents API 获取内容再提取。
+        最终回退到 DSA ID 年份。
+
+        Args:
+            advisories: [{'dsa_id': ..., 'link': ..., 'published_date': ...}, ...]
+            log_callback: 日志回调
+
+        Returns:
+            [{'dsa_id': ..., 'new_date': ...}, ...] 成功更新的记录
+        """
+        def _log(msg):
+            if log_callback:
+                log_callback(msg)
+            logger.info(msg)
+
+        exa_key = os.getenv("EXA_API_KEY", "")
+        updated = []
+        sem = asyncio.Semaphore(3)
+
+        async def _requery_one(dsa_id, link):
+            async with sem:
+                # 1) 直接 HTTP 获取
+                html = await self._fetch_raw_html(link)
+                content = self._html_to_text(html) if html else ""
+
+                new_date = self._extract_date_from_content(content, dsa_id)
+                if new_date:
+                    return new_date
+
+                # 2) Exa contents API
+                if exa_key and link:
+                    exa_text = await self._fetch_content_exa(link, exa_key)
+                    if exa_text:
+                        new_date = self._extract_date_from_content(exa_text, dsa_id)
+                        if new_date:
+                            return new_date
+
+                # 3) DSA 年份回退
+                m = re.match(r'DSA-(\d{4})-', dsa_id)
+                if m:
+                    return f"{m.group(1)}-01-01"
+                return None
+
+        total = len(advisories)
+        _log(f"开始重新获取 {total} 条公告的发布日期...")
+
+        for i, adv in enumerate(advisories):
+            dsa_id = adv['dsa_id']
+            link = adv.get('link', '')
+            old_date = adv.get('published_date', '')
+
+            new_date = await _requery_one(dsa_id, link)
+            if new_date and new_date != old_date:
+                updated.append({'dsa_id': dsa_id, 'new_date': new_date, 'old_date': old_date})
+
+            if (i + 1) % 10 == 0 or i == total - 1:
+                _log(f"进度: {i+1}/{total}，已更新 {len(updated)} 条")
+
+            await asyncio.sleep(0.5)
+
+        _log(f"完成！共更新 {len(updated)} 条发布日期")
+        return updated
+
+    def _extract_date_from_content(self, content: str, dsa_id: str) -> str:
+        """从内容中提取发布日期，返回 YYYY-MM-DD 或 None"""
+        if not content:
+            return None
+
+        # 优先匹配 Last Modified
+        last_modified_patterns = [
+            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}/\d{1,2}/\d{4})',
+        ]
+        fmts = [
+            '%d %B %Y', '%d %b %Y',
+            '%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y',
+            '%Y-%m-%d', '%m/%d/%Y',
+        ]
+        for pat in last_modified_patterns:
+            m = re.search(pat, content)
+            if m:
+                for fmt in fmts:
+                    try:
+                        return datetime.strptime(m.group(1).strip(), fmt).strftime('%Y-%m-%d')
+                    except ValueError:
+                        continue
+
+        # 回退：全文日期
+        date_patterns = [
+            (r'(\w+ \d{1,2},?\s+\d{4})', ['%B %d, %Y', '%B %d %Y']),
+            (r'(\d{4}-\d{2}-\d{2})', ['%Y-%m-%d']),
+        ]
+        for pattern, pfmts in date_patterns:
+            m = re.search(pattern, content)
+            if m:
+                for fmt in pfmts:
+                    try:
+                        d = datetime.strptime(m.group(1), fmt)
+                        if d.year < 2026:
+                            return d.strftime('%Y-%m-%d')
+                    except ValueError:
+                        continue
         return None
 
 

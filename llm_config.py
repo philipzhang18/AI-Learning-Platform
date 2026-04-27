@@ -7,7 +7,7 @@ import os
 try:
     from dotenv import load_dotenv
     # 加载默认的 .env（若存在）
-    load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"), override=False)
+    load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"), override=True)
     # 再加载 .env.llm（若存在，覆盖相同键）
     llm_env = os.path.join(os.getcwd(), ".env.llm")
     if os.path.exists(llm_env):

@@ -20,7 +20,7 @@ import os
 # 加载 .env 环境变量（Exa API Key 等）
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'), override=True)
 except ImportError:
     pass
 import atexit
@@ -48,19 +48,22 @@ from db_backup import backup_database, list_backups
 def _extract_cvss_from_metrics(metrics: dict) -> tuple:
     """从 NVD metrics 中提取 CVSS 评分（优先级：v4.0 → v3.1 → v3.0 → v2.0）
 
-    每一级只有在 baseSeverity 有效（非 NONE/N/A/空）时才采用，
-    否则继续查下一级，确保 v4.0 为 N/A 时能回退到 v3.x 的实际评分。
+    每一级遍历所有条目（NVD Primary + CNA Secondary），优先取 Primary，
+    只有在 baseSeverity 有效（非 NONE/N/A/空）时才采用。
 
     Returns:
         (severity, score, vector) 元组，未找到时返回 ("", None, "")
     """
     for ver_key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
         if ver_key in metrics and metrics[ver_key]:
-            cd = metrics[ver_key][0].get("cvssData", {})
-            sev = cd.get("baseSeverity", "")
-            score = cd.get("baseScore")
-            if score is not None and sev and str(sev).upper() not in ("NONE", "N/A", ""):
-                return sev, score, cd.get("vectorString", "")
+            entries = sorted(metrics[ver_key],
+                             key=lambda e: 0 if e.get("type") == "Primary" else 1)
+            for entry in entries:
+                cd = entry.get("cvssData", {})
+                sev = cd.get("baseSeverity", "")
+                score = cd.get("baseScore")
+                if score is not None and sev and str(sev).upper() not in ("NONE", "N/A", ""):
+                    return sev, score, cd.get("vectorString", "")
 
     if "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
         cd = metrics["cvssMetricV2"][0].get("cvssData", {})
@@ -2971,12 +2974,12 @@ foreach ($tokenName in $targets.Keys) {
         self.nvd_tree.heading("描述", text="描述")
         self.nvd_tree.heading("来源", text="数据来源")
 
-        self.nvd_tree.column("CVE ID", width=150, minwidth=100)
-        self.nvd_tree.column("严重等级", width=100, minwidth=80)
-        self.nvd_tree.column("CVSS评分", width=100, minwidth=80)
-        self.nvd_tree.column("发布日期", width=150, minwidth=100)
-        self.nvd_tree.column("描述", width=500, minwidth=300)
-        self.nvd_tree.column("来源", width=100, minwidth=80)
+        self.nvd_tree.column("CVE ID", width=150, minwidth=100, anchor="center")
+        self.nvd_tree.column("严重等级", width=100, minwidth=80, anchor="center")
+        self.nvd_tree.column("CVSS评分", width=100, minwidth=80, anchor="center")
+        self.nvd_tree.column("发布日期", width=150, minwidth=100, anchor="center")
+        self.nvd_tree.column("描述", width=500, minwidth=300, anchor="w")
+        self.nvd_tree.column("来源", width=100, minwidth=80, anchor="center")
 
         # 布局
         self.nvd_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
@@ -3092,6 +3095,21 @@ foreach ($tokenName in $targets.Keys) {
             cursor="hand2"
         )
         self.dell_backfill_btn.pack(side=tk.LEFT, padx=5)
+
+        # 修复发布日期按钮
+        self.dell_fix_dates_btn = tk.Button(
+            left_control,
+            text="📅 修复发布日期",
+            command=self.start_dell_fix_dates,
+            bg="#6c757d",
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        self.dell_fix_dates_btn.pack(side=tk.LEFT, padx=5)
 
         # 加载CSV数据按钮
         load_csv_btn = tk.Button(
@@ -3227,11 +3245,11 @@ foreach ($tokenName in $targets.Keys) {
         self.dell_tree.heading("CVE IDs", text="相关 CVE")
         self.dell_tree.heading("发布日期", text="发布日期")
 
-        self.dell_tree.column("公告ID", width=150, minwidth=100)
-        self.dell_tree.column("公告影响等级", width=100, minwidth=70)
-        self.dell_tree.column("标题", width=500, minwidth=300)
-        self.dell_tree.column("CVE IDs", width=300, minwidth=200)
-        self.dell_tree.column("发布日期", width=150, minwidth=100)
+        self.dell_tree.column("公告ID", width=150, minwidth=100, anchor="center")
+        self.dell_tree.column("公告影响等级", width=100, minwidth=70, anchor="center")
+        self.dell_tree.column("标题", width=500, minwidth=300, anchor="w")
+        self.dell_tree.column("CVE IDs", width=300, minwidth=200, anchor="w")
+        self.dell_tree.column("发布日期", width=150, minwidth=100, anchor="center")
 
         # 布局
         self.dell_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
@@ -3359,12 +3377,12 @@ foreach ($tokenName in $targets.Keys) {
         self.matched_tree.heading("影响等级", text="影响等级")
         self.matched_tree.heading("公告内容", text="公告内容")
 
-        self.matched_tree.column("CVE ID", width=150, minwidth=100)
-        self.matched_tree.column("严重等级", width=100, minwidth=80)
-        self.matched_tree.column("CVSS评分", width=100, minwidth=80)
-        self.matched_tree.column("Dell公告", width=150, minwidth=100)
-        self.matched_tree.column("影响等级", width=100, minwidth=80)
-        self.matched_tree.column("公告内容", width=500, minwidth=300)
+        self.matched_tree.column("CVE ID", width=150, minwidth=100, anchor="center")
+        self.matched_tree.column("严重等级", width=100, minwidth=80, anchor="center")
+        self.matched_tree.column("CVSS评分", width=100, minwidth=80, anchor="center")
+        self.matched_tree.column("Dell公告", width=150, minwidth=100, anchor="center")
+        self.matched_tree.column("影响等级", width=100, minwidth=80, anchor="center")
+        self.matched_tree.column("公告内容", width=500, minwidth=300, anchor="w")
 
         # 布局
         self.matched_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
@@ -3472,11 +3490,11 @@ foreach ($tokenName in $targets.Keys) {
         self.solution_tree.heading("分析状态", text="分析状态")
         self.solution_tree.heading("结果预览", text="结果预览")
 
-        self.solution_tree.column("时间戳", width=180, minwidth=150)
-        self.solution_tree.column("CVE ID", width=150, minwidth=100)
-        self.solution_tree.column("Dell公告", width=150, minwidth=100)
-        self.solution_tree.column("分析状态", width=100, minwidth=80)
-        self.solution_tree.column("结果预览", width=400, minwidth=300)
+        self.solution_tree.column("时间戳", width=180, minwidth=150, anchor="center")
+        self.solution_tree.column("CVE ID", width=150, minwidth=100, anchor="center")
+        self.solution_tree.column("Dell公告", width=150, minwidth=100, anchor="center")
+        self.solution_tree.column("分析状态", width=100, minwidth=80, anchor="center")
+        self.solution_tree.column("结果预览", width=400, minwidth=300, anchor="w")
 
         tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
         tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
@@ -3501,7 +3519,7 @@ foreach ($tokenName in $targets.Keys) {
         self.solution_detail_text = scrolledtext.ScrolledText(
             detail_frame,
             wrap=tk.WORD,
-            font=("Consolas", 11),
+            font=("Consolas", 13),
             bg="#f8f9fa",
             relief=tk.GROOVE,
             bd=2
@@ -3642,10 +3660,10 @@ foreach ($tokenName in $targets.Keys) {
         self.kb_tree.heading("解决方案预览", text="解决方案预览")
         self.kb_tree.heading("采集时间", text="采集时间")
 
-        self.kb_tree.column("文章编号", width=130, minwidth=100)
-        self.kb_tree.column("标题", width=400, minwidth=200)
-        self.kb_tree.column("解决方案预览", width=300, minwidth=200)
-        self.kb_tree.column("采集时间", width=160, minwidth=120)
+        self.kb_tree.column("文章编号", width=130, minwidth=100, anchor="center")
+        self.kb_tree.column("标题", width=400, minwidth=200, anchor="w")
+        self.kb_tree.column("解决方案预览", width=300, minwidth=200, anchor="w")
+        self.kb_tree.column("采集时间", width=160, minwidth=120, anchor="center")
 
         tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
         tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
@@ -3683,7 +3701,7 @@ foreach ($tokenName in $targets.Keys) {
         source_options = [
             "IT新闻简报", "NVD CVE 数据", "Dell 安全公告",
             "CVE-Dell 关联", "AI解决方案", "Dell技术库",
-            "学习对话记录", "闪卡知识库"
+            "学习对话记录", "学习产物", "闪卡知识库"
         ]
         self.export_source_combo = ttk.Combobox(
             row1, textvariable=self.export_source_var,
@@ -3955,6 +3973,14 @@ foreach ($tokenName in $targets.Keys) {
                     else:
                         cursor.execute(f"SELECT id, topic, question, answer, options, card_type, difficulty, review_count, correct_count, created_at FROM flashcards ORDER BY created_at DESC{limit_sql}")
                     return ["ID", "主题", "问题", "答案", "选项", "类型", "难度", "复习次数", "正确次数", "创建时间"], cursor.fetchall()
+
+                elif source == "学习产物":
+                    if single_id:
+                        cursor.execute("SELECT id, session_id, topic, artifact_type, title, content, created_at FROM learn_artifacts WHERE id = ? OR topic LIKE ? OR title LIKE ?",
+                                       (single_id, f"%{single_id}%", f"%{single_id}%"))
+                    else:
+                        cursor.execute(f"SELECT id, session_id, topic, artifact_type, title, content, created_at FROM learn_artifacts ORDER BY created_at DESC{limit_sql}")
+                    return ["ID", "会话ID", "主题", "产物类型", "标题", "内容", "创建时间"], cursor.fetchall()
 
                 else:
                     return [], []
@@ -4287,8 +4313,13 @@ foreach ($tokenName in $targets.Keys) {
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
-        canvas.create_window((0, 0), window=self.stats_scroll_frame, anchor="nw")
+        self._stats_canvas_win = canvas.create_window((0, 0), window=self.stats_scroll_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
+
+        # 内容宽度跟随 canvas 宽度，避免超出屏幕
+        def _on_canvas_resize(event):
+            canvas.itemconfig(self._stats_canvas_win, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_resize)
 
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -4299,26 +4330,6 @@ foreach ($tokenName in $targets.Keys) {
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         content = self.stats_scroll_frame
-
-        # ── 缩放控制（右下角浮动）──
-        self.stats_chart_scale = 1.0  # 默认 100%
-        zoom_bar = tk.Frame(self.stats_frame, bg="#f0f0f0", relief=tk.RAISED, bd=1, padx=6, pady=3)
-        zoom_bar.place(relx=1.0, rely=1.0, anchor="se", x=-30, y=-10)
-        zoom_bar.lift()
-        tk.Label(zoom_bar, text="缩放", bg="#f0f0f0",
-                 font=("Microsoft YaHei", 8), fg="#666").pack(side=tk.LEFT)
-        tk.Button(zoom_bar, text="−", command=lambda: self._stats_zoom(-0.1),
-                  font=("Microsoft YaHei", 9, "bold"), relief=tk.FLAT,
-                  bg="#e0e0e0", cursor="hand2", width=2).pack(side=tk.LEFT, padx=(4, 1))
-        self.stats_zoom_label = tk.Label(zoom_bar, text="100%", bg="#f0f0f0",
-                                          font=("Microsoft YaHei", 8, "bold"), fg=self.primary_color, width=4)
-        self.stats_zoom_label.pack(side=tk.LEFT)
-        tk.Button(zoom_bar, text="+", command=lambda: self._stats_zoom(0.1),
-                  font=("Microsoft YaHei", 9, "bold"), relief=tk.FLAT,
-                  bg="#e0e0e0", cursor="hand2", width=2).pack(side=tk.LEFT, padx=(1, 1))
-        tk.Button(zoom_bar, text="↺", command=lambda: self._stats_zoom(0, reset=True),
-                  font=("Microsoft YaHei", 8), relief=tk.FLAT,
-                  bg="#e0e0e0", cursor="hand2", width=2).pack(side=tk.LEFT, padx=(1, 0))
 
         # ── 第一行：统计卡片 ──
         cards_frame = tk.Frame(content, bg="white")
@@ -4417,11 +4428,11 @@ foreach ($tokenName in $targets.Keys) {
         self.stats_cve_tree = ttk.Treeview(cve_list_frame, columns=cve_cols, show="headings", height=10)
         for col in cve_cols:
             self.stats_cve_tree.heading(col, text=col)
-        self.stats_cve_tree.column("CVE ID", width=150, minwidth=120)
-        self.stats_cve_tree.column("严重等级", width=80, minwidth=60)
-        self.stats_cve_tree.column("CVSS评分", width=80, minwidth=60)
-        self.stats_cve_tree.column("发布日期", width=110, minwidth=90)
-        self.stats_cve_tree.column("描述", width=500, minwidth=200)
+        self.stats_cve_tree.column("CVE ID", width=150, minwidth=120, anchor="center")
+        self.stats_cve_tree.column("严重等级", width=80, minwidth=60, anchor="center")
+        self.stats_cve_tree.column("CVSS评分", width=80, minwidth=60, anchor="center")
+        self.stats_cve_tree.column("发布日期", width=110, minwidth=90, anchor="center")
+        self.stats_cve_tree.column("描述", width=500, minwidth=200, anchor="w")
 
         cve_scroll = tk.Scrollbar(cve_list_frame, orient=tk.VERTICAL, command=self.stats_cve_tree.yview)
         self.stats_cve_tree.configure(yscrollcommand=cve_scroll.set)
@@ -4445,11 +4456,11 @@ foreach ($tokenName in $targets.Keys) {
         self.stats_dell_tree = ttk.Treeview(dell_list_frame, columns=dell_cols, show="headings", height=10)
         for col in dell_cols:
             self.stats_dell_tree.heading(col, text=col)
-        self.stats_dell_tree.column("公告ID", width=140, minwidth=110)
-        self.stats_dell_tree.column("影响等级", width=80, minwidth=60)
-        self.stats_dell_tree.column("标题", width=450, minwidth=200)
-        self.stats_dell_tree.column("CVE数量", width=80, minwidth=60)
-        self.stats_dell_tree.column("发布日期", width=110, minwidth=90)
+        self.stats_dell_tree.column("公告ID", width=140, minwidth=110, anchor="center")
+        self.stats_dell_tree.column("影响等级", width=80, minwidth=60, anchor="center")
+        self.stats_dell_tree.column("标题", width=450, minwidth=200, anchor="w")
+        self.stats_dell_tree.column("CVE数量", width=80, minwidth=60, anchor="center")
+        self.stats_dell_tree.column("发布日期", width=110, minwidth=90, anchor="center")
 
         dell_scroll = tk.Scrollbar(dell_list_frame, orient=tk.VERTICAL, command=self.stats_dell_tree.yview)
         self.stats_dell_tree.configure(yscrollcommand=dell_scroll.set)
@@ -4463,61 +4474,23 @@ foreach ($tokenName in $targets.Keys) {
 
     def _create_stat_card(self, parent, title, value, color, icon=""):
         """创建统计卡片（带图标和彩色左边框）"""
-        s = getattr(self, 'stats_chart_scale', 1.0)
         card = tk.Frame(parent, bg="white", relief=tk.GROOVE, borderwidth=1)
 
-        # 彩色左侧条
-        color_bar = tk.Frame(card, bg=color, width=max(4, int(5 * s)))
+        color_bar = tk.Frame(card, bg=color, width=5)
         color_bar.pack(side=tk.LEFT, fill=tk.Y)
 
-        pad_x = max(6, int(8 * s))
-        pad_y = max(4, int(6 * s))
-        inner = tk.Frame(card, bg="white", padx=pad_x, pady=pad_y)
+        inner = tk.Frame(card, bg="white", padx=8, pady=6)
         inner.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        title_size = max(8, int(9 * s))
-        value_size = max(18, int(22 * s))
         tk.Label(inner, text=f"{icon} {title}", bg="white", fg="#666",
-                 font=("Microsoft YaHei", title_size)).pack(anchor="w")
+                 font=("Microsoft YaHei", 9)).pack(anchor="w")
 
         value_label = tk.Label(inner, text=value, bg="white", fg=color,
-                               font=("Microsoft YaHei", value_size, "bold"))
+                               font=("Microsoft YaHei", 22, "bold"))
         value_label.pack(anchor="w")
 
         card.value_label = value_label
         return card
-
-    def _stats_zoom(self, delta, reset=False):
-        """统计分析页面缩放"""
-        if reset:
-            self.stats_chart_scale = 1.0  # 恢复默认 100%
-        else:
-            self.stats_chart_scale = max(0.7, min(1.6, self.stats_chart_scale + delta))
-        pct = int(self.stats_chart_scale * 100)
-        self.stats_zoom_label.config(text=f"{pct}%")
-        # 重建卡片
-        cards_frame = None
-        for title, card in self.stats_cards.items():
-            if cards_frame is None:
-                cards_frame = card.master
-            card.destroy()
-        if cards_frame:
-            cards_info = [
-                ("NVD CVE总数", "0", self.primary_color, "📊"),
-                ("Dell公告数", "0", self.info_color, "🔔"),
-                ("关联匹配数", "0", self.success_color, "🔗"),
-                ("Dell 严重", "0", "#c0392b", "🔴"),
-                ("Dell 高危", "0", "#e67e22", "🟠"),
-                ("Dell 中危", "0", "#f1c40f", "🟡"),
-                ("Dell 低危", "0", "#27ae60", "🟢"),
-            ]
-            self.stats_cards = {}
-            for i, (title, value, color, icon) in enumerate(cards_info):
-                card = self._create_stat_card(cards_frame, title, value, color, icon)
-                card.grid(row=0, column=i, padx=6, pady=5, sticky="nsew")
-                self.stats_cards[title] = card
-        # 刷新数据（会重绘图表）
-        self.update_stats()
 
     def _draw_pie_charts(self, cve_severity, dell_severity):
         """绘制 CVE 和 Dell 严重等级饼图（白色背景）"""
@@ -4534,8 +4507,7 @@ foreach ($tokenName in $targets.Keys) {
             for w in self.chart_dell_pie_frame.winfo_children():
                 w.destroy()
 
-            s = getattr(self, 'stats_chart_scale', 1.0)
-            fig_w, fig_h, fig_dpi = 4.2, 3.0, int(100 * s)
+            fig_w, fig_h, fig_dpi = 5.2, 2.6, 100
 
             # 原始严重等级颜色
             severity_colors = {
@@ -4553,8 +4525,10 @@ foreach ($tokenName in $targets.Keys) {
 
             cve_labels, cve_sizes, cve_colors = [], [], []
             for lbl, key in [("Critical", "CRITICAL"), ("High", "HIGH"), ("Medium", "MEDIUM"),
-                              ("Low", "LOW"), ("Awaiting", "AWAITING"), ("N/A", "N/A")]:
+                              ("Low", "LOW"), ("N/A", "N/A")]:
                 cnt = cve_severity.get(key, 0)
+                if key == "N/A":
+                    cnt += cve_severity.get("AWAITING", 0)
                 if cnt > 0:
                     cve_labels.append(f"{lbl}\n{cnt}")
                     cve_sizes.append(cnt)
@@ -4563,15 +4537,15 @@ foreach ($tokenName in $targets.Keys) {
             if cve_sizes:
                 wedges, texts, autotexts = ax_cve.pie(
                     cve_sizes, labels=cve_labels, colors=cve_colors, autopct='%1.0f%%',
-                    startangle=90, pctdistance=0.75,
-                    textprops={'fontsize': 10, 'fontfamily': 'Microsoft YaHei'}
+                    startangle=140, pctdistance=0.72, labeldistance=1.15,
+                    textprops={'fontsize': 9, 'fontfamily': 'Microsoft YaHei'}
                 )
                 for t in autotexts:
-                    t.set_fontsize(9)
+                    t.set_fontsize(8)
                     t.set_color('white')
                     t.set_fontweight('bold')
                 ax_cve.set_title(f'CVE 总计: {sum(cve_sizes)}',
-                                 fontsize=11, fontfamily='Microsoft YaHei', fontweight='bold', pad=10)
+                                 fontsize=11, fontfamily='Microsoft YaHei', fontweight='bold', pad=8)
             else:
                 ax_cve.text(0.5, 0.5, '暂无CVE数据', ha='center', va='center',
                             fontsize=13, fontfamily='Microsoft YaHei', color='#999')
@@ -4600,15 +4574,15 @@ foreach ($tokenName in $targets.Keys) {
             if dell_sizes:
                 wedges, texts, autotexts = ax_dell.pie(
                     dell_sizes, labels=dell_labels, colors=dell_colors, autopct='%1.0f%%',
-                    startangle=90, pctdistance=0.75,
-                    textprops={'fontsize': 10, 'fontfamily': 'Microsoft YaHei'}
+                    startangle=140, pctdistance=0.72, labeldistance=1.15,
+                    textprops={'fontsize': 9, 'fontfamily': 'Microsoft YaHei'}
                 )
                 for t in autotexts:
-                    t.set_fontsize(9)
+                    t.set_fontsize(8)
                     t.set_color('white')
                     t.set_fontweight('bold')
                 ax_dell.set_title(f'Dell公告 总计: {sum(dell_sizes)}',
-                                  fontsize=11, fontfamily='Microsoft YaHei', fontweight='bold', pad=10)
+                                  fontsize=11, fontfamily='Microsoft YaHei', fontweight='bold', pad=8)
             else:
                 ax_dell.text(0.5, 0.5, '暂无Dell公告数据', ha='center', va='center',
                              fontsize=13, fontfamily='Microsoft YaHei', color='#999')
@@ -4647,8 +4621,7 @@ foreach ($tokenName in $targets.Keys) {
             for w in self.chart_matched_trend_frame.winfo_children():
                 w.destroy()
 
-            s = getattr(self, 'stats_chart_scale', 1.0)
-            fig_w, fig_h, fig_dpi = 4.2, 3.0, int(100 * s)
+            fig_w, fig_h, fig_dpi = 5.2, 2.6, 100
 
             # ── CVE 月度趋势 ──
             fig_cve = Figure(figsize=(fig_w, fig_h), dpi=fig_dpi, facecolor='white')
@@ -4664,13 +4637,13 @@ foreach ($tokenName in $targets.Keys) {
 
                 for i, (bar, val) in enumerate(zip(bars, counts)):
                     if val > 0:
-                        ax_cve.text(i, val + max(counts) * 0.02, str(val), ha='center', va='bottom',
-                                    fontsize=9, fontweight='bold', fontfamily='Microsoft YaHei')
+                        ax_cve.text(i, val + max(counts) * 0.03, str(val), ha='center', va='bottom',
+                                    fontsize=9, fontfamily='Microsoft YaHei')
 
                 ax_cve.set_xticks(range(len(months)))
-                ax_cve.set_xticklabels(months, rotation=45, ha='right', fontsize=8, fontfamily='Microsoft YaHei')
-                ax_cve.set_ylabel('数量', fontsize=9, fontfamily='Microsoft YaHei')
-                ax_cve.set_title(f'CVE 月度增长 (最近{len(months)}个月)', fontsize=10,
+                ax_cve.set_xticklabels(months, rotation=45, ha='right', fontsize=9, fontfamily='Microsoft YaHei')
+                ax_cve.set_ylabel('数量', fontsize=10, fontfamily='Microsoft YaHei')
+                ax_cve.set_title(f'CVE 月度增长 (最近{len(months)}个月)', fontsize=11,
                                  fontfamily='Microsoft YaHei', fontweight='bold', pad=8)
                 ax_cve.grid(axis='y', alpha=0.3, linestyle='--')
                 ax_cve.spines['top'].set_visible(False)
@@ -4700,13 +4673,13 @@ foreach ($tokenName in $targets.Keys) {
 
                 for i, (bar, val) in enumerate(zip(bars, counts)):
                     if val > 0:
-                        ax_dell.text(i, val + max(counts) * 0.02, str(val), ha='center', va='bottom',
-                                     fontsize=9, fontweight='bold', fontfamily='Microsoft YaHei')
+                        ax_dell.text(i, val + max(counts) * 0.03, str(val), ha='center', va='bottom',
+                                     fontsize=9, fontfamily='Microsoft YaHei')
 
                 ax_dell.set_xticks(range(len(months)))
-                ax_dell.set_xticklabels(months, rotation=45, ha='right', fontsize=8, fontfamily='Microsoft YaHei')
-                ax_dell.set_ylabel('数量', fontsize=9, fontfamily='Microsoft YaHei')
-                ax_dell.set_title(f'Dell 公告月度增长 (最近{len(months)}个月)', fontsize=10,
+                ax_dell.set_xticklabels(months, rotation=45, ha='right', fontsize=9, fontfamily='Microsoft YaHei')
+                ax_dell.set_ylabel('数量', fontsize=10, fontfamily='Microsoft YaHei')
+                ax_dell.set_title(f'Dell 公告月度增长 (最近{len(months)}个月)', fontsize=11,
                                   fontfamily='Microsoft YaHei', fontweight='bold', pad=8)
                 ax_dell.grid(axis='y', alpha=0.3, linestyle='--')
                 ax_dell.spines['top'].set_visible(False)
@@ -4736,13 +4709,13 @@ foreach ($tokenName in $targets.Keys) {
 
                 for i, (bar, val) in enumerate(zip(bars, counts)):
                     if val > 0:
-                        ax_matched.text(i, val + max(counts) * 0.02, str(val), ha='center', va='bottom',
-                                        fontsize=9, fontweight='bold', fontfamily='Microsoft YaHei')
+                        ax_matched.text(i, val + max(counts) * 0.03, str(val), ha='center', va='bottom',
+                                        fontsize=9, fontfamily='Microsoft YaHei')
 
                 ax_matched.set_xticks(range(len(months)))
-                ax_matched.set_xticklabels(months, rotation=45, ha='right', fontsize=8, fontfamily='Microsoft YaHei')
-                ax_matched.set_ylabel('数量', fontsize=9, fontfamily='Microsoft YaHei')
-                ax_matched.set_title(f'CVE-Dell 关联月度增长 (最近{len(months)}个月)', fontsize=10,
+                ax_matched.set_xticklabels(months, rotation=45, ha='right', fontsize=9, fontfamily='Microsoft YaHei')
+                ax_matched.set_ylabel('数量', fontsize=10, fontfamily='Microsoft YaHei')
+                ax_matched.set_title(f'CVE-Dell 关联月度增长 (最近{len(months)}个月)', fontsize=11,
                                      fontfamily='Microsoft YaHei', fontweight='bold', pad=8)
                 ax_matched.grid(axis='y', alpha=0.3, linestyle='--')
                 ax_matched.spines['top'].set_visible(False)
@@ -4780,8 +4753,7 @@ foreach ($tokenName in $targets.Keys) {
             for w in self.chart_bar_frame.winfo_children():
                 w.destroy()
 
-            s = getattr(self, 'stats_chart_scale', 1.0)
-            fig = Figure(figsize=(5.0, 3.6), dpi=int(100 * s), facecolor='white')
+            fig = Figure(figsize=(5.2, 2.6), dpi=100, facecolor='white')
             ax = fig.add_subplot(111)
             ax.set_xlim(0, 10)
             ax.set_ylim(0, 10)
@@ -4794,7 +4766,7 @@ foreach ($tokenName in $targets.Keys) {
                                    alpha=0.12, linewidth=2.5)
             ax.add_patch(cve_ellipse)
             ax.text(2.5, 7.5, f'NVD CVE\n{nvd_total:,}', ha='center', va='center',
-                    fontsize=11, fontweight='bold', fontfamily='Microsoft YaHei',
+                    fontsize=12, fontweight='bold', fontfamily='Microsoft YaHei',
                     color=self.primary_color)
 
             # 顶部：Dell 椭圆
@@ -4803,7 +4775,7 @@ foreach ($tokenName in $targets.Keys) {
                                     alpha=0.12, linewidth=2.5)
             ax.add_patch(dell_ellipse)
             ax.text(7.5, 7.5, f'Dell 公告\n{dell_total:,}', ha='center', va='center',
-                    fontsize=11, fontweight='bold', fontfamily='Microsoft YaHei',
+                    fontsize=12, fontweight='bold', fontfamily='Microsoft YaHei',
                     color=self.info_color)
 
             # 中间：关联匹配椭圆（更大、更醒目）
@@ -4812,7 +4784,7 @@ foreach ($tokenName in $targets.Keys) {
                                        alpha=0.12, linewidth=3)
             ax.add_patch(matched_ellipse)
             ax.text(5, 3.2, f'关联匹配\n{matched_count:,}', ha='center', va='center',
-                    fontsize=12, fontweight='bold', fontfamily='Microsoft YaHei',
+                    fontsize=13, fontweight='bold', fontfamily='Microsoft YaHei',
                     color=self.success_color)
 
             # PPT 风格粗箭头：CVE → 关联
@@ -4836,7 +4808,7 @@ foreach ($tokenName in $targets.Keys) {
                 cve_coeff = matched_count / nvd_total
                 dell_coeff = matched_count / dell_total
                 ax.text(5, 1.2, f'CVE 匹配系数 {cve_coeff:.2f}  |  Dell 公告匹配系数 {dell_coeff:.2f}',
-                        ha='center', va='center', fontsize=9, fontfamily='Microsoft YaHei',
+                        ha='center', va='center', fontsize=10, fontfamily='Microsoft YaHei',
                         color='#666')
 
             fig.tight_layout()
@@ -5135,7 +5107,7 @@ foreach ($tokenName in $targets.Keys) {
 
         # ── 左侧控制面板 ──────────────────────────────────────────────
         left_outer = tk.Frame(main_paned, bg="white")
-        main_paned.add(left_outer, width=140, minsize=100)
+        main_paned.add(left_outer, width=380, minsize=280)
 
         left_canvas = tk.Canvas(left_outer, bg="white", highlightthickness=0)
         left_scroll = tk.Scrollbar(left_outer, orient=tk.VERTICAL, command=left_canvas.yview)
@@ -6412,7 +6384,6 @@ mindmap
 
         dialog = tk.Toplevel(self.root)
         dialog.title(title)
-        dialog.geometry("900x700")
         dialog.transient(self.root)
 
         # 标题栏
@@ -6426,8 +6397,12 @@ mindmap
         text_frame = tk.Frame(dialog)
         text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+        # 思维导图：在文本上方渲染可视化图
+        if artifact_type == "mindmap":
+            self._render_mindmap_canvas(text_frame, content)
+
         text = scrolledtext.ScrolledText(
-            text_frame, wrap=tk.WORD, font=("Consolas", 11), bg="#f8f9fa"
+            text_frame, wrap=tk.WORD, font=("Consolas", 15), bg="#f8f9fa"
         )
         text.pack(fill=tk.BOTH, expand=True)
         text.insert(tk.END, content)
@@ -6446,12 +6421,48 @@ mindmap
         ).pack(side=tk.LEFT, padx=5)
 
         tk.Button(
+            btn_frame, text="💾 保存到数据库",
+            command=lambda: self._save_artifact_to_db(artifact_type, title, content),
+            bg="#8e44ad", fg="white",
+            font=("Microsoft YaHei", 9, "bold"),
+            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Button(
             btn_frame, text="📋 复制到剪贴板",
             command=lambda: self._copy_to_clipboard(content),
             bg=self.primary_color, fg="white",
             font=("Microsoft YaHei", 9, "bold"),
             relief=tk.FLAT, cursor="hand2", padx=15, pady=5
         ).pack(side=tk.LEFT, padx=5)
+
+        # 播客：添加播放/停止按钮
+        if artifact_type == "podcast":
+            tk.Button(
+                btn_frame, text="▶ 播放语音",
+                command=lambda: self._play_artifact_tts(content),
+                bg="#e67e22", fg="white",
+                font=("Microsoft YaHei", 9, "bold"),
+                relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+            ).pack(side=tk.LEFT, padx=5)
+
+            tk.Button(
+                btn_frame, text="⏹ 停止",
+                command=self._stop_podcast_tts,
+                bg="#c0392b", fg="white",
+                font=("Microsoft YaHei", 9, "bold"),
+                relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+            ).pack(side=tk.LEFT, padx=5)
+
+        # 思维导图：添加保存图片按钮
+        if artifact_type == "mindmap":
+            tk.Button(
+                btn_frame, text="🖼 保存思维导图图片",
+                command=lambda: self._save_mindmap_image(content, title),
+                bg="#16a085", fg="white",
+                font=("Microsoft YaHei", 9, "bold"),
+                relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+            ).pack(side=tk.LEFT, padx=5)
 
         tk.Button(
             btn_frame, text="关闭", command=dialog.destroy,
@@ -6461,6 +6472,9 @@ mindmap
         ).pack(side=tk.RIGHT, padx=5)
 
         self.learn_status_label.config(text=f"✅ {self._get_artifact_name(artifact_type)}已生成")
+
+        # 统一尺寸并居中
+        self._center_window(dialog, 1350, 1050)
 
     def _copy_to_clipboard(self, text: str):
         """复制文本到剪贴板"""
@@ -6513,6 +6527,349 @@ mindmap
             self.log(f"学习产物已保存: {filepath}")
         except Exception as e:
             messagebox.showerror("失败", f"保存失败: {e}")
+
+    def _save_artifact_to_db(self, artifact_type: str, title: str, content: str):
+        """将学习产物保存到数据库 learn_artifacts 表（参考保存对话按钮）"""
+        topic = getattr(self, 'learn_topic', '') or "未命名主题"
+        session_id = getattr(self, 'current_session_id', None)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    """INSERT INTO learn_artifacts
+                       (session_id, topic, artifact_type, title, content, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (session_id, topic, artifact_type, title, content, ts)
+                )
+                self.conn.commit()
+                artifact_id = cursor.lastrowid
+            self.log(f"学习产物已保存到数据库: #{artifact_id} - {title}")
+            messagebox.showinfo(
+                "保存成功",
+                f"学习产物已保存到数据库。\n\n"
+                f"记录编号: #{artifact_id}\n"
+                f"类型: {self._get_artifact_name(artifact_type)}\n"
+                f"主题: {topic}\n\n"
+                f"可在「Dell技术库」标签页选择数据源「学习产物」一并导出。"
+            )
+        except Exception as e:
+            self.log(f"保存学习产物到数据库失败: {e}")
+            messagebox.showerror("保存失败", f"保存到数据库时出错：\n{e}")
+
+    def _play_artifact_tts(self, text: str):
+        """播放学习产物（如播客脚本）的 TTS 语音"""
+        if not text or not text.strip():
+            messagebox.showwarning("提示", "内容为空，无法播放")
+            return
+        if self._tts_process and self._tts_process.poll() is None:
+            messagebox.showinfo("提示", "正在播放中，请先点击停止")
+            return
+
+        # 获取选中的声音名称（复用新闻播客的声音设置）
+        voice_name = ""
+        try:
+            idx = self.tts_voice_combo.current()
+            voices = getattr(self, "_tts_voice_names", [""])
+            if 0 <= idx < len(voices):
+                voice_name = voices[idx]
+        except Exception:
+            pass
+
+        try:
+            self.tts_status_label.config(text="学习播客播放中...")
+        except Exception:
+            pass
+        threading.Thread(target=self._tts_thread, args=(text, voice_name), daemon=True).start()
+
+    # ============== 思维导图渲染 ==============
+
+    def _parse_mindmap_text(self, content: str):
+        """将 Mermaid mindmap 文本解析为缩进树结构。
+        返回 root 节点 dict: {"label": str, "children": [...]}
+        """
+        # 去除可能的 ```mermaid 代码块包裹
+        lines = content.replace("```mermaid", "").replace("```", "").splitlines()
+        clean_lines = []
+        for ln in lines:
+            if not ln.strip():
+                continue
+            stripped = ln.strip().lower()
+            if stripped.startswith("mindmap"):
+                continue
+            clean_lines.append(ln.rstrip())
+
+        if not clean_lines:
+            return {"label": getattr(self, 'learn_topic', '思维导图'), "children": []}
+
+        def label_of(s: str) -> str:
+            t = s.strip()
+            # 清理 root((xxx)) / (xxx) / [xxx] 等包裹
+            for pair in (("root((", "))"), ("((", "))"), ("(", ")"), ("[", "]"), ("{", "}")):
+                if t.startswith(pair[0]) and t.endswith(pair[1]):
+                    t = t[len(pair[0]):-len(pair[1])]
+                    break
+            if t.lower().startswith("root"):
+                t = t[4:].lstrip("(").rstrip(")").strip()
+            return t or "节点"
+
+        def indent_of(s: str) -> int:
+            return len(s) - len(s.lstrip(" \t"))
+
+        # 第一行是 root；如果首行 indent 与后续相同，仍按最浅缩进作为根
+        indents = [indent_of(ln) for ln in clean_lines]
+        min_indent = min(indents)
+
+        root = {"label": label_of(clean_lines[0]), "children": []}
+        stack = [(min_indent, root)]
+
+        for ln in clean_lines[1:]:
+            ind = indent_of(ln)
+            node = {"label": label_of(ln), "children": []}
+            while stack and stack[-1][0] >= ind:
+                stack.pop()
+            if not stack:
+                stack.append((min_indent, root))
+            stack[-1][1]["children"].append(node)
+            stack.append((ind, node))
+
+        return root
+
+    def _layout_mindmap(self, root):
+        """计算每个节点的 (x, y, w, h) 坐标。返回 (节点列表, 连接列表, 总宽, 总高)"""
+        H_GAP = 40   # 横向间距
+        V_GAP = 12   # 纵向间距
+        NODE_H = 32
+        CHAR_W = 12  # 每个字符宽度（中文）
+        PAD = 30
+
+        # 计算每个节点的高度（子树纵向占用）
+        def measure(node, depth=0):
+            label = node["label"][:30]
+            w = max(80, len(label) * CHAR_W + 20)
+            node["_w"] = w
+            node["_depth"] = depth
+            if not node["children"]:
+                node["_h"] = NODE_H
+            else:
+                ch = sum(measure(c, depth + 1) for c in node["children"])
+                ch += V_GAP * (len(node["children"]) - 1)
+                node["_h"] = max(NODE_H, ch)
+            return node["_h"]
+
+        measure(root)
+
+        # 计算每个深度层的最大宽度（用于列对齐）
+        col_w = {}
+        def collect_w(node):
+            d = node["_depth"]
+            col_w[d] = max(col_w.get(d, 0), node["_w"])
+            for c in node["children"]:
+                collect_w(c)
+        collect_w(root)
+
+        # 计算每个深度的 x 起点
+        col_x = {}
+        cx = PAD
+        for d in sorted(col_w.keys()):
+            col_x[d] = cx
+            cx += col_w[d] + H_GAP
+
+        nodes = []
+        edges = []
+
+        def place(node, y_start):
+            x = col_x[node["_depth"]]
+            y = y_start + node["_h"] // 2 - NODE_H // 2
+            node["_x"] = x
+            node["_y"] = y
+            nodes.append(node)
+            # 子节点
+            cy = y_start
+            for c in node["children"]:
+                place(c, cy)
+                edges.append((node, c))
+                cy += c["_h"] + V_GAP
+
+        place(root, PAD)
+
+        total_w = cx + PAD
+        total_h = root["_h"] + 2 * PAD
+        return nodes, edges, total_w, total_h
+
+    def _render_mindmap_canvas(self, parent, content: str):
+        """在 parent 中渲染思维导图 Canvas（带滚动条）"""
+        try:
+            root_node = self._parse_mindmap_text(content)
+            nodes, edges, total_w, total_h = self._layout_mindmap(root_node)
+        except Exception as e:
+            tk.Label(parent, text=f"思维导图渲染失败: {e}", fg="red").pack()
+            return
+
+        # 容器：固定高度 + 横纵向滚动条
+        container = tk.Frame(parent, bg="white", relief=tk.SOLID, bd=1)
+        container.pack(fill=tk.X, pady=(0, 8))
+
+        canvas_h = min(420, max(200, total_h + 20))
+        canvas = tk.Canvas(
+            container, bg="white", height=canvas_h,
+            scrollregion=(0, 0, total_w, total_h),
+            highlightthickness=0
+        )
+        hscroll = tk.Scrollbar(container, orient=tk.HORIZONTAL, command=canvas.xview)
+        vscroll = tk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.config(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
+
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vscroll.grid(row=0, column=1, sticky="ns")
+        hscroll.grid(row=1, column=0, sticky="ew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        self._draw_mindmap_on_canvas(canvas, nodes, edges)
+        # 保存绘图所需信息以便导出图片
+        self._last_mindmap_size = (total_w, total_h)
+        self._last_mindmap_nodes = nodes
+        self._last_mindmap_edges = edges
+
+    def _draw_mindmap_on_canvas(self, canvas, nodes, edges):
+        """在 canvas 上绘制节点和连线"""
+        # 不同深度使用不同颜色
+        palette = [
+            "#3498db", "#2ecc71", "#e67e22", "#9b59b6",
+            "#1abc9c", "#e74c3c", "#34495e", "#f39c12"
+        ]
+        NODE_H = 32
+
+        # 先画连线（贝塞尔曲线效果用直线近似）
+        for parent, child in edges:
+            x1 = parent["_x"] + parent["_w"]
+            y1 = parent["_y"] + NODE_H // 2
+            x2 = child["_x"]
+            y2 = child["_y"] + NODE_H // 2
+            mid = (x1 + x2) // 2
+            canvas.create_line(
+                x1, y1, mid, y1, mid, y2, x2, y2,
+                fill="#7f8c8d", width=2, smooth=True
+            )
+
+        # 再画节点
+        for node in nodes:
+            x = node["_x"]
+            y = node["_y"]
+            w = node["_w"]
+            depth = node["_depth"]
+            color = palette[depth % len(palette)]
+            label = node["label"][:30]
+            # 圆角矩形（用矩形 + 椭圆模拟）
+            canvas.create_rectangle(
+                x, y, x + w, y + NODE_H,
+                fill=color, outline=color, width=1
+            )
+            canvas.create_text(
+                x + w // 2, y + NODE_H // 2,
+                text=label, fill="white",
+                font=("Microsoft YaHei", 10, "bold")
+            )
+
+    def _save_mindmap_image(self, content: str, title: str):
+        """将思维导图保存为 PNG（需要 Pillow）或 PostScript 文件"""
+        try:
+            root_node = self._parse_mindmap_text(content)
+            nodes, edges, total_w, total_h = self._layout_mindmap(root_node)
+        except Exception as e:
+            messagebox.showerror("失败", f"思维导图解析失败: {e}")
+            return
+
+        # 创建一个离屏 Canvas 来绘制
+        offscreen = tk.Toplevel(self.root)
+        offscreen.withdraw()  # 隐藏窗口
+        canvas = tk.Canvas(
+            offscreen, width=total_w, height=total_h,
+            bg="white", highlightthickness=0
+        )
+        canvas.pack()
+        self._draw_mindmap_on_canvas(canvas, nodes, edges)
+        canvas.update()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+
+        # 优先尝试 PNG（Pillow）
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            has_pillow = True
+        except ImportError:
+            has_pillow = False
+
+        if has_pillow:
+            filetypes = [("PNG 图片", "*.png"), ("PostScript 文件", "*.ps"), ("所有文件", "*.*")]
+            default_ext = ".png"
+        else:
+            filetypes = [("PostScript 文件", "*.ps"), ("所有文件", "*.*")]
+            default_ext = ".ps"
+
+        filepath = filedialog.asksaveasfilename(
+            title="保存思维导图图片",
+            initialfile=f"{safe_title}_{timestamp}{default_ext}",
+            defaultextension=default_ext,
+            filetypes=filetypes
+        )
+
+        if not filepath:
+            offscreen.destroy()
+            return
+
+        try:
+            if filepath.lower().endswith(".png") and has_pillow:
+                # 直接用 Pillow 重新绘制为 PNG（更可靠）
+                img = Image.new("RGB", (int(total_w), int(total_h)), "white")
+                draw = ImageDraw.Draw(img)
+                try:
+                    font = ImageFont.truetype("msyh.ttc", 14)
+                except Exception:
+                    try:
+                        font = ImageFont.truetype("simhei.ttf", 14)
+                    except Exception:
+                        font = ImageFont.load_default()
+
+                palette = ["#3498db", "#2ecc71", "#e67e22", "#9b59b6",
+                           "#1abc9c", "#e74c3c", "#34495e", "#f39c12"]
+                NODE_H = 32
+
+                for parent, child in edges:
+                    x1 = parent["_x"] + parent["_w"]
+                    y1 = parent["_y"] + NODE_H // 2
+                    x2 = child["_x"]
+                    y2 = child["_y"] + NODE_H // 2
+                    mid = (x1 + x2) // 2
+                    draw.line([(x1, y1), (mid, y1), (mid, y2), (x2, y2)], fill="#7f8c8d", width=2)
+
+                for node in nodes:
+                    x, y, w = node["_x"], node["_y"], node["_w"]
+                    color = palette[node["_depth"] % len(palette)]
+                    label = node["label"][:30]
+                    draw.rectangle([x, y, x + w, y + NODE_H], fill=color, outline=color)
+                    # 文本居中
+                    try:
+                        bbox = draw.textbbox((0, 0), label, font=font)
+                        tw = bbox[2] - bbox[0]
+                        th = bbox[3] - bbox[1]
+                    except Exception:
+                        tw, th = len(label) * 12, 14
+                    draw.text((x + (w - tw) // 2, y + (NODE_H - th) // 2),
+                              label, fill="white", font=font)
+                img.save(filepath, "PNG")
+            else:
+                # PostScript 输出（tkinter 原生支持）
+                canvas.postscript(file=filepath, colormode="color",
+                                  width=total_w, height=total_h)
+            messagebox.showinfo("成功", f"思维导图已保存到：\n{filepath}")
+            self.log(f"思维导图图片已保存: {filepath}")
+        except Exception as e:
+            messagebox.showerror("失败", f"保存图片失败: {e}")
+        finally:
+            offscreen.destroy()
 
 
     def _start_learn_session(self):
@@ -6919,7 +7276,6 @@ mindmap
         # 创建问答窗口
         quiz_win = tk.Toplevel(self.root)
         quiz_win.title(f"知识问答 — {topic or '全部主题'}")
-        quiz_win.geometry("650x520")
         quiz_win.configure(bg="white")
         quiz_win.transient(self.root)
         quiz_win.grab_set()
@@ -7110,6 +7466,9 @@ mindmap
         # 加载第一题
         load_question(0)
 
+        # 居中显示
+        self._center_window(quiz_win, 650, 520)
+
     def _open_flashcard_window(self):
         """打开闪卡复习窗口（卡片翻转模式）"""
         topic = getattr(self, 'learn_topic', '') or self.learn_topic_entry.get().strip()
@@ -7142,7 +7501,6 @@ mindmap
         # 创建闪卡窗口
         fc_win = tk.Toplevel(self.root)
         fc_win.title(f"闪卡复习 — {topic or '全部主题'}")
-        fc_win.geometry("580x450")
         fc_win.configure(bg="#f0f4f8")
         fc_win.transient(self.root)
         fc_win.grab_set()
@@ -7315,6 +7673,9 @@ mindmap
 
         # 加载第一张
         load_card(0)
+
+        # 居中显示
+        self._center_window(fc_win, 580, 450)
 
     # ==================== 操作日志 ====================
 
@@ -8252,6 +8613,106 @@ mindmap
         self.dell_collect_btn.config(state=tk.NORMAL)
         self.dell_stop_btn.config(state=tk.DISABLED)
         self.hide_progress()
+
+    def start_dell_fix_dates(self):
+        """启动 Dell 安全公告发布日期修复"""
+        if self.is_collecting_dell:
+            messagebox.showwarning("提示", "正在采集中，请稍后再试")
+            return
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT dsa_id, published_date, link FROM dell_advisories
+            WHERE published_date LIKE '2026-%'
+              AND dsa_id NOT LIKE 'DSA-2026-%'
+        """)
+        wrong_rows = cursor.fetchall()
+
+        if not wrong_rows:
+            messagebox.showinfo("提示", "没有需要修复的日期记录")
+            return
+
+        result = messagebox.askyesno(
+            "修复发布日期",
+            f"发现 {len(wrong_rows)} 条日期异常记录（DSA 年份 < 2026 但日期为 2026）。\n\n"
+            "将尝试重新获取正确的 Last Modified 日期。\n"
+            "预计耗时：2-5 分钟\n\n是否继续？"
+        )
+        if not result:
+            return
+
+        self.is_collecting_dell = True
+        self.dell_fix_dates_btn.config(state=tk.DISABLED)
+        self.dell_collect_btn.config(state=tk.DISABLED)
+
+        thread = threading.Thread(
+            target=self._run_dell_fix_dates, args=(wrong_rows,))
+        thread.daemon = True
+        thread.start()
+
+        self.log(f"开始修复 {len(wrong_rows)} 条 Dell 公告发布日期...")
+
+    def _run_dell_fix_dates(self, wrong_rows):
+        """在线程中运行日期修复"""
+        try:
+            if os.name == 'nt':
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            asyncio.run(self._fix_dell_dates_async(wrong_rows))
+        except Exception as e:
+            self.log_queue.put(f"日期修复出错: {str(e)}")
+        finally:
+            self.is_collecting_dell = False
+            self.root.after(0, self._finish_dell_fix_dates)
+
+    def _finish_dell_fix_dates(self):
+        """完成日期修复的 UI 更新"""
+        self.dell_fix_dates_btn.config(state=tk.NORMAL)
+        self.dell_collect_btn.config(state=tk.NORMAL)
+        self.hide_progress()
+        # 刷新 Dell 树视图以显示更新后的日期
+        self.root.after(100, lambda: self.filter_dell_data())
+
+    async def _fix_dell_dates_async(self, wrong_rows):
+        """异步执行日期修复"""
+        scraper = DellSecurityScraper()
+        advisories = [
+            {'dsa_id': r[0], 'published_date': r[1], 'link': r[2] or ''}
+            for r in wrong_rows
+        ]
+
+        updated = await scraper.requery_published_dates(
+            advisories,
+            log_callback=lambda msg: self.log_queue.put(msg),
+        )
+
+        if updated:
+            cursor = self.conn.cursor()
+            for item in updated:
+                cursor.execute(
+                    "UPDATE dell_advisories SET published_date = ? WHERE dsa_id = ?",
+                    (item['new_date'], item['dsa_id'])
+                )
+                # 同步更新 data JSON 中的 published_date
+                cursor.execute(
+                    "SELECT data FROM dell_advisories WHERE dsa_id = ?",
+                    (item['dsa_id'],)
+                )
+                row = cursor.fetchone()
+                if row:
+                    import json as _json
+                    try:
+                        data = _json.loads(row[0])
+                        data['published_date'] = item['new_date']
+                        cursor.execute(
+                            "UPDATE dell_advisories SET data = ? WHERE dsa_id = ?",
+                            (_json.dumps(data, ensure_ascii=False), item['dsa_id'])
+                        )
+                    except Exception:
+                        pass
+            self.conn.commit()
+            self.log_queue.put(f"✅ 成功修复 {len(updated)} 条发布日期")
+        else:
+            self.log_queue.put("未找到可修复的日期记录")
 
     async def backfill_dell_advisories_async(self):
         """异步执行 Dell 历史 DSA 缝隙补全"""
@@ -9751,15 +10212,13 @@ mindmap
         """显示 NVD CVE 详细信息"""
         detail_window = tk.Toplevel(self.root)
         detail_window.title(f"CVE 详细信息 - {cve.get('cve_id')}")
-        detail_window.geometry("800x600")
+        detail_window.transient(self.root)
 
         # 详细信息文本
         text = scrolledtext.ScrolledText(
             detail_window,
             wrap=tk.WORD,
-            width=90,
-            height=30,
-            font=("Consolas", 11)
+            font=("Consolas", 15)
         )
         text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -9798,6 +10257,9 @@ CWE 分类:
         text.insert(tk.END, detail_text)
         text.config(state=tk.DISABLED)
 
+        # 统一尺寸并居中
+        self._center_window(detail_window, 1350, 1050)
+
     def on_dell_item_double_click(self, event):
         """处理 Dell 项目双击事件"""
         selection = self.dell_tree.selection()
@@ -9815,15 +10277,13 @@ CWE 分类:
         """显示 Dell 安全公告详细信息"""
         detail_window = tk.Toplevel(self.root)
         detail_window.title(f"Dell 安全公告 - {advisory.get('dell_security_advisory', 'N/A')}")
-        detail_window.geometry("900x700")
+        detail_window.transient(self.root)
 
         # 详细信息文本
         text = scrolledtext.ScrolledText(
             detail_window,
             wrap=tk.WORD,
-            width=100,
-            height=35,
-            font=("Consolas", 11)
+            font=("Consolas", 15)
         )
         text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -9869,6 +10329,9 @@ Dell 安全公告详细信息
 
         text.insert(tk.END, detail_text)
         text.config(state=tk.DISABLED)
+
+        # 统一尺寸并居中
+        self._center_window(detail_window, 1350, 1050)
 
     # ==================== AI解决方案功能 ====================
 
@@ -10049,14 +10512,13 @@ Dell 安全公告详细信息
 
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Dell技术库 - {article_id}")
-        dialog.geometry("1000x700")
         dialog.transient(self.root)
 
         # 标题栏
         header = f"文章编号: {article_id}  |  {article.get('title', '')}"
         tk.Label(
             dialog, text=header,
-            font=("Microsoft YaHei", 11, "bold"),
+            font=("Microsoft YaHei", 12, "bold"),
             bg="#2c3e50", fg="white", padx=10, pady=10
         ).pack(fill=tk.X)
 
@@ -10065,7 +10527,7 @@ Dell 安全公告详细信息
         text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         text = scrolledtext.ScrolledText(
-            text_frame, wrap=tk.WORD, font=("Consolas", 11), bg="#f8f9fa"
+            text_frame, wrap=tk.WORD, font=("Consolas", 15), bg="#f8f9fa"
         )
         text.pack(fill=tk.BOTH, expand=True)
 
@@ -10087,6 +10549,9 @@ Dell 安全公告详细信息
             font=("Microsoft YaHei", 10, "bold"),
             padx=20, pady=5, relief=tk.FLAT, cursor="hand2"
         ).pack(pady=10)
+
+        # 统一尺寸并居中
+        self._center_window(dialog, 1350, 1050)
 
     def nvd_ai_solution_click(self):
         """NVD标签页 AI解决方案按钮点击事件"""
@@ -10442,7 +10907,6 @@ Qwen API密钥未设置。
             # 创建弹框
             dialog = tk.Toplevel(self.root)
             dialog.title(f"AI解决方案 - {cve_id}")
-            dialog.geometry("1100x800")
             dialog.transient(self.root)
             dialog.grab_set()
 
@@ -10463,7 +10927,7 @@ Qwen API密钥未设置。
             text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
             result_text = scrolledtext.ScrolledText(
-                text_frame, wrap=tk.WORD, font=("Consolas", 12), bg="#f8f9fa"
+                text_frame, wrap=tk.WORD, font=("Consolas", 15), bg="#f8f9fa"
             )
             result_text.pack(fill=tk.BOTH, expand=True)
             result_text.insert(tk.END, result)
@@ -10502,6 +10966,9 @@ Qwen API密钥未设置。
                 padx=20, pady=6, relief=tk.FLAT, cursor="hand2"
             )
             close_btn.pack(side=tk.LEFT)
+
+            # 统一尺寸并居中
+            self._center_window(dialog, 1350, 1050)
 
             self.log(f"AI分析完成: {cve_id}")
 
@@ -10980,15 +11447,13 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
         """显示关联数据的详细信息"""
         detail_window = tk.Toplevel(self.root)
         detail_window.title(f"关联详情 - {cve.get('cve_id')}")
-        detail_window.geometry("1000x800")
+        detail_window.transient(self.root)
 
         # 详细信息文本
         text = scrolledtext.ScrolledText(
             detail_window,
             wrap=tk.WORD,
-            width=110,
-            height=40,
-            font=("Consolas", 11)
+            font=("Consolas", 15)
         )
         text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -11041,6 +11506,9 @@ CVE 描述:
 
         text.insert(tk.END, detail_text)
         text.config(state=tk.DISABLED)
+
+        # 统一尺寸并居中
+        self._center_window(detail_window, 1350, 1050)
 
     # ==================== 统计更新功能 ====================
 
@@ -11436,6 +11904,40 @@ CVE 描述:
         finally:
             sys.exit(0)
 
+    def _center_window(self, window, width=None, height=None):
+        """将弹窗居中显示在主窗口中央
+
+        Args:
+            window: Toplevel 窗口对象
+            width: 窗口宽度（可选，不指定则使用当前宽度）
+            height: 窗口高度（可选，不指定则使用当前高度）
+        """
+        window.update_idletasks()
+
+        # 获取窗口尺寸
+        if width is None or height is None:
+            window_width = window.winfo_width()
+            window_height = window.winfo_height()
+        else:
+            window_width = width
+            window_height = height
+
+        # 获取主窗口位置和尺寸
+        root_x = self.root.winfo_x()
+        root_y = self.root.winfo_y()
+        root_width = self.root.winfo_width()
+        root_height = self.root.winfo_height()
+
+        # 计算居中位置
+        x = root_x + (root_width - window_width) // 2
+        y = root_y + (root_height - window_height) // 2
+
+        # 确保窗口不会超出屏幕
+        x = max(0, x)
+        y = max(0, y)
+
+        window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
     def log(self, message):
         """添加日志消息"""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -11485,7 +11987,6 @@ CVE 描述:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("数据库备份列表")
-        dialog.geometry("600x400")
         dialog.transient(self.root)
 
         tk.Label(
@@ -11512,6 +12013,9 @@ CVE 描述:
             bg="#95a5a6", fg="white", font=("Microsoft YaHei", 9),
             relief=tk.FLAT, cursor="hand2", padx=15, pady=5
         ).pack(pady=(0, 10))
+
+        # 居中显示
+        self._center_window(dialog, 600, 400)
 
     def _backfill_cvss_ui(self):
         """批量回填数据库中缺失的 CVSS 评分/严重等级"""
