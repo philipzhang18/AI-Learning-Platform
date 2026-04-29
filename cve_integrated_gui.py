@@ -1604,12 +1604,15 @@ class CVEIntegratedGUI:
             pod_tb, text="声音：", bg="#f5f0e0", font=("Microsoft YaHei", 9),
         ).pack(side=tk.LEFT, padx=(8, 2))
 
-        self.tts_voice_var = tk.StringVar()
+        self.tts_voice_var = tk.StringVar(value="默认声音")
         self.tts_voice_combo = ttk.Combobox(
             pod_tb, textvariable=self.tts_voice_var,
             state="readonly", width=28, font=("Microsoft YaHei", 9),
+            values=["默认声音"],
         )
         self.tts_voice_combo.pack(side=tk.LEFT, padx=(0, 10))
+        self.tts_voice_combo.current(0)
+        self._tts_voice_names = [""]
 
         self.tts_play_btn = tk.Button(
             pod_tb, text="▶ 播放", command=self._play_podcast_tts,
@@ -1787,24 +1790,29 @@ foreach ($tokenName in $targets.Keys) {
                 voices = [("默认声音", "")]
 
             def _update():
-                labels = [v[0] for v in voices]
-                self.tts_voice_combo["values"] = labels
-                self.tts_voice_combo.current(0)
-                self._tts_voice_names = [v[1] for v in voices]
+                try:
+                    labels = [v[0] for v in voices]
+                    self.tts_voice_combo.configure(values=labels)
+                    self._tts_voice_names = [v[1] for v in voices]
+                    if labels:
+                        self.tts_voice_var.set(labels[0])
+                        self.tts_voice_combo.current(0)
+                except Exception as update_error:
+                    self.log(f"更新 TTS 声音下拉框失败: {update_error}")
 
-            # 延迟调度，等主线程事件循环就绪；失败时存入属性供重试
+            # 主线程更新下拉框；若事件循环尚未稳定，再补一次重试
             self._pending_tts_voices = voices
-            for delay in (500, 1500, 3000):
+            for delay in (0, 500, 1500):
                 try:
                     self.root.after(delay, _update)
-                    break
                 except RuntimeError:
                     continue
 
         except Exception as e:
             try:
                 self.root.after(1000, self.log, f"加载 TTS 声音失败: {e}")
-                self.root.after(1000, lambda: self.tts_voice_combo.config(values=["默认声音"]))
+                self.root.after(1000, lambda: self.tts_voice_combo.configure(values=["默认声音"]))
+                self.root.after(1000, lambda: self.tts_voice_var.set("默认声音"))
             except RuntimeError:
                 pass
             self._tts_voice_names = [""]
@@ -3347,10 +3355,10 @@ foreach ($tokenName in $targets.Keys) {
         )
         matched_delete_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        tk.Label(search_frame, text="(支持 CVE编号、Dell公告ID 搜索；Ctrl/Shift 多选后可删除)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
+        tk.Label(search_frame, text="(支持 CVE编号、Dell公告ID、受影响产品 搜索；Ctrl/Shift 多选后可删除)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
 
         # 创建 Treeview 来展示关联数据
-        columns = ("CVE ID", "严重等级", "CVSS评分", "Dell公告", "影响等级", "公告内容")
+        columns = ("CVE ID", "严重等级", "CVSS评分", "Dell公告", "影响等级", "受影响产品", "公告内容")
 
         # 创建滚动条
         tree_scroll_y = tk.Scrollbar(data_container, orient=tk.VERTICAL)
@@ -3375,6 +3383,7 @@ foreach ($tokenName in $targets.Keys) {
         self.matched_tree.heading("CVSS评分", text="CVSS 评分")
         self.matched_tree.heading("Dell公告", text="Dell 公告 ID")
         self.matched_tree.heading("影响等级", text="影响等级")
+        self.matched_tree.heading("受影响产品", text="受影响产品")
         self.matched_tree.heading("公告内容", text="公告内容")
 
         self.matched_tree.column("CVE ID", width=150, minwidth=100, anchor="center")
@@ -3382,7 +3391,8 @@ foreach ($tokenName in $targets.Keys) {
         self.matched_tree.column("CVSS评分", width=100, minwidth=80, anchor="center")
         self.matched_tree.column("Dell公告", width=150, minwidth=100, anchor="center")
         self.matched_tree.column("影响等级", width=100, minwidth=80, anchor="center")
-        self.matched_tree.column("公告内容", width=500, minwidth=300, anchor="w")
+        self.matched_tree.column("受影响产品", width=250, minwidth=150, anchor="w")
+        self.matched_tree.column("公告内容", width=400, minwidth=250, anchor="w")
 
         # 布局
         self.matched_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 0))
@@ -6386,6 +6396,9 @@ mindmap
         dialog.title(title)
         dialog.transient(self.root)
 
+        # 添加窗口控制按钮
+        self._add_window_controls(dialog)
+
         # 标题栏
         tk.Label(
             dialog, text=title,
@@ -6393,31 +6406,16 @@ mindmap
             bg="#2c3e50", fg="white", padx=10, pady=10
         ).pack(fill=tk.X)
 
-        # 内容区域
-        text_frame = tk.Frame(dialog)
-        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # 思维导图：在文本上方渲染可视化图
-        if artifact_type == "mindmap":
-            self._render_mindmap_canvas(text_frame, content)
-
-        text = scrolledtext.ScrolledText(
-            text_frame, wrap=tk.WORD, font=("Consolas", 15), bg="#f8f9fa"
-        )
-        text.pack(fill=tk.BOTH, expand=True)
-        text.insert(tk.END, content)
-        text.config(state=tk.DISABLED)
-
-        # 底部按钮
-        btn_frame = tk.Frame(dialog, bg="white", pady=10)
-        btn_frame.pack(fill=tk.X, padx=10)
+        # 工具栏（按钮区域，紧贴标题栏下方，始终可见）
+        btn_frame = tk.Frame(dialog, bg="#ecf0f1", pady=6)
+        btn_frame.pack(fill=tk.X, padx=0)
 
         tk.Button(
             btn_frame, text="💾 保存到文件",
             command=lambda: self._save_artifact_to_file(artifact_type, title, content),
             bg=self.success_color, fg="white",
             font=("Microsoft YaHei", 9, "bold"),
-            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
         ).pack(side=tk.LEFT, padx=5)
 
         tk.Button(
@@ -6425,7 +6423,7 @@ mindmap
             command=lambda: self._save_artifact_to_db(artifact_type, title, content),
             bg="#8e44ad", fg="white",
             font=("Microsoft YaHei", 9, "bold"),
-            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
         ).pack(side=tk.LEFT, padx=5)
 
         tk.Button(
@@ -6433,17 +6431,16 @@ mindmap
             command=lambda: self._copy_to_clipboard(content),
             bg=self.primary_color, fg="white",
             font=("Microsoft YaHei", 9, "bold"),
-            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
         ).pack(side=tk.LEFT, padx=5)
 
-        # 播客：添加播放/停止按钮
         if artifact_type == "podcast":
             tk.Button(
                 btn_frame, text="▶ 播放语音",
                 command=lambda: self._play_artifact_tts(content),
                 bg="#e67e22", fg="white",
                 font=("Microsoft YaHei", 9, "bold"),
-                relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+                relief=tk.FLAT, cursor="hand2", padx=12, pady=4
             ).pack(side=tk.LEFT, padx=5)
 
             tk.Button(
@@ -6451,25 +6448,40 @@ mindmap
                 command=self._stop_podcast_tts,
                 bg="#c0392b", fg="white",
                 font=("Microsoft YaHei", 9, "bold"),
-                relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+                relief=tk.FLAT, cursor="hand2", padx=12, pady=4
             ).pack(side=tk.LEFT, padx=5)
 
-        # 思维导图：添加保存图片按钮
         if artifact_type == "mindmap":
             tk.Button(
                 btn_frame, text="🖼 保存思维导图图片",
                 command=lambda: self._save_mindmap_image(content, title),
                 bg="#16a085", fg="white",
                 font=("Microsoft YaHei", 9, "bold"),
-                relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+                relief=tk.FLAT, cursor="hand2", padx=12, pady=4
             ).pack(side=tk.LEFT, padx=5)
 
         tk.Button(
             btn_frame, text="关闭", command=dialog.destroy,
             bg="#95a5a6", fg="white",
             font=("Microsoft YaHei", 9),
-            relief=tk.FLAT, cursor="hand2", padx=15, pady=5
+            relief=tk.FLAT, cursor="hand2", padx=12, pady=4
         ).pack(side=tk.RIGHT, padx=5)
+
+        # 内容区域
+        if artifact_type == "mindmap":
+            # 思维导图专用布局：Canvas 占满主区域，源码折叠在底部
+            self._render_mindmap_canvas_full(dialog, content)
+        else:
+            # 其他产物：纯文本展示
+            text_frame = tk.Frame(dialog)
+            text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+            text = scrolledtext.ScrolledText(
+                text_frame, wrap=tk.WORD, font=("Consolas", 15), bg="#f8f9fa"
+            )
+            text.pack(fill=tk.BOTH, expand=True)
+            text.insert(tk.END, content)
+            text.config(state=tk.DISABLED)
 
         self.learn_status_label.config(text=f"✅ {self._get_artifact_name(artifact_type)}已生成")
 
@@ -6696,6 +6708,78 @@ mindmap
         total_w = cx + PAD
         total_h = root["_h"] + 2 * PAD
         return nodes, edges, total_w, total_h
+
+    def _render_mindmap_canvas_full(self, parent, content: str):
+        """思维导图专用布局：Canvas 占满主区域，Mermaid 源码可折叠"""
+        try:
+            root_node = self._parse_mindmap_text(content)
+            nodes, edges, total_w, total_h = self._layout_mindmap(root_node)
+        except Exception as e:
+            tk.Label(parent, text=f"思维导图渲染失败: {e}", fg="red").pack()
+            return
+
+        # 思维导图 Canvas 区域（占满剩余空间）
+        canvas_container = tk.Frame(parent, bg="white", relief=tk.SOLID, bd=1)
+        canvas_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 0))
+
+        canvas = tk.Canvas(
+            canvas_container, bg="white",
+            scrollregion=(0, 0, total_w, total_h),
+            highlightthickness=0
+        )
+        hscroll = tk.Scrollbar(canvas_container, orient=tk.HORIZONTAL, command=canvas.xview)
+        vscroll = tk.Scrollbar(canvas_container, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.config(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
+
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vscroll.grid(row=0, column=1, sticky="ns")
+        hscroll.grid(row=1, column=0, sticky="ew")
+        canvas_container.columnconfigure(0, weight=1)
+        canvas_container.rowconfigure(0, weight=1)
+
+        self._draw_mindmap_on_canvas(canvas, nodes, edges)
+        self._last_mindmap_size = (total_w, total_h)
+        self._last_mindmap_nodes = nodes
+        self._last_mindmap_edges = edges
+
+        # 鼠标滚轮缩放/滚动
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+
+        # 可折叠的 Mermaid 源码区域
+        source_frame = tk.Frame(parent, bg="#f8f9fa")
+        source_frame.pack(fill=tk.X, padx=8, pady=(4, 8))
+
+        is_expanded = [False]
+        source_text = [None]
+
+        def toggle_source():
+            if is_expanded[0]:
+                source_text[0].pack_forget()
+                toggle_btn.config(text="▶ 显示 Mermaid 源码")
+                is_expanded[0] = False
+            else:
+                if source_text[0] is None:
+                    source_text[0] = scrolledtext.ScrolledText(
+                        source_frame, wrap=tk.WORD,
+                        font=("Consolas", 10), bg="#f8f9fa",
+                        height=8
+                    )
+                    source_text[0].insert(tk.END, content)
+                    source_text[0].config(state=tk.DISABLED)
+                source_text[0].pack(fill=tk.X, padx=4, pady=(0, 4))
+                toggle_btn.config(text="▼ 隐藏 Mermaid 源码")
+                is_expanded[0] = True
+
+        toggle_btn = tk.Button(
+            source_frame, text="▶ 显示 Mermaid 源码",
+            command=toggle_source,
+            bg="#bdc3c7", fg="#2c3e50",
+            font=("Microsoft YaHei", 8),
+            relief=tk.FLAT, cursor="hand2", padx=8, pady=2
+        )
+        toggle_btn.pack(anchor="w", padx=4, pady=4)
 
     def _render_mindmap_canvas(self, parent, content: str):
         """在 parent 中渲染思维导图 Canvas（带滚动条）"""
@@ -7280,6 +7364,9 @@ mindmap
         quiz_win.transient(self.root)
         quiz_win.grab_set()
 
+        # 添加窗口控制按钮
+        self._add_window_controls(quiz_win)
+
         # 状态变量
         quiz_state = {
             "index": 0,
@@ -7504,6 +7591,9 @@ mindmap
         fc_win.configure(bg="#f0f4f8")
         fc_win.transient(self.root)
         fc_win.grab_set()
+
+        # 添加窗口控制按钮
+        self._add_window_controls(fc_win)
 
         fc_state = {
             "index": 0,
@@ -9609,6 +9699,21 @@ mindmap
                             impact_match = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
                             impact = impact_match.group(1).capitalize() if impact_match else "N/A"
 
+                        # 提取受影响产品型号
+                        affected_products = []
+                        products_data = advisory.get("affected_products", [])
+                        for prod in products_data[:5]:  # 最多显示5个产品
+                            if isinstance(prod, dict):
+                                model = prod.get("product", "") or prod.get("name", "")
+                                if model:
+                                    affected_products.append(model)
+                            elif isinstance(prod, str):
+                                affected_products.append(prod)
+
+                        affected_products_str = "; ".join(affected_products) if affected_products else "N/A"
+                        if len(affected_products_str) > 100:
+                            affected_products_str = affected_products_str[:100] + "..."
+
                         # 公告内容（Dell 公告的标题）
                         dell_title = advisory.get("title", "")
                         if len(dell_title) > 150:
@@ -9626,6 +9731,7 @@ mindmap
                                 cve.get("cvss_score", "N/A"),
                                 advisory.get("dell_security_advisory", "N/A"),
                                 impact,
+                                affected_products_str,
                                 dell_title
                             ),
                             "tag": tag
@@ -9739,6 +9845,21 @@ mindmap
                             impact_match = re.search(r'\b(Critical|High|Medium|Low)\b', summary, re.IGNORECASE)
                             impact = impact_match.group(1).capitalize() if impact_match else "N/A"
 
+                        # 提取受影响产品型号
+                        affected_products = []
+                        products_data = advisory.get("affected_products", [])
+                        for prod in products_data[:5]:  # 最多显示5个产品
+                            if isinstance(prod, dict):
+                                model = prod.get("product", "") or prod.get("name", "")
+                                if model:
+                                    affected_products.append(model)
+                            elif isinstance(prod, str):
+                                affected_products.append(prod)
+
+                        affected_products_str = "; ".join(affected_products) if affected_products else "N/A"
+                        if len(affected_products_str) > 100:
+                            affected_products_str = affected_products_str[:100] + "..."
+
                         # 公告内容（Dell 公告的标题）
                         dell_title = advisory.get("title", "")
                         if len(dell_title) > 150:
@@ -9756,6 +9877,7 @@ mindmap
                                 cve.get("cvss_score", "N/A"),
                                 advisory.get("dell_security_advisory", "N/A"),
                                 impact,
+                                affected_products_str,
                                 dell_title
                             ),
                             "tag": tag
@@ -9799,7 +9921,7 @@ mindmap
     # ==================== 搜索过滤功能 ====================
 
     def filter_matched_data(self, *args):
-        """过滤关联数据（支持 CVE编号、Dell公告ID 搜索）"""
+        """过滤关联数据（支持 CVE编号、Dell公告ID、受影响产品 搜索）"""
         search_term = self.matched_search_var.get().strip()
         search_upper = search_term.upper()
 
@@ -9813,13 +9935,14 @@ mindmap
                 self.matched_tree.insert("", "end", values=item_data["values"], tags=(item_data["tag"],))
             return
 
-        # 在缓存中搜索（CVE ID 在 index 0，Dell公告 在 index 3）
+        # 在缓存中搜索（CVE ID 在 index 0，Dell公告 在 index 3，受影响产品 在 index 5）
         matched = []
         for item_data in self.matched_items_cache:
             values = item_data["values"]
             cve_id = str(values[0]).upper() if values[0] else ""
-            dell_id = str(values[3]).upper() if values[3] else ""
-            if search_upper in cve_id or search_upper in dell_id:
+            dell_id = str(values[3]).upper() if len(values) > 3 and values[3] else ""
+            products = str(values[5]).upper() if len(values) > 5 and values[5] else ""
+            if search_upper in cve_id or search_upper in dell_id or search_upper in products:
                 matched.append(item_data)
 
         for item_data in matched:
@@ -10214,6 +10337,9 @@ mindmap
         detail_window.title(f"CVE 详细信息 - {cve.get('cve_id')}")
         detail_window.transient(self.root)
 
+        # 添加窗口控制按钮
+        self._add_window_controls(detail_window)
+
         # 详细信息文本
         text = scrolledtext.ScrolledText(
             detail_window,
@@ -10278,6 +10404,9 @@ CWE 分类:
         detail_window = tk.Toplevel(self.root)
         detail_window.title(f"Dell 安全公告 - {advisory.get('dell_security_advisory', 'N/A')}")
         detail_window.transient(self.root)
+
+        # 添加窗口控制按钮
+        self._add_window_controls(detail_window)
 
         # 详细信息文本
         text = scrolledtext.ScrolledText(
@@ -10514,6 +10643,9 @@ Dell 安全公告详细信息
         dialog.title(f"Dell技术库 - {article_id}")
         dialog.transient(self.root)
 
+        # 添加窗口控制按钮
+        self._add_window_controls(dialog)
+
         # 标题栏
         header = f"文章编号: {article_id}  |  {article.get('title', '')}"
         tk.Label(
@@ -10607,7 +10739,7 @@ Dell 安全公告详细信息
                 messagebox.showwarning("提示", "请先选择要分析的关联数据")
                 return
 
-            # matched_tree 列: CVE ID, 严重等级, CVSS, Dell公告ID, 影响等级, 公告内容
+            # matched_tree 列: CVE ID, 严重等级, CVSS, Dell公告ID, 影响等级, 受影响产品, 公告内容
             item = self.matched_tree.item(selection[0])
             cve_id = item['values'][0]
             advisory_id = item['values'][3] if len(item['values']) > 3 else None
@@ -10909,6 +11041,9 @@ Qwen API密钥未设置。
             dialog.title(f"AI解决方案 - {cve_id}")
             dialog.transient(self.root)
             dialog.grab_set()
+
+            # 添加窗口控制按钮
+            self._add_window_controls(dialog)
 
             # 标题
             header_text = f"CVE编号: {cve_id}"
@@ -11449,6 +11584,9 @@ CVE编号: {cve_id} | 公告ID: {advisory_id}
         detail_window.title(f"关联详情 - {cve.get('cve_id')}")
         detail_window.transient(self.root)
 
+        # 添加窗口控制按钮
+        self._add_window_controls(detail_window)
+
         # 详细信息文本
         text = scrolledtext.ScrolledText(
             detail_window,
@@ -11904,6 +12042,55 @@ CVE 描述:
         finally:
             sys.exit(0)
 
+    def _add_window_controls(self, window):
+        """为弹窗启用系统原生的最小化、最大化、关闭按钮
+
+        Args:
+            window: Toplevel 窗口对象
+        """
+        # 在 Windows 上，Toplevel 窗口默认已经有系统原生的标题栏按钮
+        # 但如果设置了 transient，可能会隐藏最小化/最大化按钮
+        # 使用 ctypes 修改窗口样式，确保显示完整的标题栏按钮
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            # 等待窗口创建完成
+            window.update_idletasks()
+
+            # 获取窗口句柄
+            hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+            if not hwnd:
+                hwnd = window.winfo_id()
+
+            # 获取当前窗口样式
+            GWL_STYLE = -16
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+            WS_SYSMENU = 0x00080000
+
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+
+            # 添加最小化、最大化、系统菜单按钮
+            new_style = style | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU
+
+            # 设置新样式
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, new_style)
+
+            # 刷新窗口框架以应用新样式
+            SWP_FRAMECHANGED = 0x0020
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, 0, 0, 0, 0, 0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+            )
+
+        except Exception as e:
+            # 如果修改窗口样式失败，记录日志但不影响窗口显示
+            self.log(f"启用窗口控制按钮失败（可忽略）: {e}")
+
     def _center_window(self, window, width=None, height=None):
         """将弹窗居中显示在主窗口中央
 
@@ -11988,6 +12175,9 @@ CVE 描述:
         dialog = tk.Toplevel(self.root)
         dialog.title("数据库备份列表")
         dialog.transient(self.root)
+
+        # 添加窗口控制按钮
+        self._add_window_controls(dialog)
 
         tk.Label(
             dialog, text=f"共 {len(backups)} 个备份",
