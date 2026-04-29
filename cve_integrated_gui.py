@@ -9387,9 +9387,28 @@ mindmap
             existing_count = 0
             new_advisories = []  # 收集新增的公告
 
-            # 打开CSV文件并创建新的reader
-            with open(csv_file, 'r', encoding='utf-8-sig') as f:
-                reader = csv.DictReader(f)
+            # 打开CSV文件并创建新的reader（多编码回退）
+            f = None
+            for encoding in ('utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'latin-1'):
+                try:
+                    f = open(csv_file, 'r', encoding=encoding)
+                    # 试读一小段验证编码
+                    f.read(4096)
+                    f.seek(0)
+                    self.log_queue.put(f"CSV 文件编码: {encoding}")
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    if f:
+                        f.close()
+                        f = None
+                    continue
+
+            if not f:
+                raise ValueError(f"无法识别 CSV 文件编码: {csv_file}")
+
+            reader = csv.DictReader(f)
+
+            try:
 
                 for row in reader:
                     title_field = row.get('TITLE', '').strip()
@@ -9448,6 +9467,8 @@ mindmap
                         existing_count += 1
 
                     dell_data.append(advisory)
+            finally:
+                f.close()
 
             # 发送日志到队列
             self.log_queue.put(f"✓ 成功加载Dell CSV数据: {Path(csv_file).name}")
