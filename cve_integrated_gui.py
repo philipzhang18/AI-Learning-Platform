@@ -3391,7 +3391,7 @@ foreach ($tokenName in $targets.Keys) {
         self.matched_tree.column("CVSS评分", width=100, minwidth=80, anchor="center")
         self.matched_tree.column("Dell公告", width=150, minwidth=100, anchor="center")
         self.matched_tree.column("影响等级", width=100, minwidth=80, anchor="center")
-        self.matched_tree.column("受影响产品", width=250, minwidth=150, anchor="w")
+        self.matched_tree.column("受影响产品", width=350, minwidth=200, anchor="w")
         self.matched_tree.column("公告内容", width=400, minwidth=250, anchor="w")
 
         # 布局
@@ -9803,7 +9803,7 @@ mindmap
                         # 提取受影响产品型号
                         affected_products = []
                         products_data = advisory.get("affected_products", [])
-                        for prod in products_data[:5]:
+                        for prod in products_data:
                             if isinstance(prod, dict):
                                 model = prod.get("product", "") or prod.get("name", "")
                                 if model and model not in ("如标题", "详见公告"):
@@ -9820,8 +9820,8 @@ mindmap
                                     affected_products.append(name)
 
                         affected_products_str = "; ".join(affected_products) if affected_products else "N/A"
-                        if len(affected_products_str) > 100:
-                            affected_products_str = affected_products_str[:100] + "..."
+                        if len(affected_products_str) > 300:
+                            affected_products_str = affected_products_str[:300] + "..."
 
                         # 公告内容（Dell 公告的标题）
                         dell_title = advisory.get("title", "")
@@ -9957,7 +9957,7 @@ mindmap
                         # 提取受影响产品型号
                         affected_products = []
                         products_data = advisory.get("affected_products", [])
-                        for prod in products_data[:5]:
+                        for prod in products_data:
                             if isinstance(prod, dict):
                                 model = prod.get("product", "") or prod.get("name", "")
                                 if model and model not in ("如标题", "详见公告"):
@@ -9974,8 +9974,8 @@ mindmap
                                     affected_products.append(name)
 
                         affected_products_str = "; ".join(affected_products) if affected_products else "N/A"
-                        if len(affected_products_str) > 100:
-                            affected_products_str = affected_products_str[:100] + "..."
+                        if len(affected_products_str) > 300:
+                            affected_products_str = affected_products_str[:300] + "..."
 
                         # 公告内容（Dell 公告的标题）
                         dell_title = advisory.get("title", "")
