@@ -3647,7 +3647,7 @@ foreach ($tokenName in $targets.Keys) {
         # ── 上半部分：数据展示区 ──
         data_container = tk.Frame(paned, bg="white")
 
-        columns = ("文章编号", "标题", "解决方案预览", "采集时间")
+        columns = ("文章编号", "标题", "影响等级", "受影响产品", "解决方案", "采集时间")
 
         tree_scroll_y = tk.Scrollbar(data_container, orient=tk.VERTICAL)
         tree_scroll_x = tk.Scrollbar(data_container, orient=tk.HORIZONTAL)
@@ -3667,17 +3667,27 @@ foreach ($tokenName in $targets.Keys) {
 
         self.kb_tree.heading("文章编号", text="文章编号")
         self.kb_tree.heading("标题", text="标题")
-        self.kb_tree.heading("解决方案预览", text="解决方案预览")
+        self.kb_tree.heading("影响等级", text="影响等级")
+        self.kb_tree.heading("受影响产品", text="受影响产品")
+        self.kb_tree.heading("解决方案", text="解决方案")
         self.kb_tree.heading("采集时间", text="采集时间")
 
         self.kb_tree.column("文章编号", width=130, minwidth=100, anchor="center")
-        self.kb_tree.column("标题", width=400, minwidth=200, anchor="w")
-        self.kb_tree.column("解决方案预览", width=300, minwidth=200, anchor="w")
-        self.kb_tree.column("采集时间", width=160, minwidth=120, anchor="center")
+        self.kb_tree.column("标题", width=300, minwidth=200, anchor="w")
+        self.kb_tree.column("影响等级", width=100, minwidth=70, anchor="center")
+        self.kb_tree.column("受影响产品", width=250, minwidth=150, anchor="w")
+        self.kb_tree.column("解决方案", width=250, minwidth=150, anchor="w")
+        self.kb_tree.column("采集时间", width=140, minwidth=100, anchor="center")
 
         tree_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
         tree_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.kb_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 按影响等级配色
+        self.kb_tree.tag_configure("Critical", background="#ffebee", foreground="#b71c1c")
+        self.kb_tree.tag_configure("High", background="#fff3e0", foreground="#e65100")
+        self.kb_tree.tag_configure("Medium", background="#fff9c4", foreground="#f57f17")
+        self.kb_tree.tag_configure("Low", background="#f1f8e9", foreground="#33691e")
 
         self.kb_tree.bind("<Double-1>", self.on_dell_kb_item_double_click)
 
@@ -8481,12 +8491,25 @@ mindmap
                 except (ValueError, TypeError):
                     pass
 
+                # 从 content 中提取影响等级
+                impact = ""
+                if content:
+                    impact_match = re.search(r'\b(Critical|High|Medium|Low)\b', content or "", re.IGNORECASE)
+                    if impact_match:
+                        impact = impact_match.group(1).capitalize()
+                if not impact:
+                    impact = "N/A"
+
+                # 从 content 中提取受影响产品型号
+                affected_products_str = self._extract_kb_affected_products(content or "")
+
                 # 解决方案预览
                 sol_preview = (solution or "")[:120].replace('\n', ' ')
 
                 self.kb_tree.insert(
                     "", tk.END,
-                    values=(article_id, (title or "")[:100], sol_preview, time_str)
+                    values=(article_id, (title or "")[:100], impact, affected_products_str, sol_preview, time_str),
+                    tags=(impact,) if impact in ["Critical", "High", "Medium", "Low"] else ()
                 )
                 self.dell_kb_data.append({
                     'article_id': article_id,
@@ -8500,6 +8523,53 @@ mindmap
             self.log(f"Dell技术库已加载 {len(rows)} 条文章")
         except Exception as e:
             self.log(f"加载Dell技术库失败: {e}")
+
+    def _extract_kb_affected_products(self, content: str) -> str:
+        """从Dell技术库文章内容中提取受影响产品型号
+
+        Args:
+            content: 文章内容文本
+
+        Returns:
+            产品型号字符串（分号分隔，最多5个）
+        """
+        if not content:
+            return "N/A"
+
+        affected_products = []
+
+        # 尝试匹配常见的产品型号模式
+        # 模式1: "Affected Products:" 或 "Impacted Products:" 后的内容
+        patterns = [
+            r'(?:Affected|Impacted)\s+Products?[:\s]+([^\n]+(?:\n(?!\n)[^\n]+)*)',
+            r'Product[s]?\s+Affected[:\s]+([^\n]+(?:\n(?!\n)[^\n]+)*)',
+            r'Dell\s+([A-Z][A-Za-z0-9\s\-]+(?:Server|System|PowerEdge|Integrated|Storage)[A-Za-z0-9\s\-]*)',
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE | re.MULTILINE)
+            for match in matches[:5]:  # 最多5个匹配
+                # 清理匹配结果
+                product = match.strip()
+                # 移除多余的空白和换行
+                product = re.sub(r'\s+', ' ', product)
+                # 截断过长的产品名
+                if len(product) > 60:
+                    product = product[:60]
+                if product and product not in affected_products:
+                    affected_products.append(product)
+                if len(affected_products) >= 5:
+                    break
+            if affected_products:
+                break
+
+        if not affected_products:
+            return "N/A"
+
+        result = "; ".join(affected_products)
+        if len(result) > 100:
+            result = result[:100] + "..."
+        return result
 
     def filter_dell_kb_data(self):
         """搜索Dell技术库文章"""
@@ -8531,11 +8601,16 @@ mindmap
                     time_str = dt.strftime('%Y-%m-%d %H:%M')
                 except (ValueError, TypeError):
                     pass
+                content = article.get('content', '') or ''
+                impact_match = re.search(r'\b(Critical|High|Medium|Low)\b', content, re.IGNORECASE)
+                impact = impact_match.group(1).capitalize() if impact_match else "N/A"
+                affected_products_str = self._extract_kb_affected_products(content)
                 sol_preview = (article.get('solution', '') or '')[:120].replace('\n', ' ')
                 self.kb_tree.insert(
                     "", tk.END,
                     values=(article['article_id'], (article.get('title', '') or '')[:100],
-                            sol_preview, time_str)
+                            impact, affected_products_str, sol_preview, time_str),
+                    tags=(impact,) if impact in ["Critical", "High", "Medium", "Low"] else ()
                 )
             self.log(f"Dell技术库搜索到 {len(results)} 条匹配记录")
             return
@@ -8562,10 +8637,14 @@ mindmap
                     time_str = dt.strftime('%Y-%m-%d %H:%M')
                 except (ValueError, TypeError):
                     pass
+                impact_match = re.search(r'\b(Critical|High|Medium|Low)\b', content or "", re.IGNORECASE)
+                impact = impact_match.group(1).capitalize() if impact_match else "N/A"
+                affected_products_str = self._extract_kb_affected_products(content or "")
                 sol_preview = (solution or "")[:120].replace('\n', ' ')
                 self.kb_tree.insert(
                     "", tk.END,
-                    values=(article_id, (title or "")[:100], sol_preview, time_str)
+                    values=(article_id, (title or "")[:100], impact, affected_products_str, sol_preview, time_str),
+                    tags=(impact,) if impact in ["Critical", "High", "Medium", "Low"] else ()
                 )
             self.log(f"数据库搜索到 {len(rows)} 条Dell技术库匹配记录")
         except Exception as e:
