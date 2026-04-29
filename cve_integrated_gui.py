@@ -3227,7 +3227,7 @@ foreach ($tokenName in $targets.Keys) {
         tk.Label(search_frame, text="(支持 公告ID、CVE ID、标题、产品搜索；Ctrl/Shift 多选后可删除)", bg="white", font=("Microsoft YaHei", 9), fg="gray").pack(side=tk.LEFT)
 
         # 创建 Treeview 来展示 Dell 安全公告
-        columns = ("公告ID", "公告影响等级", "标题", "CVE IDs", "发布日期")
+        columns = ("公告ID", "受影响产品", "公告影响等级", "标题", "CVE IDs", "发布日期")
 
         # 创建滚动条
         tree_scroll_y = tk.Scrollbar(data_container, orient=tk.VERTICAL)
@@ -3248,13 +3248,15 @@ foreach ($tokenName in $targets.Keys) {
 
         # 设置列标题和宽度
         self.dell_tree.heading("公告ID", text="公告 ID")
+        self.dell_tree.heading("受影响产品", text="受影响产品")
         self.dell_tree.heading("公告影响等级", text="影响等级")
         self.dell_tree.heading("标题", text="标题")
         self.dell_tree.heading("CVE IDs", text="相关 CVE")
         self.dell_tree.heading("发布日期", text="发布日期")
 
-        self.dell_tree.column("公告ID", width=150, minwidth=100, anchor="center")
-        self.dell_tree.column("公告影响等级", width=100, minwidth=70, anchor="center")
+        self.dell_tree.column("公告ID", width=140, minwidth=100, anchor="center")
+        self.dell_tree.column("受影响产品", width=280, minwidth=150, anchor="w")
+        self.dell_tree.column("公告影响等级", width=90, minwidth=70, anchor="center")
         self.dell_tree.column("标题", width=500, minwidth=300, anchor="w")
         self.dell_tree.column("CVE IDs", width=300, minwidth=200, anchor="w")
         self.dell_tree.column("发布日期", width=150, minwidth=100, anchor="center")
@@ -9572,6 +9574,34 @@ mindmap
 
         return False
 
+    def _extract_dell_advisory_products(self, advisory: dict) -> str:
+        """从 Dell 安全公告数据中提取受影响产品字符串（通用方法）"""
+        affected_products = []
+        products_data = advisory.get("affected_products", [])
+        for prod in products_data:
+            if isinstance(prod, dict):
+                model = prod.get("product", "") or prod.get("name", "") or prod.get("model", "")
+            elif isinstance(prod, str):
+                model = prod
+            else:
+                continue
+            model = model.strip()
+            if not model or self._is_invalid_product_name(model):
+                continue
+            affected_products.append(model)
+
+        if not affected_products:
+            title_products = self._extract_products_from_dell_title(advisory.get("title", ""))
+            for tp in title_products:
+                name = tp.get("name", "")
+                if name:
+                    affected_products.append(name)
+
+        result = "; ".join(affected_products) if affected_products else "N/A"
+        if len(result) > 300:
+            result = result[:300] + "..."
+        return result
+
 
     def parse_dell_date(self, date_str):
         """解析Dell日期格式 (例如: OCT 29 2025) 为ISO格式"""
@@ -9763,11 +9793,15 @@ mindmap
             else:
                 severity_level = "N/A"
 
+        # 提取受影响产品
+        affected_products_str = self._extract_dell_advisory_products(advisory)
+
         self.dell_tree.insert(
             "",
             "end",
             values=(
                 advisory.get("dell_security_advisory", "N/A"),
+                affected_products_str,
                 severity_level,
                 advisory.get("title", ""),
                 cve_ids_str,
