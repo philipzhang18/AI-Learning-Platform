@@ -8518,26 +8518,34 @@ mindmap
         if not content:
             return "N/A"
 
-        # 优先匹配"受影响的产品"标题下的内容（中文）
-        # 示例：#### 受影响的产品\n\nPowerMax, PowerMaxOS 5978, VMAX All Flash
-        pattern_cn = r'#+\s*受影响的产品\s*\n+([^\n#]+(?:\n(?!#+)[^\n]+)*)'
-        match = re.search(pattern_cn, content, re.IGNORECASE | re.MULTILINE)
+        # 支持多种产品标题格式：#### 产品 / #### 受影响的产品 / #### Affected Products
+        patterns = [
+            r'#{2,4}\s*产品\s*\n+([^\n#]+(?:\n(?!#{2,5})[^\n]+)*)',
+            r'#{2,4}\s*受影响的产品\s*\n+([^\n#]+(?:\n(?!#{2,5})[^\n]+)*)',
+            r'#{2,4}\s*(?:Affected|Impacted)\s+Products?\s*\n+([^\n#]+(?:\n(?!#{2,5})[^\n]+)*)',
+        ]
 
-        if not match:
-            # 匹配英文标题 "Affected Products" 或 "Impacted Products"
-            pattern_en = r'#+\s*(?:Affected|Impacted)\s+Products?\s*\n+([^\n#]+(?:\n(?!#+)[^\n]+)*)'
-            match = re.search(pattern_en, content, re.IGNORECASE | re.MULTILINE)
+        # 遍历所有模式和所有匹配，取第一个有效的产品列表
+        for pattern in patterns:
+            matches = list(re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE))
+            for match in matches:
+                products_text = match.group(1).strip()
+                # 清理文本：移除多余空白、换行和 Markdown 格式符号
+                products_text = re.sub(r'\s+', ' ', products_text)
+                products_text = re.sub(r'[*_`]', '', products_text)
 
-        if match:
-            products_text = match.group(1).strip()
-            # 清理文本：移除多余空白、换行
-            products_text = re.sub(r'\s+', ' ', products_text)
-            # 移除可能的 Markdown 格式符号
-            products_text = re.sub(r'[*_`]', '', products_text)
-            # 截断过长内容
-            if len(products_text) > 150:
-                products_text = products_text[:150] + "..."
-            return products_text if products_text else "N/A"
+                # 过滤无效内容
+                if not products_text:
+                    continue
+                if products_text in ("NA", "N/A"):
+                    continue
+                if "Provide Feedback" in products_text or "提供反馈" in products_text:
+                    continue
+
+                # 截断过长内容
+                if len(products_text) > 200:
+                    products_text = products_text[:200] + "..."
+                return products_text
 
         return "N/A"
 
