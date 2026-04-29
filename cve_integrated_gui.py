@@ -9388,24 +9388,21 @@ mindmap
             new_advisories = []  # 收集新增的公告
 
             # 打开CSV文件并创建新的reader（多编码回退）
-            f = None
+            detected_encoding = None
+            raw = open(csv_file, 'rb').read()
             for encoding in ('utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'latin-1'):
                 try:
-                    f = open(csv_file, 'r', encoding=encoding)
-                    # 试读一小段验证编码
-                    f.read(4096)
-                    f.seek(0)
-                    self.log_queue.put(f"CSV 文件编码: {encoding}")
+                    raw.decode(encoding)
+                    detected_encoding = encoding
                     break
                 except (UnicodeDecodeError, UnicodeError):
-                    if f:
-                        f.close()
-                        f = None
                     continue
 
-            if not f:
-                raise ValueError(f"无法识别 CSV 文件编码: {csv_file}")
+            if not detected_encoding:
+                detected_encoding = 'latin-1'  # latin-1 永远不会失败
 
+            self.log_queue.put(f"CSV 文件编码: {detected_encoding}")
+            f = open(csv_file, 'r', encoding=detected_encoding)
             reader = csv.DictReader(f)
 
             try:
