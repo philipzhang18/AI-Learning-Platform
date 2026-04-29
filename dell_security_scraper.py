@@ -153,8 +153,11 @@ class DellSecurityScraper:
             "Dell security advisory Avamar NetWorker Data Domain",
         ]
 
+        exa_credits_exhausted = False
         async with aiohttp.ClientSession() as session:
             for query in queries:
+                if exa_credits_exhausted:
+                    break
                 try:
                     payload = {
                         "query": query,
@@ -182,11 +185,22 @@ class DellSecurityScraper:
                                     all_links[dsa_id] = r["url"]
                                     new_count += 1
                             log(f"  query [{query[:40]}...]: {len(results)} results, {new_count} new DSA")
+                        elif resp.status == 402:
+                            error_body = await resp.text()
+                            log(f"  query [{query[:40]}...]: HTTP 402 - Exa API 额度已用完")
+                            if "NO_MORE_CREDITS" in error_body:
+                                log("⚠️  Exa API 额度耗尽，停止后续 Exa 请求，将使用备用策略")
+                                exa_credits_exhausted = True
+                                break
                         else:
                             log(f"  query [{query[:40]}...]: HTTP {resp.status}")
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     log(f"  query [{query[:40]}...]: error {e}")
+
+        if exa_credits_exhausted and not all_links:
+            log("Exa API 额度耗尽且未发现任何公告，将跳过策略1")
+            return {}
 
         return all_links
 
@@ -221,6 +235,8 @@ class DellSecurityScraper:
                             if dsa_id:
                                 links[dsa_id] = r["url"]
                         logger.info(f"Exa search: {len(results)} results -> {len(links)} DSA links")
+                    elif resp.status == 402:
+                        logger.warning("Exa search HTTP 402 - API 额度已用完，跳过")
                     else:
                         logger.warning(f"Exa search HTTP {resp.status}")
         except Exception as e:
@@ -410,6 +426,8 @@ class DellSecurityScraper:
                         results = (await resp.json()).get("results", [])
                         if results:
                             return results[0].get("text", "")
+                    elif resp.status == 402:
+                        logger.warning(f"Exa contents HTTP 402 - API 额度已用完")
                     else:
                         logger.warning(f"Exa contents HTTP {resp.status}")
         except Exception as e:
@@ -912,16 +930,24 @@ class DellSecurityScraper:
         # 并发补全缺失的 DSA
         advisories = []
         semaphore = asyncio.Semaphore(5)
+        exa_exhausted = False
 
         async def fetch_missing_one(index, dsa_id):
+            nonlocal exa_exhausted
             async with semaphore:
+                if exa_exhausted:
+                    return None
                 try:
-                    # 使用 Exa 搜索该 DSA ID 的真实 URL
                     url = None
                     if exa_api_key:
                         url = await self._search_dsa_via_exa(dsa_id, exa_api_key)
 
-                    # Exa 找不到 → 跳过（直接 URL 会被 Dell CDN 拦截）
+                    if url == "__EXA_402__":
+                        if not exa_exhausted:
+                            exa_exhausted = True
+                            log("⚠️  Exa API 额度耗尽，停止历史缝隙补全（请充值 Exa 额度后重试）")
+                        return None
+
                     if not url:
                         return None
 
@@ -951,7 +977,11 @@ class DellSecurityScraper:
         return advisories
 
     async def _search_dsa_via_exa(self, dsa_id: str, api_key: str) -> Optional[str]:
-        """使用 Exa 搜索单个 DSA ID 的真实 URL"""
+        """使用 Exa 搜索单个 DSA ID 的真实 URL
+
+        Returns:
+            URL 字符串, "__EXA_402__" 表示额度耗尽, None 表示未找到
+        """
         try:
             async with aiohttp.ClientSession() as session:
                 payload = {
@@ -975,6 +1005,8 @@ class DellSecurityScraper:
                             url = r.get("url", "")
                             if dsa_id.lower() in url.lower() or dsa_id.upper() in r.get("title", "").upper():
                                 return url
+                    elif resp.status == 402:
+                        return "__EXA_402__"
         except Exception as e:
             logger.warning(f"Exa search for {dsa_id} failed: {e}")
         return None
