@@ -10931,7 +10931,7 @@ Dell 安全公告详细信息
             solution_result = response.choices[0].message.content
 
             # 构造空的 dell_advisory_data 以复用显示逻辑
-            empty_dell = {"dell_security_advisory": "N/A", "title": ""}
+            empty_dell = {"dell_security_advisory": "NVD CVE数据", "title": ""}
             self.root.after(0, self._show_ai_solution_result, solution_result, cve_data, empty_dell)
 
         except ImportError:
@@ -11091,7 +11091,10 @@ Qwen API密钥未设置。
             # 标题
             header_text = f"CVE编号: {cve_id}"
             if advisory_id and advisory_id not in ("N/A", "NA"):
-                header_text += f"  |  Dell公告: {advisory_id}"
+                if advisory_id == "NVD CVE数据":
+                    header_text += f"  |  来源: NVD CVE数据"
+                else:
+                    header_text += f"  |  Dell公告: {advisory_id}"
             header_text += f"  |  分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
             tk.Label(
@@ -11250,8 +11253,9 @@ Qwen API密钥未设置。
                 for row in rows:
                     id, cve_id, advisory_id, analysis_time, status, result = row
 
-                    # 规范化空值显示
-                    advisory_id = advisory_id if advisory_id and advisory_id != "NA" else "N/A"
+                    # 规范化空值显示（保留 "NVD CVE数据"）
+                    if not advisory_id or advisory_id == "NA":
+                        advisory_id = "NVD CVE数据"
                     status = status if status else "N/A"
 
                     # 格式化时间戳
@@ -11310,9 +11314,15 @@ Qwen API密钥未设置。
                     self.solution_detail_text.config(state=tk.NORMAL)
                     self.solution_detail_text.delete(1.0, tk.END)
 
+                    # 根据来源显示不同标签
+                    if advisory_id and advisory_id not in ("N/A", "NA", "NVD CVE数据"):
+                        source_info = f"公告ID: {advisory_id}"
+                    else:
+                        source_info = f"数据来源: NVD CVE数据"
+
                     header = f"""
 【AI解决方案详情】
-CVE编号: {cve_id} | 公告ID: {advisory_id}
+CVE编号: {cve_id} | {source_info}
 分析时间: {history['time']} | 状态: {history['status']}
 {'=' * 80}
 
