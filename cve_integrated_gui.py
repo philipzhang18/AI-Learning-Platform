@@ -9389,13 +9389,14 @@ mindmap
 
             # 打开CSV文件并创建新的reader（多编码回退）
             detected_encoding = None
-            raw = open(csv_file, 'rb').read()
-            for encoding in ('utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'latin-1'):
+            for encoding in ('gbk', 'gb2312', 'utf-8-sig', 'utf-8', 'latin-1'):
                 try:
-                    raw.decode(encoding)
+                    # 尝试用该编码打开并读取整个文件
+                    with open(csv_file, 'r', encoding=encoding) as test_f:
+                        test_f.read()
                     detected_encoding = encoding
                     break
-                except (UnicodeDecodeError, UnicodeError):
+                except (UnicodeDecodeError, UnicodeError, LookupError):
                     continue
 
             if not detected_encoding:
