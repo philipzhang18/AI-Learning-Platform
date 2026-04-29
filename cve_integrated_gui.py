@@ -9411,6 +9411,9 @@ mindmap
                     # 获取影响级别
                     impact = row.get('IMPACT', '').strip()
 
+                    # 从标题中提取受影响产品（CSV 不含产品详情）
+                    affected_products = self._extract_products_from_dell_title(title)
+
                     # 构建Dell advisory数据
                     advisory = {
                         'dell_security_advisory': dsa_id,
@@ -9420,13 +9423,7 @@ mindmap
                         'link': f'https://www.dell.com/support/kbdoc/en-us/{dsa_id.lower().replace("dsa-", "")}',
                         'summary': f'{impact} severity security update.',
                         'description': title,
-                        'affected_products': [
-                            {
-                                'name': '如标题',
-                                'model': '如标题',
-                                'version_range': '如标题'
-                            }
-                        ],
+                        'affected_products': affected_products,
                         'solution': f'Refer to {dsa_id} for detailed remediation steps.',
                         'impact': impact,
                         'source': 'CSV Import'
@@ -9464,6 +9461,67 @@ mindmap
             self.log_queue.put(f"详细错误信息: {traceback.format_exc()}")
             # 即使失败也尝试刷新数据库显示
             self.dell_queue.put(('refresh_database', None))
+
+    def _extract_products_from_dell_title(self, title: str) -> list:
+        """从 Dell 安全公告标题中提取受影响产品名称
+
+        Args:
+            title: Dell 安全公告标题
+
+        Returns:
+            产品列表，格式: [{'name': 产品名, 'model': 产品名, 'version_range': ''}]
+        """
+        if not title:
+            return []
+
+        products = []
+
+        # 模式A: "Security Update for [产品名] for/Multiple..."
+        # 示例: "Security Update for Dell PowerScale OneFS Multiple Vulnerabilities"
+        pattern_a = r'Security Update for\s+(.+?)\s+(?:for|Multiple|Vulnerabilit)'
+        match = re.search(pattern_a, title, re.IGNORECASE)
+        if match:
+            product_text = match.group(1).strip()
+            # 处理 "and" 连接的多个产品
+            if ' and ' in product_text:
+                for p in product_text.split(' and '):
+                    p = p.strip()
+                    if p:
+                        products.append({'name': p, 'model': p, 'version_range': ''})
+            else:
+                products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+            return products
+
+        # 模式B: "[产品1], [产品2], ... Security Update"
+        # 示例: "Dell PowerMaxOS, Dell PowerMax EEM, ... Security Update for Multiple Vulnerabilities"
+        pattern_b = r'^(.+?)\s+Security Update'
+        match = re.search(pattern_b, title, re.IGNORECASE)
+        if match:
+            product_text = match.group(1).strip()
+            # 按逗号分隔产品列表
+            if ',' in product_text:
+                for p in product_text.split(','):
+                    p = p.strip()
+                    if p and len(p) > 3:  # 过滤过短的片段
+                        products.append({'name': p, 'model': p, 'version_range': ''})
+                return products
+            else:
+                products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+                return products
+
+        # 回退：如果标题中包含 "Dell" 关键词，提取整个标题作为产品名
+        if 'Dell' in title:
+            # 截取到第一个 "for" 或 "Security" 之前
+            for keyword in [' for ', ' Security', ' Multiple']:
+                if keyword in title:
+                    product_text = title.split(keyword)[0].strip()
+                    if product_text:
+                        products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+                        return products
+
+        # 最终回退：返回空列表
+        return []
+
 
     def parse_dell_date(self, date_str):
         """解析Dell日期格式 (例如: OCT 29 2025) 为ISO格式"""
@@ -9745,13 +9803,21 @@ mindmap
                         # 提取受影响产品型号
                         affected_products = []
                         products_data = advisory.get("affected_products", [])
-                        for prod in products_data[:5]:  # 最多显示5个产品
+                        for prod in products_data[:5]:
                             if isinstance(prod, dict):
                                 model = prod.get("product", "") or prod.get("name", "")
-                                if model:
+                                if model and model not in ("如标题", "详见公告"):
                                     affected_products.append(model)
-                            elif isinstance(prod, str):
+                            elif isinstance(prod, str) and prod not in ("如标题", "详见公告"):
                                 affected_products.append(prod)
+
+                        # 回退：从标题中提取产品名
+                        if not affected_products:
+                            title_products = self._extract_products_from_dell_title(advisory.get("title", ""))
+                            for tp in title_products[:5]:
+                                name = tp.get("name", "")
+                                if name:
+                                    affected_products.append(name)
 
                         affected_products_str = "; ".join(affected_products) if affected_products else "N/A"
                         if len(affected_products_str) > 100:
@@ -9891,13 +9957,21 @@ mindmap
                         # 提取受影响产品型号
                         affected_products = []
                         products_data = advisory.get("affected_products", [])
-                        for prod in products_data[:5]:  # 最多显示5个产品
+                        for prod in products_data[:5]:
                             if isinstance(prod, dict):
                                 model = prod.get("product", "") or prod.get("name", "")
-                                if model:
+                                if model and model not in ("如标题", "详见公告"):
                                     affected_products.append(model)
-                            elif isinstance(prod, str):
+                            elif isinstance(prod, str) and prod not in ("如标题", "详见公告"):
                                 affected_products.append(prod)
+
+                        # 回退：从标题中提取产品名
+                        if not affected_products:
+                            title_products = self._extract_products_from_dell_title(advisory.get("title", ""))
+                            for tp in title_products[:5]:
+                                name = tp.get("name", "")
+                                if name:
+                                    affected_products.append(name)
 
                         affected_products_str = "; ".join(affected_products) if affected_products else "N/A"
                         if len(affected_products_str) > 100:
