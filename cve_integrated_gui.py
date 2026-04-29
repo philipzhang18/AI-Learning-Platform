@@ -9628,7 +9628,6 @@ mindmap
             return datetime.now().isoformat()
 
         try:
-            from datetime import datetime
             # 月份映射
             months = {
                 'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4,
