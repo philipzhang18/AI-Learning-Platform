@@ -9522,6 +9522,48 @@ mindmap
         # 最终回退：返回空列表
         return []
 
+    def _is_invalid_product_name(self, name: str) -> bool:
+        """判断产品名称是否无效（需要过滤）
+
+        Args:
+            name: 产品名称
+
+        Returns:
+            True 表示无效，应该过滤掉
+        """
+        if not name or len(name) < 2:
+            return True
+
+        # 过滤占位符
+        if name in ("如标题", "详见公告", "NA", "N/A"):
+            return True
+
+        # 过滤包含特定关键词的无效内容
+        invalid_keywords = [
+            "Provide Feedback",
+            "提供反馈",
+            "Summary:",
+            "Link to",
+            "Customers can",
+            "The following",
+            "Multiple components",
+            "Affected products:",
+            "Registered Dell",
+            "[Dell Vulnerability",
+            "Product Security Information",
+            "This article applies",
+            "View More View Less",
+        ]
+        for keyword in invalid_keywords:
+            if keyword in name:
+                return True
+
+        # 过滤过长的文本（超过150字符，可能是描述性文本而非产品名）
+        if len(name) > 150:
+            return True
+
+        return False
+
 
     def parse_dell_date(self, date_str):
         """解析Dell日期格式 (例如: OCT 29 2025) 为ISO格式"""
@@ -9805,16 +9847,20 @@ mindmap
                         products_data = advisory.get("affected_products", [])
                         for prod in products_data:
                             if isinstance(prod, dict):
-                                model = prod.get("product", "") or prod.get("name", "")
-                                if model and model not in ("如标题", "详见公告"):
-                                    affected_products.append(model)
-                            elif isinstance(prod, str) and prod not in ("如标题", "详见公告"):
-                                affected_products.append(prod)
+                                model = prod.get("product", "") or prod.get("name", "") or prod.get("model", "")
+                            elif isinstance(prod, str):
+                                model = prod
+                            else:
+                                continue
+                            model = model.strip()
+                            if not model or self._is_invalid_product_name(model):
+                                continue
+                            affected_products.append(model)
 
                         # 回退：从标题中提取产品名
                         if not affected_products:
                             title_products = self._extract_products_from_dell_title(advisory.get("title", ""))
-                            for tp in title_products[:5]:
+                            for tp in title_products:
                                 name = tp.get("name", "")
                                 if name:
                                     affected_products.append(name)
@@ -9959,16 +10005,20 @@ mindmap
                         products_data = advisory.get("affected_products", [])
                         for prod in products_data:
                             if isinstance(prod, dict):
-                                model = prod.get("product", "") or prod.get("name", "")
-                                if model and model not in ("如标题", "详见公告"):
-                                    affected_products.append(model)
-                            elif isinstance(prod, str) and prod not in ("如标题", "详见公告"):
-                                affected_products.append(prod)
+                                model = prod.get("product", "") or prod.get("name", "") or prod.get("model", "")
+                            elif isinstance(prod, str):
+                                model = prod
+                            else:
+                                continue
+                            model = model.strip()
+                            if not model or self._is_invalid_product_name(model):
+                                continue
+                            affected_products.append(model)
 
                         # 回退：从标题中提取产品名
                         if not affected_products:
                             title_products = self._extract_products_from_dell_title(advisory.get("title", ""))
-                            for tp in title_products[:5]:
+                            for tp in title_products:
                                 name = tp.get("name", "")
                                 if name:
                                     affected_products.append(name)
