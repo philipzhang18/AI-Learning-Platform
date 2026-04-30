@@ -125,7 +125,9 @@ class CVEIntegratedGUI:
 
         # 数据存储
         self.cve_data = []
+        self.cve_ids_set = set()
         self.dell_advisories = []
+        self.dell_ids_set = set()
         self.matched_items_cache = []  # 关联数据缓存，用于搜索过滤
         self.is_collecting = False
         self.is_collecting_dell = False
@@ -1094,18 +1096,16 @@ class CVEIntegratedGUI:
         try:
             cursor = self.conn.cursor()
 
-            # 1. 获取所有Dell公告中的CVE IDs
-            cursor.execute('SELECT data FROM dell_advisories')
-            records = cursor.fetchall()
+            # 1. 获取所有Dell公告中的CVE IDs（只查 cve_ids 列，不解析 JSON）
+            cursor.execute('SELECT cve_ids FROM dell_advisories WHERE cve_ids IS NOT NULL AND cve_ids != ""')
 
             all_dell_cve_ids = set()
-            for record in records:
-                try:
-                    data = json.loads(record[0])
-                    cve_ids = data.get('cve_ids', [])
-                    all_dell_cve_ids.update(cve_ids)
-                except Exception:
-                    continue
+            for (cve_ids_str,) in cursor.fetchall():
+                if cve_ids_str:
+                    for cve_id in re.split(r'[,\s]+', cve_ids_str):
+                        cve_id = cve_id.strip()
+                        if cve_id.startswith('CVE-'):
+                            all_dell_cve_ids.add(cve_id)
 
             if not all_dell_cve_ids:
                 return 0
@@ -1197,12 +1197,16 @@ class CVEIntegratedGUI:
 
             records = cursor.fetchall()
             self.dell_advisories = []
+            self.dell_ids_set = set()
 
             for record in records:
                 try:
                     if record[0]:
                         data = json.loads(record[0])
                         self.dell_advisories.append(data)
+                        dsa_id = data.get('dell_security_advisory', '')
+                        if dsa_id:
+                            self.dell_ids_set.add(dsa_id)
                 except json.JSONDecodeError:
                     continue
 
@@ -9397,6 +9401,7 @@ mindmap
 
                 # 从数据库重新加载最新500条数据
                 self.cve_data = self.load_cve_data_from_db()
+                self.cve_ids_set = {cve.get('cve_id') for cve in self.cve_data if cve.get('cve_id')}
 
                 # 清空并重新加载树视图（只显示最新500条）
                 for item in self.nvd_tree.get_children():
@@ -9964,6 +9969,7 @@ mindmap
 
             # 从数据库加载所有数据
             self.cve_data = self.load_cve_data_from_db()
+            self.cve_ids_set = {cve.get('cve_id') for cve in self.cve_data if cve.get('cve_id')}
 
             # 添加到树视图
             for item in self.nvd_tree.get_children():
@@ -12367,10 +12373,10 @@ CVE 描述:
                             new_nvd_ids.add(cve_id)
                             new_nvd_items.append(data)
                 elif data_type == 'nvd':
-                    # ✅ 优化：直接添加到内存，无需重新加载数据库
-                    # 检查是否已存在（避免重复）
+                    # ✅ 优化：O(1) set 查重替代 O(n) 线性扫描
                     cve_id = data.get('cve_id', '')
-                    if cve_id and not any(cve.get('cve_id') == cve_id for cve in self.cve_data):
+                    if cve_id and cve_id not in self.cve_ids_set:
+                        self.cve_ids_set.add(cve_id)
                         self.cve_data.append(data)
                         new_nvd_items.append(data)
             except queue.Empty:
@@ -12423,14 +12429,13 @@ CVE 描述:
                         # 添加Dell数据
                         if payload:
                             dsa_id = payload.get('dell_security_advisory', '')
-                            # 只添加不重复的数据
-                            if dsa_id and not any(adv.get('dell_security_advisory') == dsa_id for adv in new_dell_items):
+                            if dsa_id and dsa_id not in self.dell_ids_set:
                                 new_dell_items.append(payload)
                 else:
-                    # ✅ 优化：收集数据，稍后批量处理
-                    # 检查是否已存在（避免重复）
+                    # ✅ 优化：O(1) set 查重替代 O(n) 线性扫描
                     dsa_id = data.get('dell_security_advisory', '')
-                    if dsa_id and not any(adv.get('dell_security_advisory') == dsa_id for adv in self.dell_advisories):
+                    if dsa_id and dsa_id not in self.dell_ids_set:
+                        self.dell_ids_set.add(dsa_id)
                         self.dell_advisories.append(data)
                         new_dell_items.append(data)
             except queue.Empty:
