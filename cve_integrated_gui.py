@@ -402,6 +402,7 @@ class CVEIntegratedGUI:
             # Index for Dell advisories
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_published_date ON dell_advisories(published_date)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_cve_ids ON dell_advisories(cve_ids)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dell_title ON dell_advisories(title)")
 
             # Index for AI solutions
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_solutions_cve ON ai_solutions(cve_id)")
@@ -434,6 +435,53 @@ class CVEIntegratedGUI:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_artifacts_session ON learn_artifacts(session_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_artifacts_topic ON learn_artifacts(topic)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_learn_artifacts_type ON learn_artifacts(artifact_type)")
+
+            # ── FTS5 全文索引（加速 LIKE '%keyword%' 搜索）──
+            cursor.execute('''
+                CREATE VIRTUAL TABLE IF NOT EXISTS cves_fts USING fts5(
+                    cve_id, data,
+                    content=cves, content_rowid=rowid
+                )
+            ''')
+            cursor.execute('''
+                CREATE VIRTUAL TABLE IF NOT EXISTS dell_fts USING fts5(
+                    dsa_id, title, cve_ids, data,
+                    content=dell_advisories, content_rowid=rowid
+                )
+            ''')
+
+            # FTS 同步触发器 — 插入/删除/更新时自动维护索引
+            cursor.executescript('''
+                CREATE TRIGGER IF NOT EXISTS cves_ai AFTER INSERT ON cves BEGIN
+                    INSERT INTO cves_fts(rowid, cve_id, data)
+                    VALUES (new.rowid, new.cve_id, new.data);
+                END;
+                CREATE TRIGGER IF NOT EXISTS cves_ad AFTER DELETE ON cves BEGIN
+                    INSERT INTO cves_fts(cves_fts, rowid, cve_id, data)
+                    VALUES ('delete', old.rowid, old.cve_id, old.data);
+                END;
+                CREATE TRIGGER IF NOT EXISTS cves_au AFTER UPDATE ON cves BEGIN
+                    INSERT INTO cves_fts(cves_fts, rowid, cve_id, data)
+                    VALUES ('delete', old.rowid, old.cve_id, old.data);
+                    INSERT INTO cves_fts(rowid, cve_id, data)
+                    VALUES (new.rowid, new.cve_id, new.data);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS dell_ai AFTER INSERT ON dell_advisories BEGIN
+                    INSERT INTO dell_fts(rowid, dsa_id, title, cve_ids, data)
+                    VALUES (new.rowid, new.dsa_id, new.title, new.cve_ids, new.data);
+                END;
+                CREATE TRIGGER IF NOT EXISTS dell_ad AFTER DELETE ON dell_advisories BEGIN
+                    INSERT INTO dell_fts(dell_fts, rowid, dsa_id, title, cve_ids, data)
+                    VALUES ('delete', old.rowid, old.dsa_id, old.title, old.cve_ids, old.data);
+                END;
+                CREATE TRIGGER IF NOT EXISTS dell_au AFTER UPDATE ON dell_advisories BEGIN
+                    INSERT INTO dell_fts(dell_fts, rowid, dsa_id, title, cve_ids, data)
+                    VALUES ('delete', old.rowid, old.dsa_id, old.title, old.cve_ids, old.data);
+                    INSERT INTO dell_fts(rowid, dsa_id, title, cve_ids, data)
+                    VALUES (new.rowid, new.dsa_id, new.title, new.cve_ids, new.data);
+                END;
+            ''')
 
             self.conn.commit()
         except sqlite3.Error as e:
@@ -488,9 +536,43 @@ class CVEIntegratedGUI:
                     self.log(f"数据库表迁移失败，将创建新表: {e}")
 
             self.conn.commit()
+
+            # ── 首次运行时填充 FTS5 索引 ──
+            self._rebuild_fts_if_needed()
+
         except sqlite3.Error as e:
             self.log(f"更新数据库表结构失败: {str(e)}")
-    
+
+    def _rebuild_fts_if_needed(self):
+        """首次运行或 FTS 索引为空时，从主表填充 FTS5 索引"""
+        try:
+            cursor = self.conn.cursor()
+
+            cursor.execute("SELECT COUNT(*) FROM cves")
+            cve_total = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM cves_fts")
+            fts_cve = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM dell_advisories")
+            dell_total = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM dell_fts")
+            fts_dell = cursor.fetchone()[0]
+
+            if cve_total > 0 and fts_cve == 0:
+                self.log(f"正在构建 CVE 全文索引（{cve_total} 条）...")
+                cursor.execute("INSERT INTO cves_fts(rowid, cve_id, data) SELECT rowid, cve_id, data FROM cves")
+                self.conn.commit()
+                self.log(f"CVE 全文索引构建完成")
+
+            if dell_total > 0 and fts_dell == 0:
+                self.log(f"正在构建 Dell 全文索引（{dell_total} 条）...")
+                cursor.execute("INSERT INTO dell_fts(rowid, dsa_id, title, cve_ids, data) SELECT rowid, dsa_id, title, cve_ids, data FROM dell_advisories")
+                self.conn.commit()
+                self.log(f"Dell 全文索引构建完成")
+
+        except sqlite3.Error as e:
+            self.log(f"FTS 索引构建失败（不影响正常使用）: {e}")
+
     def get_existing_cve_ids(self):
         """获取数据库中已存在的CVE IDs"""
         try:
@@ -10479,9 +10561,23 @@ mindmap
                 """, (f'%{search_upper}%',))
                 records = cursor.fetchall()
 
-            # 第三级：搜索 data JSON 字段（全表扫描，仅在前两级无结果时触发）
+            # 第三级：FTS5 全文搜索（替代 data LIKE，速度提升 100x+）
             if not records:
-                self.log_queue.put(f"CVE ID 无匹配，正在搜索详细数据（较慢）...")
+                self.log_queue.put(f"CVE ID 无匹配，正在全文搜索...")
+                fts_term = search_term.replace('"', '""')
+                try:
+                    cursor.execute("""
+                        SELECT c.data FROM cves_fts f
+                        JOIN cves c ON c.rowid = f.rowid
+                        WHERE cves_fts MATCH ?
+                        LIMIT 200
+                    """, (f'"{fts_term}"',))
+                    records = cursor.fetchall()
+                except sqlite3.OperationalError:
+                    pass
+
+            # 第四级：LIKE 回退（FTS 无结果或不可用时）
+            if not records:
                 cursor.execute("""
                     SELECT data FROM cves
                     WHERE data LIKE ?
@@ -10627,9 +10723,28 @@ mindmap
                 except json.JSONDecodeError:
                     continue
 
-            # 第二级：仅在前一级无结果时才搜索 data JSON 字段
+            # 第二级：FTS5 全文搜索（替代 data LIKE）
             if not results:
-                self.log_queue.put(f"在主要字段中未找到匹配，正在搜索详细数据（较慢）...")
+                self.log_queue.put(f"在主要字段中未找到匹配，正在全文搜索...")
+                fts_term = search_term.replace('"', '""')
+                try:
+                    cursor.execute("""
+                        SELECT d.data FROM dell_fts f
+                        JOIN dell_advisories d ON d.rowid = f.rowid
+                        WHERE dell_fts MATCH ?
+                        LIMIT 100
+                    """, (f'"{fts_term}"',))
+                    for (raw,) in cursor.fetchall():
+                        try:
+                            if raw:
+                                results.append(json.loads(raw))
+                        except json.JSONDecodeError:
+                            continue
+                except sqlite3.OperationalError:
+                    pass
+
+            # 第三级：LIKE 回退（FTS 无结果或不可用时）
+            if not results:
                 cursor.execute("""
                     SELECT data FROM dell_advisories
                     WHERE data LIKE ?
