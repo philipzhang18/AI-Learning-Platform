@@ -259,8 +259,17 @@ class CVECollector:
             "metrics": metrics,
             "references": references,
             "affected_products": affected_products,
+            "configurations": configurations,
             "weaknesses": weaknesses,
-            "source": "NVD"
+            "source": "NVD",
+            "source_identifier": cve.get("sourceIdentifier", ""),
+            "evaluator_comment": cve.get("evaluatorComment", ""),
+            "evaluator_solution": cve.get("evaluatorSolution", ""),
+            "evaluator_impact": cve.get("evaluatorImpact", ""),
+            "cisa_exploit_add": cve.get("cisaExploitAdd", ""),
+            "cisa_action_due": cve.get("cisaActionDue", ""),
+            "cisa_required_action": cve.get("cisaRequiredAction", ""),
+            "cisa_vulnerability_name": cve.get("cisaVulnerabilityName", ""),
         }
 
         return parsed_cve

@@ -10511,9 +10511,11 @@ mindmap
         for item in self.nvd_tree.get_children():
             self.nvd_tree.delete(item)
 
-        # 先在内存中搜索
+        # 先在内存中搜索（仅 NVD 来源）
         memory_results = []
         for cve in self.cve_data:
+            if cve.get("source", "NVD") != "NVD":
+                continue
             cve_id = cve.get("cve_id", "") or ""
             description = cve.get("description", "") or ""
             severity = cve.get("cvss_severity", "") or ""
@@ -10539,7 +10541,7 @@ mindmap
         ).start()
 
     def _search_nvd_from_database(self, search_term):
-        """从数据库搜索NVD数据（后台线程，分级搜索策略）"""
+        """从数据库搜索NVD数据（后台线程，分级搜索策略，仅返回 NVD 来源）"""
         try:
             search_upper = search_term.upper()
             cursor = self.conn.cursor()
@@ -10591,6 +10593,8 @@ mindmap
                 try:
                     if record[0]:
                         data = json.loads(record[0])
+                        if data.get("source", "NVD") != "NVD":
+                            continue
                         results.append(data)
                 except json.JSONDecodeError:
                     continue
