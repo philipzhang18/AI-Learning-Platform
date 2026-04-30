@@ -22,10 +22,21 @@ class DellSecurityScraper:
     def __init__(self):
         self.base_url = "https://www.dell.com/support/security/en-us/"
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
             'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Cache-Control': 'max-age=0',
+            'DNT': '1',
         }
 
     async def fetch_security_advisories(
@@ -390,13 +401,26 @@ class DellSecurityScraper:
     async def _fetch_raw_html(self, url):
         """HTTP 请求获取原始 HTML（用于解析表格结构）"""
         try:
-            async with aiohttp.ClientSession(headers=self.headers) as session:
+            jar = aiohttp.CookieJar()
+            async with aiohttp.ClientSession(headers=self.headers, cookie_jar=jar) as session:
+                # 先访问主页获取 cookies
+                if 'dell.com' in url:
+                    try:
+                        async with session.get(
+                            'https://www.dell.com',
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as _:
+                            pass
+                    except Exception:
+                        pass
                 async with session.get(
                     url,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if resp.status == 200:
                         return await resp.text()
+                    elif resp.status == 403:
+                        logger.warning(f"HTML fetch 403 Forbidden for {url}")
         except Exception as e:
             logger.warning(f"HTML fetch error for {url}: {e}")
         return ""

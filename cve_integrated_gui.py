@@ -8120,6 +8120,10 @@ mindmap
             if not content:
                 self.log_queue.put("回退：使用直接HTTP请求获取页面...")
                 content = self._fetch_with_requests(url)
+            # 3. Fallback：Selenium 浏览器渲染（绕过反爬虫）
+            if not content:
+                self.log_queue.put("回退：使用Selenium浏览器获取页面...")
+                content = self._fetch_with_selenium(url)
             if not content:
                 self.root.after(0, self._fetch_done, None,
                                 "❌ 无法获取页面内容，请检查URL是否有效或网络连接")
@@ -8188,22 +8192,36 @@ mindmap
         import requests as req
         from bs4 import BeautifulSoup
         try:
-            response = req.get(
-                url,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                },
-                timeout=30,
-            )
+            # 创建 session 以保持 cookies
+            session = req.Session()
+
+            # 增强的请求头，模拟真实浏览器
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Cache-Control': 'max-age=0',
+                'DNT': '1',
+            }
+
+            # 如果是 Dell 域名，先访问主页获取 cookies
+            if 'dell.com' in url:
+                try:
+                    session.get('https://www.dell.com', headers=headers, timeout=10)
+                except Exception:
+                    pass  # 忽略主页访问失败
+
+            response = session.get(url, headers=headers, timeout=30, allow_redirects=True)
             response.raise_for_status()
             self._last_fetched_html = response.text  # 保存原始HTML用于表格解析
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -8212,6 +8230,47 @@ mindmap
             return soup.get_text(separator='\n', strip=True)
         except Exception as e:
             self.log_queue.put(f"直接HTTP抓取失败: {e}")
+        return ""
+
+    def _fetch_with_selenium(self, url: str) -> str:
+        """使用Selenium浏览器获取页面内容（绕过反爬虫检测）"""
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
+            options = Options()
+            options.add_argument('--headless')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
+            options.add_experimental_option('excludeSwitches', ['enable-automation'])
+
+            driver = webdriver.Chrome(options=options)
+            try:
+                driver.get(url)
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+                import time
+                time.sleep(2)
+                self._last_fetched_html = driver.page_source
+                text = driver.find_element(By.TAG_NAME, "body").text
+                if text and len(text) > 500:
+                    self.log_queue.put(f"Selenium成功获取页面内容（{len(text)} 字符）")
+                    return text
+                else:
+                    self.log_queue.put(f"Selenium获取内容过短（{len(text)} 字符），可能被拦截")
+            finally:
+                driver.quit()
+        except ImportError:
+            self.log_queue.put("Selenium未安装，跳过浏览器回退策略")
+        except Exception as e:
+            self.log_queue.put(f"Selenium抓取失败: {e}")
         return ""
 
     def _extract_dsa_id_from_url(self, url: str) -> str:
@@ -8489,7 +8548,7 @@ mindmap
                 affected_products_str = self._extract_kb_affected_products(content or "")
 
                 # 解决方案预览
-                sol_preview = (solution or "")[:120].replace('\n', ' ')
+                sol_preview = self._extract_kb_solution(content or "", solution or "")
 
                 self.kb_tree.insert(
                     "", tk.END,
@@ -8549,7 +8608,103 @@ mindmap
                     products_text = products_text[:200] + "..."
                 return products_text
 
+        # 回退：从文档底部向上查找纯文本格式的"受影响的产品"（无markdown标题）
+        plain_patterns = [
+            r'受影响的产品\s*\n+([^\n]+)',
+            r'受影响产品\s*\n+([^\n]+)',
+            r'(?:Affected|Impacted)\s+Products?\s*\n+([^\n]+)',
+        ]
+
+        for pattern in plain_patterns:
+            # 从后向前查找最后一次出现（文档底部通常是最终版本）
+            matches = list(re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE))
+            if matches:
+                # 取最后一个匹配
+                match = matches[-1]
+                products_text = match.group(1).strip()
+                # 清理文本
+                products_text = re.sub(r'\s+', ' ', products_text)
+                products_text = re.sub(r'[*_`]', '', products_text)
+
+                # 过滤无效内容
+                if not products_text:
+                    continue
+                if products_text in ("NA", "N/A"):
+                    continue
+                if "Provide Feedback" in products_text or "提供反馈" in products_text:
+                    continue
+                # 过滤乱码文本（包含大量非ASCII字符）
+                if len([c for c in products_text if ord(c) > 127]) > len(products_text) * 0.5:
+                    continue
+
+                # 截断过长内容
+                if len(products_text) > 200:
+                    products_text = products_text[:200] + "..."
+                return products_text
+
         return "N/A"
+
+    def _extract_kb_solution(self, content: str, solution_field: str = "") -> str:
+        """从Dell技术库文章内容中提取解决方案摘要
+
+        优先从 content 正文中提取"解决方案"段落，回退到 solution 字段。
+        """
+        if content:
+            # 策略1: 纯文本格式 — 找正文中最后一个"解决方案"段落（跳过目录中的短标题）
+            for marker in ['解决方案', 'Resolution', 'Solution']:
+                positions = [m.start() for m in re.finditer(r'\n' + re.escape(marker) + r'\n', content)]
+                for pos in reversed(positions):
+                    after = content[pos + len(marker) + 2:]
+                    end_idx = len(after)
+                    for em in ['受影响的产品', 'Affected Product', '提供反馈', 'Provide Feedback',
+                               '文章属性', 'Article Properties', '其它信息', 'Additional Info',
+                               'DTA 信息', '法律免责声明', 'Legal Disclaimer']:
+                        eidx = after.find(em)
+                        if 0 < eidx < end_idx:
+                            end_idx = eidx
+                    sol = after[:end_idx].strip()
+                    if len(sol) > 30:
+                        sol = re.sub(r'\s+', ' ', sol)
+                        return sol[:300]
+
+            # 策略2: Markdown 格式 — ## 解决方案 / ## Resolution
+            md_patterns = [
+                r'#{2,4}\s*解决方案\s*\n+(.*?)(?=\n#{2,4}\s|\n受影响的产品|\n提供反馈|$)',
+                r'#{2,4}\s*(?:Resolution|Solution)\s*\n+(.*?)(?=\n#{2,4}\s|\nAffected Product|\nProvide Feedback|$)',
+            ]
+            for pattern in md_patterns:
+                matches = list(re.finditer(pattern, content, re.DOTALL | re.IGNORECASE))
+                for match in reversed(matches):
+                    sol = match.group(1).strip()
+                    sol = re.sub(r'[*_`]', '', sol)
+                    if len(sol) > 30:
+                        sol = re.sub(r'\s+', ' ', sol)
+                        return sol[:300]
+
+        # 策略3: 从 solution 字段中提取有效内容（过滤掉目录标题和乱码前缀）
+        if solution_field:
+            lines = solution_field.split('\n')
+            real_lines = []
+            skip_toc = True
+            toc_keywords = {'解决方案', 'Resolution', 'Solution', '受影响的产品', '提供反馈',
+                            'Affected Products', 'Provide Feedback', '其它信息', 'DTA 信息',
+                            '法律免责声明', 'Additional Info', 'Legal Disclaimer'}
+            for line in lines:
+                stripped = line.strip()
+                if skip_toc and (stripped in toc_keywords or stripped.startswith('##')):
+                    continue
+                if stripped.startswith('摘要:') or stripped.startswith('Summary:'):
+                    continue
+                if len(stripped) > 20:
+                    skip_toc = False
+                    real_lines.append(stripped)
+                elif not skip_toc and stripped:
+                    real_lines.append(stripped)
+            clean = ' '.join(real_lines).strip()
+            if len(clean) > 30:
+                return clean[:300]
+
+        return ""
 
     def filter_dell_kb_data(self):
         """搜索Dell技术库文章"""
@@ -8583,7 +8738,7 @@ mindmap
                     pass
                 content = article.get('content', '') or ''
                 affected_products_str = self._extract_kb_affected_products(content)
-                sol_preview = (article.get('solution', '') or '')[:120].replace('\n', ' ')
+                sol_preview = self._extract_kb_solution(content, article.get('solution', ''))
                 self.kb_tree.insert(
                     "", tk.END,
                     values=(article['article_id'], (article.get('title', '') or '')[:100],
@@ -8615,12 +8770,16 @@ mindmap
                 except (ValueError, TypeError):
                     pass
                 affected_products_str = self._extract_kb_affected_products(content or "")
-                sol_preview = (solution or "")[:120].replace('\n', ' ')
+                sol_preview = self._extract_kb_solution(content or "", solution or "")
                 self.kb_tree.insert(
                     "", tk.END,
                     values=(article_id, (title or "")[:100], affected_products_str, sol_preview, time_str)
                 )
-            self.log(f"数据库搜索到 {len(rows)} 条Dell技术库匹配记录")
+            if rows:
+                self.log(f"数据库搜索到 {len(rows)} 条Dell技术库匹配记录")
+            else:
+                self.log(f"未找到匹配 '{search_term}' 的Dell技术库文章")
+                messagebox.showinfo("搜索结果", f"未找到匹配 '{search_term}' 的Dell技术库文章")
         except Exception as e:
             self.log(f"数据库搜索Dell技术库失败: {e}")
 
@@ -10175,7 +10334,11 @@ mindmap
         for item_data in matched:
             self.matched_tree.insert("", "end", values=item_data["values"], tags=(item_data["tag"],))
 
-        self.log(f"关联数据搜索 '{search_term}'：找到 {len(matched)} 条匹配记录")
+        if matched:
+            self.log(f"关联数据搜索 '{search_term}'：找到 {len(matched)} 条匹配记录")
+        else:
+            self.log(f"未找到匹配 '{search_term}' 的关联数据")
+            messagebox.showinfo("搜索结果", f"未找到匹配 '{search_term}' 的关联数据")
 
     def delete_matched_selected(self):
         """删除关联列表中选中的记录（从 Dell 公告中移除对应 CVE 关联）"""
@@ -10347,6 +10510,8 @@ mindmap
                 self.log_queue.put(f"✓ 从数据库找到 {len(results)} 条匹配记录")
             else:
                 self.log_queue.put(f"未找到匹配 '{search_term}' 的数据")
+                # 使用默认参数捕获当前值，避免闭包问题
+                self.root.after(0, lambda term=search_term: messagebox.showinfo("搜索结果", f"未找到匹配 '{term}' 的NVD CVE数据"))
 
         except sqlite3.Error as e:
             self.log_queue.put(f"数据库搜索失败: {str(e)}")
@@ -10492,6 +10657,8 @@ mindmap
                 self.log_queue.put(f"✓ 数据库中找到 {len(results)} 条匹配 '{search_term}' 的记录")
             else:
                 self.log_queue.put(f"未找到匹配 '{search_term}' 的Dell公告（已搜索全部数据库）")
+                # 使用默认参数捕获当前值，避免闭包问题
+                self.root.after(0, lambda term=search_term: messagebox.showinfo("搜索结果", f"未找到匹配 '{term}' 的Dell公告"))
 
         except sqlite3.Error as e:
             self.log_queue.put(f"数据库搜索失败: {str(e)}")
