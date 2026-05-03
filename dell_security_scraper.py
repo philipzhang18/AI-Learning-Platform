@@ -589,6 +589,7 @@ class DellSecurityScraper:
             'affected_products': products,
             'solution': solution,
             'impact': impact,
+            'severity': impact,
             'source': 'Web Scrape',
         }
 

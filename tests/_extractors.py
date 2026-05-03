@@ -4,12 +4,34 @@ from datetime import datetime
 
 
 def extract_products_from_dell_title(title: str) -> list:
-    """从 Dell 安全公告标题中提取受影响产品名称"""
+    """从 Dell 安全公告标题中提取受影响产品名称（增强版）"""
     if not title:
         return []
+
+    # 先去除 DSA ID 前缀（如果有）
+    title_clean = re.sub(r'^DSA-\d{4}-\d+:\s*', '', title, flags=re.IGNORECASE)
+
     products = []
+
+    # 新增规则 1: Dell EMC [产品] [漏洞类型]（支持括号）
+    pattern_1 = r'^(Dell EMC [A-Za-z0-9\s\(\)]+?)\s+(?:Improper|Buffer|Hard|Unauthorized|Plaintext|OS Command|Open Redirect|XML|Reflected|Deserialization|Java RMI|Cross-Site|Denial of Service|Intel|Tar File)'
+    match = re.search(pattern_1, title_clean, re.IGNORECASE)
+    if match:
+        product_text = match.group(1).strip()
+        products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+        return products
+
+    # 新增规则 2: Dell [产品] [漏洞类型]
+    pattern_2 = r'^(Dell [A-Za-z0-9\s]+?)\s+(?:Improper|Buffer|Hard|Unauthorized|Plaintext|OS Command|Open Redirect|XML|Reflected|Deserialization|Configuration|Authentication)'
+    match = re.search(pattern_2, title_clean, re.IGNORECASE)
+    if match:
+        product_text = match.group(1).strip()
+        products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+        return products
+
+    # 模式A: "Security Update for [产品名] for/Multiple..."
     pattern_a = r'Security Update for\s+(.+?)\s+(?:for|Multiple|Vulnerabilit)'
-    match = re.search(pattern_a, title, re.IGNORECASE)
+    match = re.search(pattern_a, title_clean, re.IGNORECASE)
     if match:
         product_text = match.group(1).strip()
         if ' and ' in product_text:
@@ -20,8 +42,10 @@ def extract_products_from_dell_title(title: str) -> list:
         else:
             products.append({'name': product_text, 'model': product_text, 'version_range': ''})
         return products
+
+    # 模式B: "[产品1], [产品2], ... Security Update"
     pattern_b = r'^(.+?)\s+Security Update'
-    match = re.search(pattern_b, title, re.IGNORECASE)
+    match = re.search(pattern_b, title_clean, re.IGNORECASE)
     if match:
         product_text = match.group(1).strip()
         if ',' in product_text:
@@ -33,10 +57,28 @@ def extract_products_from_dell_title(title: str) -> list:
         else:
             products.append({'name': product_text, 'model': product_text, 'version_range': ''})
             return products
-    if 'Dell' in title:
+
+    # 新增规则 3: Security Update [Dell产品] [漏洞类型]
+    pattern_3 = r'Security Update\s+(Dell\s+[A-Za-z0-9\s]+?)\s+(?:Vulnerabilit|Plaintext|Buffer)'
+    match = re.search(pattern_3, title_clean, re.IGNORECASE)
+    if match:
+        product_text = match.group(1).strip()
+        products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+        return products
+
+    # 新增规则 4: Security Update for an/the [产品] Advisory
+    pattern_4 = r'Security Update for (?:an|the)\s+(.+?)\s+Advisory'
+    match = re.search(pattern_4, title_clean, re.IGNORECASE)
+    if match:
+        product_text = match.group(1).strip()
+        products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+        return products
+
+    # 回退：如果标题中包含 "Dell" 关键词
+    if 'Dell' in title_clean:
         for keyword in [' for ', ' Security', ' Multiple']:
-            if keyword in title:
-                product_text = title.split(keyword)[0].strip()
+            if keyword in title_clean:
+                product_text = title_clean.split(keyword)[0].strip()
                 if product_text:
                     products.append({'name': product_text, 'model': product_text, 'version_range': ''})
                     return products

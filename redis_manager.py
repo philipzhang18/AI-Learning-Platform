@@ -46,6 +46,10 @@ class RedisDataManager:
         self.DELL_SET = "dell:all_ids"
         self.COLLECTION_HISTORY = "collection:history"
 
+        # 缓存命中率统计
+        self.cache_hits = 0
+        self.cache_misses = 0
+
     def _create_pool(self, password):
         """创建 Redis 连接池"""
         return ConnectionPool(
@@ -148,7 +152,10 @@ class RedisDataManager:
         data = self.redis_client.get(key)
 
         if data:
+            self.cache_hits += 1
             return json.loads(data)
+
+        self.cache_misses += 1
         return None
 
     def get_all_cve_ids(self) -> Set[str]:
@@ -183,6 +190,8 @@ class RedisDataManager:
 
             # MGET 批量获取
             results = self.redis_client.mget(keys)
+            self.cache_hits += sum(1 for data in results if data)
+            self.cache_misses += sum(1 for data in results if not data)
 
             # 解析结果
             for data in results:
@@ -270,7 +279,10 @@ class RedisDataManager:
         data = self.redis_client.get(key)
 
         if data:
+            self.cache_hits += 1
             return json.loads(data)
+
+        self.cache_misses += 1
         return None
 
     def get_all_dell_ids(self) -> Set[str]:
@@ -301,6 +313,8 @@ class RedisDataManager:
 
             # MGET 批量获取
             results = self.redis_client.mget(keys)
+            self.cache_hits += sum(1 for data in results if data)
+            self.cache_misses += sum(1 for data in results if not data)
 
             # 解析结果
             for data in results:
@@ -510,6 +524,24 @@ class RedisDataManager:
 
     # ==================== 统计信息 ====================
 
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """获取缓存命中率统计信息"""
+        total_requests = self.cache_hits + self.cache_misses
+        hit_rate = self.cache_hits / total_requests if total_requests > 0 else 0.0
+
+        return {
+            'hits': self.cache_hits,
+            'misses': self.cache_misses,
+            'total_requests': total_requests,
+            'hit_rate': f"{hit_rate:.2%}",
+            'hit_rate_float': hit_rate,
+        }
+
+    def reset_cache_stats(self):
+        """重置缓存统计"""
+        self.cache_hits = 0
+        self.cache_misses = 0
+
     def get_stats(self) -> Dict[str, Any]:
         """获取数据统计信息"""
         cve_count = self.get_cves_count()
@@ -528,6 +560,7 @@ class RedisDataManager:
             'cve_count': cve_count,
             'dell_count': dell_count,
             'last_collection': last_collection_time,
+            'cache_stats': self.get_cache_stats(),
             'redis_info': self.get_info()
         }
 

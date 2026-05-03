@@ -5066,11 +5066,25 @@ foreach ($tokenName in $targets.Keys) {
                 redis_text = "未连接"
                 redis_fg = "#95a5a6"
 
+        # Redis 缓存命中率
+        if self.use_redis:
+            try:
+                cache_stats = self.redis_manager.get_cache_stats()
+                cache_text = f"{cache_stats['hit_rate']} ({cache_stats['hits']}/{cache_stats['total_requests']})"
+                cache_fg = "#16a085" if cache_stats['hit_rate_float'] >= 0.5 else "#e67e22"
+            except Exception:
+                cache_text = "统计失败"
+                cache_fg = "#e74c3c"
+        else:
+            cache_text = "N/A"
+            cache_fg = "#95a5a6"
+
         # 水平排列引擎信息
         items = [
             ("SQLite", f"v{sqlite_ver}", "#2980b9"),
             ("数据库", f"{db_size_str}{wal_size_str}", val_fg),
             ("Redis", redis_text, redis_fg),
+            ("缓存命中率", cache_text, cache_fg),
         ]
         for idx, (lbl, val, fg) in enumerate(items):
             tk.Label(engine_row, text=f" {lbl}: ", bg="#f8f8f8", fg="#666",
@@ -9738,7 +9752,7 @@ mindmap
             self.dell_queue.put(('refresh_database', None))
 
     def _extract_products_from_dell_title(self, title: str) -> list:
-        """从 Dell 安全公告标题中提取受影响产品名称
+        """从 Dell 安全公告标题中提取受影响产品名称（增强版）
 
         Args:
             title: Dell 安全公告标题
@@ -9749,12 +9763,33 @@ mindmap
         if not title:
             return []
 
+        # 先去除 DSA ID 前缀（如果有）
+        title_clean = re.sub(r'^DSA-\d{4}-\d+:\s*', '', title, flags=re.IGNORECASE)
+
         products = []
+
+        # 新增规则 1: Dell EMC [产品] [漏洞类型]（支持括号）
+        # 示例: "Dell EMC Storage Monitoring and Reporting (SMR) Java RMI Deserialization"
+        pattern_1 = r'^(Dell EMC [A-Za-z0-9\s\(\)]+?)\s+(?:Improper|Buffer|Hard|Unauthorized|Plaintext|OS Command|Open Redirect|XML|Reflected|Deserialization|Java RMI|Cross-Site|Denial of Service|Intel|Tar File)'
+        match = re.search(pattern_1, title_clean, re.IGNORECASE)
+        if match:
+            product_text = match.group(1).strip()
+            products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+            return products
+
+        # 新增规则 2: Dell [产品] [漏洞类型]
+        # 示例: "Dell Client Products Unauthorized BIOS Password Reset Tool Vulnerability"
+        pattern_2 = r'^(Dell [A-Za-z0-9\s]+?)\s+(?:Improper|Buffer|Hard|Unauthorized|Plaintext|OS Command|Open Redirect|XML|Reflected|Deserialization|Configuration|Authentication)'
+        match = re.search(pattern_2, title_clean, re.IGNORECASE)
+        if match:
+            product_text = match.group(1).strip()
+            products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+            return products
 
         # 模式A: "Security Update for [产品名] for/Multiple..."
         # 示例: "Security Update for Dell PowerScale OneFS Multiple Vulnerabilities"
         pattern_a = r'Security Update for\s+(.+?)\s+(?:for|Multiple|Vulnerabilit)'
-        match = re.search(pattern_a, title, re.IGNORECASE)
+        match = re.search(pattern_a, title_clean, re.IGNORECASE)
         if match:
             product_text = match.group(1).strip()
             # 处理 "and" 连接的多个产品
@@ -9770,7 +9805,7 @@ mindmap
         # 模式B: "[产品1], [产品2], ... Security Update"
         # 示例: "Dell PowerMaxOS, Dell PowerMax EEM, ... Security Update for Multiple Vulnerabilities"
         pattern_b = r'^(.+?)\s+Security Update'
-        match = re.search(pattern_b, title, re.IGNORECASE)
+        match = re.search(pattern_b, title_clean, re.IGNORECASE)
         if match:
             product_text = match.group(1).strip()
             # 按逗号分隔产品列表
@@ -9784,12 +9819,30 @@ mindmap
                 products.append({'name': product_text, 'model': product_text, 'version_range': ''})
                 return products
 
+        # 新增规则 3: Security Update [Dell产品] [漏洞类型]
+        # 示例: "Security Update Dell PowerStore Vulnerabilities"
+        pattern_3 = r'Security Update\s+(Dell\s+[A-Za-z0-9\s]+?)\s+(?:Vulnerabilit|Plaintext|Buffer)'
+        match = re.search(pattern_3, title_clean, re.IGNORECASE)
+        if match:
+            product_text = match.group(1).strip()
+            products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+            return products
+
+        # 新增规则 4: Security Update for an/the [产品] Advisory
+        # 示例: "Security Update for an Intel Chipset Device Software Advisory"
+        pattern_4 = r'Security Update for (?:an|the)\s+(.+?)\s+Advisory'
+        match = re.search(pattern_4, title_clean, re.IGNORECASE)
+        if match:
+            product_text = match.group(1).strip()
+            products.append({'name': product_text, 'model': product_text, 'version_range': ''})
+            return products
+
         # 回退：如果标题中包含 "Dell" 关键词，提取整个标题作为产品名
-        if 'Dell' in title:
+        if 'Dell' in title_clean:
             # 截取到第一个 "for" 或 "Security" 之前
             for keyword in [' for ', ' Security', ' Multiple']:
-                if keyword in title:
-                    product_text = title.split(keyword)[0].strip()
+                if keyword in title_clean:
+                    product_text = title_clean.split(keyword)[0].strip()
                     if product_text:
                         products.append({'name': product_text, 'model': product_text, 'version_range': ''})
                         return products

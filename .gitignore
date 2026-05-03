@@ -133,6 +133,8 @@ comprehensive_*.py
 simple_performance_test.py
 system_test.py
 test_gpu_services.sh
+scripts/
+PROJECT_OPTIMIZATION_REPORT.md
 
 # ==================== Unused Source ====================
 gpu_cve_sync.py
@@ -178,7 +180,6 @@ README.txt
 llm_config.py.example
 start_cve_gui.bat
 start_cve_sqlite.sh
-start_cve_with_wsl_redis.bat
 docs/git_commit_report.md
 DOCUMENTATION_INDEX.md
 docs/
