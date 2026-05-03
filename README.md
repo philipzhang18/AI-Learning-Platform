@@ -2,7 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-5.3.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.4.0-orange.svg)](CHANGELOG.md)
 
 以**知识管理**为核心的智能平台，通过多渠道收集学习资料（播客、文件、网页、数据库数据），采用 AI 方法进行深度学习与分析。
 
@@ -12,14 +12,14 @@
 
 | 指标 | 数值 |
 |------|------|
-| Python 总代码行数 | ~14,600 行 |
-| 主程序 (cve_integrated_gui.py) | ~11,300 行 |
-| 核心 Python 文件 | 13 个 |
-| GUI 标签页 | 9 个 |
-| 数据库表 | 16 张 |
-| 数据库大小 | ~362 MB |
-| CVE 漏洞记录 | 115,587 条 |
-| Dell 安全公告 | 2,095 条 |
+| Python 总代码行数 | ~17,300 行 |
+| 主程序 (cve_integrated_gui.py) | ~13,100 行 |
+| 核心 Python 文件 | 17 个 |
+| GUI 标签页 | 9 个主标签 + 3 个子标签 |
+| 数据库表 | 28 张（含 FTS 虚拟表） |
+| 数据库大小 | ~496 MB |
+| CVE 漏洞记录 | 117,330 条 |
+| Dell 安全公告 | 2,358 条 |
 
 ---
 
@@ -98,7 +98,7 @@ EXA_API_KEY=your_exa_api_key
 ```
 智能知识管理平台
 ├── 数据层
-│   ├── SQLite（主存储，WAL 模式，362MB）
+│   ├── SQLite（主存储，WAL 模式，496MB）
 │   └── Redis（可选缓存，WSL 部署）
 ├── 采集层
 │   ├── NVD REST API（CVE 数据）
@@ -109,7 +109,7 @@ EXA_API_KEY=your_exa_api_key
 │   ├── Qwen API（阿里云百炼）
 │   └── Ollama（本地模型，可选）
 └── 界面层
-    └── tkinter GUI（12 标签页）
+    └── tkinter GUI（9 主标签 + 3 子标签）
 ```
 
 ---
@@ -117,14 +117,27 @@ EXA_API_KEY=your_exa_api_key
 ## 项目结构
 
 ```
-├── cve_integrated_gui.py      # 主程序（10,066 行，GUI 入口）
+├── cve_integrated_gui.py      # 主程序（13,066 行，GUI 入口）
 ├── collect_cves.py            # NVD CVE 数据采集器
 ├── dell_security_scraper.py   # Dell 安全公告爬虫
 ├── redis_manager.py           # Redis 缓存管理
 ├── llm_config.py              # LLM API 配置
+├── ai_client.py               # 统一 OpenAI 客户端初始化
+├── config.py                  # 集中配置（颜色/字体/AI/DB/UI）
+├── db_layer.py                # 学习模块 DAO 层
+├── db_backup.py               # SQLite 数据库备份/恢复
+├── error_utils.py             # 统一错误处理装饰器
+├── learn_enhancements.py      # 学习增强功能模块
 ├── qwen_assistant.py          # Qwen AI 助手（CLI）
 ├── ollama_llm_service.py      # Ollama 本地模型 + 向量搜索
+├── dao/                       # 数据访问层
+│   ├── cve_dao.py             # CVE 数据访问
+│   ├── dell_dao.py            # Dell 公告数据访问
+│   └── dell_kb_dao.py         # Dell 技术库数据访问
+├── scripts/                   # 维护脚本
 ├── requirements.txt           # Python 依赖
+├── start_cve_gui.bat          # 启动脚本（SQLite 轻量模式）
+├── start_cve_with_wsl_redis.bat # 启动脚本（WSL Redis 混合模式）
 ├── .env.example               # 环境变量模板
 ├── CLAUDE.md                  # Claude 开发配置
 ├── CONFIG.md                  # 系统配置指南
@@ -142,13 +155,13 @@ EXA_API_KEY=your_exa_api_key
 | 🏢 Dell 安全公告 | Dell 安全公告抓取与管理 |
 | 🔗 CVE-Dell 关联 | 漏洞与公告自动关联匹配 |
 | 💡 解决方案 | AI 分析历史记录与导出 |
-| 📖 Dell技术库 | Dell 技术文档抓取与分析 |
+| 📖 Dell技术库 | Dell 技术文档抓取、导入导出 |
 | 📈 统计分析 | 数据可视化（饼图/趋势图/汇聚图） |
-| 🧠 智能学习 | 费曼学习法 AI 对话 |
+| 🧠 智能学习 | 费曼学习法 AI 对话、学习产物生成 |
 | 📝 操作日志 | 系统运行日志 |
-| 📰 每日简报 | 新闻简报浏览与 TTS 播报 |
-| 🎙️ 播客脚本 | AI 生成播客脚本 |
-| 📅 历史资讯 | 历史新闻归档浏览 |
+| ┗ 📰 每日简报 | 新闻简报浏览与 TTS 播报（IT新闻子标签） |
+| ┗ 🎙️ 播客脚本 | AI 生成播客脚本（IT新闻子标签） |
+| ┗ 📅 历史资讯 | 历史新闻归档浏览（IT新闻子标签） |
 
 ---
 
@@ -156,12 +169,12 @@ EXA_API_KEY=your_exa_api_key
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| v5.4.0 | 2026-04-26 | 智能学习增强（自动摘要/来源引用/学习产物），项目架构优化 |
+| v5.3.0 | 2026-04-10 | 数据导入导出面板，8 数据源 3 格式导出，Dell 技术库导入 |
 | v5.2.0 | 2026-04-08 | 统计分析可视化增强，智能学习关键字搜索，关联详情修复 |
 | v5.1.0 | 2026-03-30 | 新增 Dell 技术库标签页，解决方案 HTML 导出 |
 | v5.0.0 | 2026-03-14 | 重命名为"智能知识管理平台"，项目清理，架构优化 |
 | v4.4.0 | 2025-11-05 | SQLite 主存储 + 双写一致性架构 |
-| v4.3.0 | 2025-11-04 | 智能学习 Web URL 来源，保存对话 |
-| v4.2.0 | 2025-11-03 | 删除/搜索功能，Docker 移除 |
 
 详见 [CHANGELOG.md](CHANGELOG.md)
 

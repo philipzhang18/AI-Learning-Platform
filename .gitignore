@@ -178,7 +178,6 @@ generate_ppt.js
 # ==================== Redundant / Old Files ====================
 README.txt
 llm_config.py.example
-start_cve_gui.bat
 start_cve_sqlite.sh
 docs/git_commit_report.md
 DOCUMENTATION_INDEX.md
