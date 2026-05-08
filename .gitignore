@@ -54,6 +54,7 @@ output/
 backups/
 backup/
 archive/
+ppt_output/
 *.db
 *.db-shm
 *.db-wal
