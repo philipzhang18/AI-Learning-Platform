@@ -12,7 +12,7 @@ import json
 import csv
 import re
 import sqlite3
-from datetime import datetime, timedelta, date as date_type
+from datetime import datetime, timedelta, date as date_type, time as dt_time
 from pathlib import Path
 import threading
 import queue
@@ -1762,6 +1762,61 @@ class CVEIntegratedGUI:
         # 初始化：刷新日历高亮 + 自动查询天气
         self.root.after(500, self._refresh_calendar_tags)
         self.root.after(800, self._weather_refresh)
+        # 启动跨天自动切换：到下一个本地时间 00:00:05 时刷新天气 / 日历高亮
+        self._current_local_date = datetime.now().date()
+        self._schedule_midnight_rollover()
+
+    def _schedule_midnight_rollover(self):
+        """安排下一次午夜切换：计算到下一个 00:00:05 的毫秒数，用 root.after 触发"""
+        try:
+            now = datetime.now()
+            tomorrow = (now + timedelta(days=1)).date()
+            next_midnight = datetime.combine(tomorrow, dt_time(0, 0, 5))
+            delay_ms = int((next_midnight - now).total_seconds() * 1000)
+            # 保险：至少 60 秒后再触发，防止异常情况下立即递归
+            if delay_ms < 60_000:
+                delay_ms = 60_000
+            self._midnight_after_id = self.root.after(delay_ms, self._on_midnight_rollover)
+        except Exception as e:
+            self.log(f"安排午夜切换失败: {e}")
+
+    def _on_midnight_rollover(self):
+        """跨天触发：刷新天气、日历高亮、清空昨日残留的简报文本"""
+        try:
+            new_date = datetime.now().date()
+            if new_date != getattr(self, "_current_local_date", None):
+                self._current_local_date = new_date
+                self.log(f"检测到跨天，已切换到 {new_date.isoformat()}，刷新当日视图")
+
+                # 清空天气缓存并重新拉取今天
+                try:
+                    self._weather_daily_cache.clear()
+                    self._weather_refresh()
+                except Exception as e:
+                    self.log(f"午夜刷新天气失败: {e}")
+
+                # 刷新日历高亮（让"今天"回到正确位置）
+                try:
+                    if HAS_TKCALENDAR and self._calendar:
+                        self._calendar.selection_set(new_date)
+                    self._refresh_calendar_tags()
+                except Exception as e:
+                    self.log(f"午夜刷新日历失败: {e}")
+
+                # 清空昨日遗留的简报正文，避免旧内容误导
+                try:
+                    if hasattr(self, "news_brief_area"):
+                        self.news_brief_area.delete(1.0, tk.END)
+                        self.news_brief_text = ""
+                        self.news_brief_info.config(text="")
+                        self.news_status_label.config(
+                            text=f"已切换到新一天（{new_date.isoformat()}），请点击「采集新闻」获取今日资讯"
+                        )
+                except Exception:
+                    pass
+        finally:
+            # 无论本次是否触发，都安排下一次
+            self._schedule_midnight_rollover()
 
     def _load_sapi_voices(self):
         """后台查询 SAPI 声音列表：自动注册 OneCore 中文男声，过滤非中文声音"""
@@ -1931,7 +1986,15 @@ foreach ($tokenName in $targets.Keys) {
             return
         self.is_collecting_news = True
         self.news_collect_btn.config(state=tk.DISABLED, text="采集中...")
-        self.news_status_label.config(text="正在采集 IT 新闻，请稍候...")
+        today_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.news_status_label.config(text=f"正在采集 IT 新闻（{today_str}），请稍候...")
+        # 清空上一次（可能是昨天）残留的简报/分析文本，避免视觉上"信息停留在昨天"
+        try:
+            self.news_brief_area.delete(1.0, tk.END)
+            self.news_brief_text = ""
+            self.news_brief_info.config(text="")
+        except Exception:
+            pass
         threading.Thread(target=self._collect_news_thread, daemon=True).start()
 
     def _collect_news_thread(self):
@@ -1991,10 +2054,11 @@ foreach ($tokenName in $targets.Keys) {
             label = f"[{art['source']}]  {art['title']}"
             self.news_listbox.insert(tk.END, label)
         count = len(self.news_articles)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.news_status_label.config(
-            text=f"已采集 {count} 篇文章 — 点击「生成简报」获得 AI 摘要"
+            text=f"已采集 {count} 篇文章（{ts}） — 点击「生成简报」获得 AI 摘要"
         )
-        self.log(f"新闻采集完成：共 {count} 篇")
+        self.log(f"[{ts}] 新闻采集完成：共 {count} 篇")
 
     def generate_news_brief(self):
         """调用 AI 生成每日简报（后台线程）"""
@@ -2473,23 +2537,17 @@ foreach ($tokenName in $targets.Keys) {
             self.root.after(0, self._weather_info_label.config, {"text": f"定位失败: {e}"})
 
     def _weather_refresh(self):
-        """刷新天气数据（当前选中日期或今天）"""
+        """刷新天气数据：始终以系统当前日期为目标，避免跨天后日历选中态停留在昨天"""
         target_date = datetime.now().strftime("%Y-%m-%d")
+        # 把日历选中态同步到今天（若日历仍停留在昨天，下次日期回调不会再错）
         if HAS_TKCALENDAR and self._calendar:
             try:
-                sel = self._calendar.get_date()
-                # tkcalendar 返回的日期格式依赖 locale，统一转换
-                if isinstance(sel, str):
-                    for fmt in ("%Y-%m-%d", "%m/%d/%y", "%Y/%m/%d", "%d/%m/%Y"):
-                        try:
-                            target_date = datetime.strptime(sel, fmt).strftime("%Y-%m-%d")
-                            break
-                        except ValueError:
-                            continue
-                elif isinstance(sel, (date_type, datetime)):
-                    target_date = sel.strftime("%Y-%m-%d")
+                self._calendar.selection_set(datetime.now().date())
             except Exception:
                 pass
+
+        # 清除旧缓存，避免 daily_cache 保留昨天键值导致显示错位
+        self._weather_daily_cache.clear()
 
         self._weather_info_label.config(text="正在获取天气...")
         threading.Thread(target=self._fetch_weather_thread, args=(target_date,), daemon=True).start()
@@ -3220,6 +3278,21 @@ foreach ($tokenName in $targets.Keys) {
         )
         load_csv_btn.pack(side=tk.LEFT, padx=5)
 
+        # AI解决方案按钮
+        dell_ai_btn = tk.Button(
+            left_control,
+            text="🤖 AI解决方案",
+            command=self.dell_ai_solution_click,
+            bg="#9b59b6",
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        dell_ai_btn.pack(side=tk.LEFT, padx=5)
+
         # URL单条抓取区域
         url_fetch_frame = tk.LabelFrame(
             self.dell_frame,
@@ -3405,6 +3478,21 @@ foreach ($tokenName in $targets.Keys) {
             cursor="hand2"
         )
         ai_solution_btn.pack(side=tk.LEFT, padx=5)
+
+        # 多行联合分析按钮
+        multi_ai_btn = tk.Button(
+            info_frame,
+            text="🧠 多行联合分析",
+            command=self.matched_multi_ai_analysis_click,
+            bg="#8e44ad",
+            fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=15,
+            pady=5,
+            relief=tk.FLAT,
+            cursor="hand2"
+        )
+        multi_ai_btn.pack(side=tk.LEFT, padx=5)
 
         # 数据展示区域
         data_container = tk.Frame(self.matched_frame, bg="white")
@@ -11257,6 +11345,96 @@ Dell 安全公告详细信息
         # 统一尺寸并居中
         self._center_window(dialog, 1350, 1050)
 
+    def dell_ai_solution_click(self):
+        """Dell 安全公告标签页 AI解决方案按钮点击事件"""
+        try:
+            selection = self.dell_tree.selection()
+            if not selection:
+                messagebox.showwarning("提示", "请先选择要分析的 Dell 安全公告")
+                return
+
+            item = self.dell_tree.item(selection[0])
+            advisory_id = str(item['values'][0]).strip() if item['values'] else ""
+            if not advisory_id:
+                messagebox.showerror("错误", "所选记录缺少公告 ID")
+                return
+
+            # 优先从内存中查找详细数据
+            dell_detail = None
+            for advisory in self.dell_advisories:
+                if (advisory.get('dell_security_advisory') == advisory_id
+                        or advisory.get('dsa_id') == advisory_id):
+                    dell_detail = advisory
+                    break
+
+            # 内存中未找到则从数据库查询
+            if not dell_detail:
+                try:
+                    with self.db_lock:
+                        cursor = self.conn.cursor()
+                        cursor.execute(
+                            "SELECT data FROM dell_advisories WHERE dsa_id = ?",
+                            (advisory_id,)
+                        )
+                        row = cursor.fetchone()
+                        if row and row[0]:
+                            dell_detail = json.loads(row[0])
+                except Exception as e:
+                    self.log(f"从数据库查询 Dell 公告数据失败: {str(e)}")
+
+            if not dell_detail:
+                messagebox.showerror("错误", f"无法找到公告 {advisory_id} 的详细数据")
+                return
+
+            # 若 Dell 公告关联了 CVE，取第一个 CVE 做联合分析；否则仅基于公告分析
+            cve_detail = None
+            cve_ids = dell_detail.get('cve_ids') or []
+            if cve_ids:
+                first_cve = cve_ids[0]
+                for cve in self.cve_data:
+                    if cve.get('cve_id') == first_cve:
+                        cve_detail = cve
+                        break
+                if not cve_detail:
+                    try:
+                        with self.db_lock:
+                            cursor = self.conn.cursor()
+                            cursor.execute(
+                                "SELECT data FROM cves WHERE cve_id = ?",
+                                (first_cve,)
+                            )
+                            row = cursor.fetchone()
+                            if row and row[0]:
+                                cve_detail = json.loads(row[0])
+                    except Exception as e:
+                        self.log(f"从数据库查询 CVE 数据失败: {str(e)}")
+
+            if cve_detail:
+                self.log(f"正在调用AI分析（Dell 公告 + CVE）: {advisory_id} - {cve_detail.get('cve_id')}...")
+                threading.Thread(
+                    target=self._call_ai_solution_thread,
+                    args=(cve_detail, dell_detail),
+                    daemon=True
+                ).start()
+            else:
+                # 无关联 CVE：构造一个最小 cve_data 占位，复用现有保存/展示链路
+                placeholder_cve = {
+                    'cve_id': f"DSA-{advisory_id}",
+                    'description': dell_detail.get('summary') or dell_detail.get('description', ''),
+                    'cvss_severity': dell_detail.get('impact_level') or dell_detail.get('severity', '未知'),
+                }
+                self.log(f"正在调用AI分析（仅 Dell 公告）: {advisory_id}...")
+                threading.Thread(
+                    target=self._call_ai_solution_thread,
+                    args=(placeholder_cve, dell_detail),
+                    daemon=True
+                ).start()
+
+        except Exception as e:
+            error_msg = f"AI解决方案处理失败: {str(e)}"
+            self.log(error_msg)
+            messagebox.showerror("错误", error_msg)
+
     def nvd_ai_solution_click(self):
         """NVD标签页 AI解决方案按钮点击事件"""
         try:
@@ -11275,7 +11453,6 @@ Dell 安全公告详细信息
                 if cve.get('cve_id') == cve_id:
                     cve_detail = cve
                     break
-
             # 内存中未找到，从数据库查询
             if not cve_detail:
                 try:
@@ -11378,6 +11555,321 @@ Dell 安全公告详细信息
             error_msg = f"AI解决方案处理失败: {str(e)}"
             self.log(error_msg)
             messagebox.showerror("错误", error_msg)
+
+    def matched_multi_ai_analysis_click(self):
+        """CVE-Dell 关联标签页 · 多行联合分析：把所选多条 CVE/Dell 记录汇总交给 AI 统一分析"""
+        try:
+            selection = self.matched_tree.selection()
+            if not selection:
+                messagebox.showwarning("提示", "请先在列表中多选要联合分析的行（Ctrl/Shift 多选）")
+                return
+            if len(selection) < 2:
+                if not messagebox.askyesno(
+                    "提示",
+                    "只选择了 1 行记录，联合分析通常需要 2 行及以上。\n是否继续？"
+                ):
+                    return
+
+            # 采集每一行的核心字段 + 回查完整 CVE / Dell 数据
+            items = []
+            for iid in selection:
+                values = self.matched_tree.item(iid, 'values')
+                if not values:
+                    continue
+                cve_id = str(values[0]).strip() if len(values) > 0 else ""
+                advisory_id = str(values[3]).strip() if len(values) > 3 else ""
+
+                cve_detail = None
+                for c in self.cve_data:
+                    if c.get('cve_id') == cve_id:
+                        cve_detail = c
+                        break
+                if not cve_detail and cve_id:
+                    try:
+                        with self.db_lock:
+                            cursor = self.conn.cursor()
+                            cursor.execute("SELECT data FROM cves WHERE cve_id = ?", (cve_id,))
+                            row = cursor.fetchone()
+                            if row and row[0]:
+                                cve_detail = json.loads(row[0])
+                    except Exception as e:
+                        self.log(f"从数据库查询 CVE 数据失败: {str(e)}")
+
+                dell_detail = None
+                if advisory_id and advisory_id not in ("N/A", "NA"):
+                    for a in self.dell_advisories:
+                        if (a.get('dell_security_advisory') == advisory_id
+                                or a.get('dsa_id') == advisory_id):
+                            dell_detail = a
+                            break
+                    if not dell_detail:
+                        try:
+                            with self.db_lock:
+                                cursor = self.conn.cursor()
+                                cursor.execute(
+                                    "SELECT data FROM dell_advisories WHERE dsa_id = ?",
+                                    (advisory_id,)
+                                )
+                                row = cursor.fetchone()
+                                if row and row[0]:
+                                    dell_detail = json.loads(row[0])
+                        except Exception as e:
+                            self.log(f"从数据库查询 Dell 公告数据失败: {str(e)}")
+
+                items.append({
+                    'cve_id': cve_id,
+                    'advisory_id': advisory_id,
+                    'cve': cve_detail,
+                    'dell': dell_detail,
+                })
+
+            if not items:
+                messagebox.showerror("错误", "未能从所选行读取到任何有效数据")
+                return
+
+            self.log(f"正在调用 AI 联合分析 {len(items)} 条关联记录...")
+            threading.Thread(
+                target=self._call_matched_multi_ai_thread,
+                args=(items,),
+                daemon=True
+            ).start()
+
+        except Exception as e:
+            error_msg = f"多行联合分析失败: {str(e)}"
+            self.log(error_msg)
+            messagebox.showerror("错误", error_msg)
+
+    def _call_matched_multi_ai_thread(self, items):
+        """后台线程：调用 AI 对多行 CVE/Dell 记录做联合分析（不设字数上限）"""
+        try:
+            model_name = os.getenv("QWEN_MODEL", "qwen3.6-plus")
+            api_key = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+            if not api_key:
+                raise ValueError("Qwen API密钥未设置。请在 .env 文件中设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY。")
+
+            # ── 先按风险优先级对 items 排序（高→低），用于【引用源列表】与【条目块】的编号 ──
+            _severity_rank = {
+                'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'MODERATE': 2, 'LOW': 1,
+                '严重': 4, '高危': 3, '中危': 2, '低危': 1, '未知': 0, '': 0, 'N/A': 0,
+            }
+
+            def _priority_key(it):
+                cve = it.get('cve') or {}
+                dell = it.get('dell') or {}
+                # CVSS 数值：高分优先
+                try:
+                    cvss = float(cve.get('cvss_score') or 0)
+                except (TypeError, ValueError):
+                    cvss = 0.0
+                cve_sev = str(cve.get('cvss_severity', '') or '').upper()
+                dell_sev = str(dell.get('impact_level') or dell.get('severity', '') or '').upper()
+                sev_rank = max(_severity_rank.get(cve_sev, 0), _severity_rank.get(dell_sev, 0))
+                # 返回降序排序键：严重等级 → CVSS → 发布日期（新在前）
+                pub = str(cve.get('published_date') or '')
+                return (-sev_rank, -cvss, pub[::-1] if pub else '')
+
+            items = sorted(items, key=_priority_key)
+
+            # 构建"条目清单 + 引用源"
+            entry_blocks = []
+            source_lines = []
+            for idx, it in enumerate(items, 1):
+                cve_id = it['cve_id'] or 'N/A'
+                adv_id = it['advisory_id'] or 'N/A'
+                cve = it.get('cve') or {}
+                dell = it.get('dell') or {}
+
+                cve_url = f"https://nvd.nist.gov/vuln/detail/{cve_id}" if cve_id and cve_id != 'N/A' else 'N/A'
+                dell_url = dell.get('link') or dell.get('url') or (
+                    f"https://www.dell.com/support/kbdoc/{adv_id}" if adv_id and adv_id != 'N/A' else 'N/A'
+                )
+
+                # 产品名称归一化
+                raw_products = dell.get('affected_products', []) if dell else []
+                prod_names = []
+                for p in raw_products:
+                    if isinstance(p, dict):
+                        prod_names.append(p.get('name', p.get('product', str(p))))
+                    else:
+                        prod_names.append(str(p))
+                prod_str = ', '.join(prod_names[:20]) if prod_names else '未列出'
+
+                desc = (cve.get('description') or '')[:600]
+
+                entry_blocks.append(
+                    f"""[{idx}] CVE: {cve_id}
+  - 严重等级: {cve.get('cvss_severity', '未知')}
+  - CVSS 评分: {cve.get('cvss_score', 'N/A')}
+  - 发布日期: {cve.get('published_date', 'N/A')}
+  - CVE 链接: {cve_url}
+  - Dell 公告: {adv_id}
+  - Dell 链接: {dell_url}
+  - 影响等级: {dell.get('impact_level') or dell.get('severity', 'N/A')}
+  - 影响产品: {prod_str}
+  - 描述: {desc if desc else '（无）'}"""
+                )
+                source_lines.append(f"[{idx}] {cve_id} — {cve_url}  |  {adv_id} — {dell_url}")
+
+            entries_text = "\n\n".join(entry_blocks)
+            sources_text = "\n".join(source_lines)
+
+            prompt = f"""请对以下 {len(items)} 条 CVE × Dell 安全公告 关联记录进行一次**联合分析**。
+条目已按"风险优先级从高到低"的顺序编号，请在全文分析与末尾【参考来源】中保持该顺序。
+
+【待分析的关联条目】（已按优先级降序）
+{entries_text}
+
+【引用源列表】（已按优先级降序）
+{sources_text}
+
+【写作要求】
+整体目标：一份**专业详实、有理有据**的企业级联合风险分析报告，提供准确的分析判断与可执行的处置建议；宁长勿缺，不得为了控制篇幅而省略关键证据或步骤。
+
+1. **先说结论**：在最前面用 4-8 句话给出综合判断（整体风险、共性、优先级、是否存在可合并处置、紧迫程度、短期/长期策略要点）。
+2. **再解释原因**：按以下小节逐一展开，每节至少 3-5 段或等量要点；不得空泛，必须结合具体条目数据佐证：
+   - 共性与差异分析（漏洞类型、CWE、攻击向量、鉴权与前置条件、Dell 产品线重叠与分化）
+   - 风险优先级排序（结合 CVSS 向量、Dell 影响等级、可利用性、暴露面、是否已有 PoC / 在野利用线索）
+   - 联合修复策略（哪些可由同一固件/软件版本合并修复；哪些需要单独处理；升级路径、回滚风险、停机窗口考量）
+   - 临时缓解措施（补丁未就绪期的通用缓解与各条目特定缓解，给出具体配置/命令/ACL 思路）
+   - 监控与检测建议（关键日志字段、IDS/EDR/SIEM 规则思路、资产清点清单与覆盖率校验方法）
+   - 实施计划示例（分阶段时间线：紧急、短期 1-2 周、中期 1-3 月，并列出里程碑与验收点）
+3. **关键点必须给出引用来源**：
+   - 凡涉及具体 CVE / Dell 公告的判断，句末用 `[编号]` 标注来源，编号对应上方【引用源列表】；多个来源用 `[1][3]` 形式并列。
+   - 引用的 URL 必须完全使用【引用源列表】里给出的真实链接，禁止编造、缩短或替换为占位符。
+4. 报告末尾必须生成一个 `## 参考来源` 小节，**严格保持上方【引用源列表】的顺序**（风险高→低），共 {len(items)} 条，**一条都不能少、一条都不能截断**。每一条输出两行：
+   第一行：`[编号] CVE编号 — CVE完整链接  |  公告编号 — 公告完整链接`（请原样复制完整 URL，不得缩短）
+   紧接着下方缩进用 `- **联合分析说明**：` 开头，输出 3-5 句话，解释该条目在本次联合分析里的定位、被纳入的理由、对整体结论的贡献，以及针对该条目的具体处置建议；若判断引用其他条目，请在句末再次使用 `[编号]` 标注。
+   每个条目的"联合分析说明"都要单独写，不得省略或合并。若正文分析因长度考虑而简化某条目，也必须在此处补齐该条目的专业分析要点。
+5. **完整性硬约束**：
+   - 如果你预计还有内容未输出完毕，请先把【参考来源】写完整（包括最后一条 `[{len(items)}]`），再补充其他章节；这是最高优先级。
+   - 全文结束前请自检：最后一条 `[{len(items)}]` 的两行 URL 是否完整、是否有"联合分析说明"。
+6. 结构清晰、段落分明，使用 Markdown 层级标题与有序/无序列表。
+7. 语言：中文（简体）。"""
+
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=600)
+            analysis_date = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+            system_msg = (
+                f"你是一个企业级安全顾问，擅长对多条 CVE × 厂商公告做联合风险分析。"
+                f"当前分析日期: {analysis_date}。请严格遵守用户给出的【写作要求】，"
+                f"尤其是引用来源编号必须与【引用源列表】一致、禁止改变顺序、禁止编造 URL。"
+                f"报告必须以完整的【参考来源】小节结尾（含最后一条 [{len(items)}]）；"
+                f"如接近输出长度上限，请优先保证【参考来源】完整。"
+            )
+
+            messages = [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ]
+
+            # 尽量给足 token 预算，避免上游被截断（不同模型上限不同，按常见 qwen3.6-plus 约 8k-16k 输出）
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.5,
+                max_tokens=16000,
+            )
+
+            choice = response.choices[0]
+            result = choice.message.content or ""
+            finish_reason = getattr(choice, "finish_reason", None)
+
+            # 若因长度被截断 或 末尾未出现最后一条参考源，则发起"续写"请求最多 2 次
+            last_marker = f"[{len(items)}]"
+
+            def _looks_incomplete(text: str) -> bool:
+                if not text:
+                    return True
+                if finish_reason == "length":
+                    return True
+                tail = text[-1500:]
+                # 末尾找不到最后一条编号，或最后一行 URL 被截断（以 "https://" 开头但无完整域名末尾）
+                if last_marker not in tail:
+                    return True
+                trailing = text.rstrip().split("\n")[-1]
+                if trailing.startswith(("http", "-", "[")) and len(trailing) < 30:
+                    return True
+                return False
+
+            incomplete = _looks_incomplete(result)
+            for _ in range(2):
+                if not incomplete:
+                    break
+                # 续写：把已生成内容作为助手上下文，让模型无缝接续
+                cont_messages = messages + [
+                    {"role": "assistant", "content": result},
+                    {"role": "user", "content": (
+                        "上一次输出被长度限制截断，请**直接从上次中断处无缝续写**，"
+                        f"不要重复已有内容，不要重新给出标题或结论。务必把 `## 参考来源` 写完整，"
+                        f"特别是最后一条 `{last_marker}` 的完整 URL 与「联合分析说明」。"
+                    )},
+                ]
+                cont_resp = client.chat.completions.create(
+                    model=model_name,
+                    messages=cont_messages,
+                    temperature=0.5,
+                    max_tokens=16000,
+                )
+                cont_choice = cont_resp.choices[0]
+                cont_text = cont_choice.message.content or ""
+                if not cont_text.strip():
+                    break
+                # 拼接：如果上一段末尾已有换行则直接追加，否则补一个换行
+                if not result.endswith("\n"):
+                    result += "\n"
+                result += cont_text
+                finish_reason = getattr(cont_choice, "finish_reason", None)
+                incomplete = _looks_incomplete(result)
+
+            # ── 存储命名规则 ──
+            # 若所选条目共享同一 CVE ID 或同一 Dell 公告 ID，则沿用该 ID 作为存储名称；
+            # 否则给一个联合分析占位标识，避免与单条记录撞名。
+            count = len(items)
+            unique_cve_ids = {
+                str(it.get('cve_id') or '').strip()
+                for it in items
+                if str(it.get('cve_id') or '').strip() and str(it.get('cve_id') or '').strip() not in ('N/A', 'NA')
+            }
+            unique_adv_ids = {
+                str(it.get('advisory_id') or '').strip()
+                for it in items
+                if str(it.get('advisory_id') or '').strip() and str(it.get('advisory_id') or '').strip() not in ('N/A', 'NA')
+            }
+
+            if len(unique_cve_ids) == 1:
+                stored_cve_id = next(iter(unique_cve_ids))
+            else:
+                first_cve = items[0]['cve_id'] or 'N/A'
+                stored_cve_id = f"联合分析-{count}条-{first_cve}"
+
+            if len(unique_adv_ids) == 1:
+                stored_adv_id = next(iter(unique_adv_ids))
+            else:
+                stored_adv_id = f"联合分析 · {count} 条"
+
+            cve_placeholder = {'cve_id': stored_cve_id}
+            dell_placeholder = {
+                'dell_security_advisory': stored_adv_id,
+                'dsa_id': stored_adv_id,
+            }
+            self.root.after(
+                0,
+                self._show_ai_solution_result,
+                result,
+                cve_placeholder,
+                dell_placeholder,
+            )
+
+        except ImportError:
+            err = "openai库未安装。请运行: pip install openai"
+            self.root.after(0, self.log, err)
+            self.root.after(0, messagebox.showerror, "错误", err)
+        except Exception as e:
+            error_msg = f"多行联合分析失败: {str(e)}"
+            self.root.after(0, self.log, error_msg)
+            self.root.after(0, messagebox.showerror, "错误", error_msg)
 
     def _call_nvd_ai_solution_thread(self, cve_data):
         """在后台线程中调用AI分析CVE数据（无需Dell公告）"""
@@ -11564,6 +12056,11 @@ Qwen API密钥未设置。
         # 兼容两种Dell公告ID字段名
         advisory_id = dell_advisory_data.get('dell_security_advisory') or dell_advisory_data.get('dsa_id', 'N/A')
 
+        # 获取真实的 URL（兼容 link 和 url 字段）
+        cve_id = cve_data.get('cve_id', 'N/A')
+        cve_url = f"https://nvd.nist.gov/vuln/detail/{cve_id}" if cve_id != 'N/A' else 'N/A'
+        dell_url = dell_advisory_data.get('link') or dell_advisory_data.get('url', 'N/A')
+
         # 处理 affected_products（可能是 dict 列表或 str 列表）
         raw_products = dell_advisory_data.get('affected_products', [])
         prod_names = []
@@ -11577,7 +12074,8 @@ Qwen API密钥未设置。
 请为以下CVE漏洞和Dell安全公告提供专业的安全解决方案分析：
 
 【CVE信息】
-- CVE编号: {cve_data.get('cve_id', 'N/A')}
+- CVE编号: {cve_id}
+- CVE官方链接: {cve_url}
 - 严重等级: {cve_data.get('cvss_severity', '未知')}
 - CVSS评分: {cve_data.get('cvss_score', 'N/A')}
 - 发布日期: {cve_data.get('published_date', 'N/A')}
@@ -11585,9 +12083,17 @@ Qwen API密钥未设置。
 
 【Dell安全公告】
 - 公告编号: {advisory_id}
+- Dell官方链接: {dell_url}
 - 标题: {dell_advisory_data.get('title', 'N/A')}
 - 发布日期: {dell_advisory_data.get('published_date', 'N/A')}
 - 影响产品: {', '.join(prod_names)}
+
+【重要约束】
+在生成分析报告时，引用官方资源必须使用上面提供的真实链接：
+- CVE详情页面必须使用: {cve_url}
+- Dell公告页面必须使用: {dell_url}
+- 禁止生成、编造或缩短任何URL
+- 禁止使用占位符URL（如 000213xxx）
 
 【分析要求】
 请提供以下内容：
@@ -11648,6 +12154,26 @@ Qwen API密钥未设置。
             btn_frame.pack(fill=tk.X, padx=10)
 
             def save_and_close():
+                cur_cve_id = cve_data.get('cve_id')
+                cur_adv_id = (
+                    dell_advisory_data.get('dell_security_advisory')
+                    or dell_advisory_data.get('dsa_id')
+                )
+                existing_count = self._count_existing_ai_solutions(cur_cve_id, cur_adv_id)
+                if existing_count > 0:
+                    label_adv = cur_adv_id if cur_adv_id else "NVD CVE数据"
+                    if not messagebox.askyesno(
+                        "发现旧的分析数据",
+                        f"检测到 CVE {cur_cve_id} 对应 {label_adv} 已存在 {existing_count} 条旧的 AI 分析记录。\n\n"
+                        "点击「是」将覆盖（删除旧记录并保存当前分析）。\n"
+                        "点击「否」取消本次保存，保留旧的分析数据。",
+                        parent=dialog
+                    ):
+                        self.log(f"已取消保存：保留 {cur_cve_id} 的旧 AI 分析记录")
+                        return
+                    removed = self._delete_existing_ai_solutions(cur_cve_id, cur_adv_id)
+                    self.log(f"已删除 {removed} 条旧 AI 分析记录（{cur_cve_id} / {label_adv}）")
+
                 self.save_ai_solution_to_db(cve_data, dell_advisory_data, result, "成功")
                 self.load_ai_solution_history()
                 # 在详细结果区域也显示
@@ -11687,6 +12213,58 @@ Qwen API密钥未设置。
             self.log(error_msg)
             messagebox.showerror("错误", error_msg)
 
+    def _count_existing_ai_solutions(self, cve_id, advisory_id):
+        """按 cve_id + advisory_id 统计已有的 AI 分析记录数。advisory_id 为空时按 NULL 匹配。"""
+        if not cve_id:
+            return 0
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                if advisory_id:
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM ai_solutions WHERE cve_id = ? AND dell_advisory_id = ?",
+                        (cve_id, advisory_id)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM ai_solutions "
+                        "WHERE cve_id = ? AND (dell_advisory_id IS NULL OR dell_advisory_id = '' OR dell_advisory_id = 'NA')",
+                        (cve_id,)
+                    )
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        except sqlite3.OperationalError:
+            # 表不存在等同于没有旧记录
+            return 0
+        except Exception as e:
+            self.log(f"检查历史 AI 分析记录失败: {str(e)}")
+            return 0
+
+    def _delete_existing_ai_solutions(self, cve_id, advisory_id):
+        """按 cve_id + advisory_id 删除旧的 AI 分析记录，返回删除条数。"""
+        if not cve_id:
+            return 0
+        try:
+            with self.db_lock:
+                cursor = self.conn.cursor()
+                if advisory_id:
+                    cursor.execute(
+                        "DELETE FROM ai_solutions WHERE cve_id = ? AND dell_advisory_id = ?",
+                        (cve_id, advisory_id)
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM ai_solutions "
+                        "WHERE cve_id = ? AND (dell_advisory_id IS NULL OR dell_advisory_id = '' OR dell_advisory_id = 'NA')",
+                        (cve_id,)
+                    )
+                deleted = cursor.rowcount
+                self.conn.commit()
+                return deleted if deleted is not None else 0
+        except Exception as e:
+            self.log(f"删除旧 AI 分析记录失败: {str(e)}")
+            return 0
+
     def save_ai_solution_to_db(self, cve_data, dell_advisory_data, result, status="成功"):
         """保存AI分析结果到数据库"""
         try:
@@ -11707,7 +12285,7 @@ Qwen API密钥未设置。
                         datetime.now().isoformat(),
                         os.getenv("QWEN_MODEL", "qwen3.6-plus"),
                         "",  # 提示词可选
-                        result[:10000],  # 限制长度
+                        result,  # SQLite TEXT 无实际长度限制，保留完整内容
                         status
                     )
                 )
@@ -11751,7 +12329,7 @@ Qwen API密钥未设置。
                             datetime.now().isoformat(),
                             os.getenv("QWEN_MODEL", "qwen3.6-plus"),
                             "",
-                            result[:10000],
+                            result,
                             status
                         )
                     )
@@ -11763,9 +12341,10 @@ Qwen API密钥未设置。
     def load_ai_solution_history(self):
         """从数据库加载历史记录"""
         try:
-            # 清空TreeView
+            # 清空TreeView 以及内存缓存，避免重复追加导致索引错位
             for item in self.solution_tree.get_children():
                 self.solution_tree.delete(item)
+            self.solution_history = []
 
             with self.db_lock:
                 cursor = self.conn.cursor()
@@ -11877,16 +12456,29 @@ CVE编号: {cve_id} | {source_info}
                 if choice is None:
                     return
                 if choice:
-                    # 根据选中行的索引获取对应的 solution_history 条目
-                    all_iids = self.solution_tree.get_children()
-                    selected_indices = set()
+                    # 通过选中行的完整 values 精确匹配 solution_history 记录
+                    # 不再使用 iid 位置索引，避免内存列表与 Treeview 顺序不一致时取错
+                    export_data = []
+                    matched_db_ids = set()
                     for iid in selected_iids:
-                        try:
-                            selected_indices.add(all_iids.index(iid))
-                        except ValueError:
-                            pass
-                    export_data = [self.solution_history[i] for i in sorted(selected_indices)
-                                   if i < len(self.solution_history)]
+                        values = self.solution_tree.item(iid, 'values')
+                        if not values or len(values) < 3:
+                            continue
+                        time_str, cve_id, advisory_id = str(values[0]), str(values[1]), str(values[2])
+                        match = None
+                        for h in self.solution_history:
+                            h_id = h.get('id')
+                            if h_id is not None and h_id in matched_db_ids:
+                                continue
+                            if (str(h.get('cve_id', '')) == cve_id
+                                    and str(h.get('advisory_id', '')) == advisory_id
+                                    and str(h.get('time', '')) == time_str):
+                                match = h
+                                break
+                        if match:
+                            if match.get('id') is not None:
+                                matched_db_ids.add(match['id'])
+                            export_data.append(match)
                 else:
                     export_data = self.solution_history
             else:
@@ -11898,7 +12490,7 @@ CVE编号: {cve_id} | {source_info}
 
             filepath = filedialog.asksaveasfilename(
                 defaultextension=".html",
-                filetypes=[("HTML文件", "*.html"), ("文本文件", "*.txt"), ("CSV文件", "*.csv"), ("所有文件", "*.*")]
+                filetypes=[("HTML文件", "*.html"), ("Markdown文件", "*.md"), ("文本文件", "*.txt"), ("CSV文件", "*.csv"), ("所有文件", "*.*")]
             )
 
             if not filepath:
@@ -11907,6 +12499,8 @@ CVE编号: {cve_id} | {source_info}
             with open(filepath, 'w', encoding='utf-8') as f:
                 if filepath.endswith('.html'):
                     self._export_solution_as_html(f, export_data)
+                elif filepath.endswith('.md'):
+                    self._export_solution_as_markdown(f, export_data)
                 elif filepath.endswith('.csv'):
                     import csv
                     writer = csv.writer(f)
@@ -11917,7 +12511,7 @@ CVE编号: {cve_id} | {source_info}
                             history['cve_id'],
                             history['advisory_id'],
                             history['status'],
-                            history['result'][:200]
+                            history['result']
                         ])
                 else:
                     for history in export_data:
@@ -11936,6 +12530,30 @@ CVE编号: {cve_id} | {source_info}
             error_msg = f"导出历史记录失败: {str(e)}"
             self.log(error_msg)
             messagebox.showerror("错误", error_msg)
+
+    def _export_solution_as_markdown(self, f, export_data):
+        """将解决方案历史记录导出为 Markdown 格式"""
+        from datetime import datetime
+        f.write("# AI 解决方案分析报告\n\n")
+        f.write(f"> 导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  \n")
+        f.write(f"> 共 {len(export_data)} 条记录\n\n")
+        f.write("---\n\n")
+        for i, history in enumerate(export_data, 1):
+            cve_id = history.get('cve_id', 'N/A')
+            advisory_id = history.get('advisory_id', 'N/A')
+            f.write(f"## {i}. {cve_id}")
+            if advisory_id and advisory_id != 'N/A':
+                f.write(f" / {advisory_id}")
+            f.write("\n\n")
+            f.write(f"| 字段 | 内容 |\n")
+            f.write(f"|------|------|\n")
+            f.write(f"| CVE 编号 | {cve_id} |\n")
+            f.write(f"| 公告编号 | {advisory_id} |\n")
+            f.write(f"| 分析时间 | {history.get('time', 'N/A')} |\n")
+            f.write(f"| 状态 | {history.get('status', 'N/A')} |\n\n")
+            f.write("### 分析结果\n\n")
+            f.write(f"{history.get('result', '无内容')}\n\n")
+            f.write("---\n\n")
 
     def _export_solution_as_html(self, f, export_data):
         """将解决方案历史记录导出为 HTML 格式"""
