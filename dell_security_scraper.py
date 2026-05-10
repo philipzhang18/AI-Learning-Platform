@@ -12,6 +12,12 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Set, Optional, Callable
 import logging
 
+try:
+    from i18n import t as _t
+except ImportError:
+    def _t(key, **kwargs):
+        return key
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -1089,7 +1095,7 @@ class DellSecurityScraper:
                 return None
 
         total = len(advisories)
-        _log(f"开始重新获取 {total} 条公告的发布日期...")
+        _log(_t("dell_fix_requery_start", total=total))
 
         for i, adv in enumerate(advisories):
             dsa_id = adv['dsa_id']
@@ -1101,11 +1107,11 @@ class DellSecurityScraper:
                 updated.append({'dsa_id': dsa_id, 'new_date': new_date, 'old_date': old_date})
 
             if (i + 1) % 10 == 0 or i == total - 1:
-                _log(f"进度: {i+1}/{total}，已更新 {len(updated)} 条")
+                _log(_t("dell_fix_progress", done=i+1, total=total, updated=len(updated)))
 
             await asyncio.sleep(0.5)
 
-        _log(f"完成！共更新 {len(updated)} 条发布日期")
+        _log(_t("dell_fix_done", count=len(updated)))
         return updated
 
     def _extract_date_from_content(self, content: str, dsa_id: str) -> str:

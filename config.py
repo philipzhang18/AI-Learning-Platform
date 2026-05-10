@@ -6,6 +6,7 @@
     from config import COLORS, FONTS, AI_CONFIG
 """
 import os
+import json
 from pathlib import Path
 
 # ==================== 颜色主题 ====================
@@ -93,6 +94,47 @@ UI_CONFIG = {
     "left_panel_width": 200,         # 智能学习左侧面板宽度
     "default_window_geometry": "1280x800",
 }
+
+# ==================== 语言配置 ====================
+LANGUAGE_CONFIG_FILE = DATA_DIR / "language_config.json"
+
+
+def get_language_setting() -> str:
+    """获取保存的语言设置
+
+    Returns:
+        语言代码 ('zh_CN' 或 'en_US')，默认为 'zh_CN'
+    """
+    try:
+        if LANGUAGE_CONFIG_FILE.exists():
+            with open(LANGUAGE_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                return config.get('language', 'zh_CN')
+    except Exception:
+        pass
+    return 'zh_CN'
+
+
+def save_language_setting(language: str) -> bool:
+    """保存语言设置
+
+    Args:
+        language: 语言代码 ('zh_CN' 或 'en_US')
+
+    Returns:
+        是否保存成功
+    """
+    try:
+        # 确保数据目录存在
+        LANGUAGE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        config = {'language': language}
+        with open(LANGUAGE_CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"保存语言设置失败: {e}")
+        return False
 
 
 def get_api_key(provider: str) -> str:

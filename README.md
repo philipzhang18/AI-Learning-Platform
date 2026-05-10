@@ -2,7 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-5.4.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.5.0-orange.svg)](CHANGELOG.md)
 
 以**知识管理**为核心的智能平台，通过多渠道收集学习资料（播客、文件、网页、数据库数据），采用 AI 方法进行深度学习与分析。
 
@@ -12,9 +12,9 @@
 
 | 指标 | 数值 |
 |------|------|
-| Python 总代码行数 | ~17,300 行 |
-| 主程序 (cve_integrated_gui.py) | ~13,100 行 |
-| 核心 Python 文件 | 17 个 |
+| Python 总代码行数 | ~17,600 行 |
+| 主程序 (cve_integrated_gui.py) | ~13,700 行 |
+| 核心 Python 文件 | 18 个（含 i18n.py） |
 | GUI 标签页 | 9 个主标签 + 3 个子标签 |
 | 数据库表 | 28 张（含 FTS 虚拟表） |
 | 数据库大小 | ~496 MB |
@@ -24,6 +24,13 @@
 ---
 
 ## 功能概览
+
+### 🌐 国际化支持
+- **中英文界面切换** — 支持中文和英文界面，可在应用内切换
+- **语言持久化** — 语言设置自动保存，重启后保持
+- **完整国际化** — 界面元素、按钮、消息提示、日志输出、AI 分析报告全面支持双语
+- **AI 报告双语** — 单条和多行 AI 分析报告按当前界面语言输出（含图标、星级严重等级、粗体关键点）
+- **导出双语** — 解决方案历史导出 HTML/Markdown/CSV/TXT 在英文模式下全部输出英文
 
 ### 内容收集
 - **NVD CVE 数据采集** — 从 NVD 获取最新漏洞数据，支持自定义时间范围
@@ -117,9 +124,10 @@ EXA_API_KEY=your_exa_api_key
 ## 项目结构
 
 ```
-├── cve_integrated_gui.py      # 主程序（13,066 行，GUI 入口）
+├── cve_integrated_gui.py      # 主程序（~13,700 行，GUI 入口）
+├── i18n.py                    # 国际化文本（zh_CN / en_US 双语词典）
 ├── collect_cves.py            # NVD CVE 数据采集器
-├── dell_security_scraper.py   # Dell 安全公告爬虫
+├── dell_security_scraper.py   # Dell 安全公告爬虫（支持 i18n 日志回调）
 ├── redis_manager.py           # Redis 缓存管理
 ├── llm_config.py              # LLM API 配置
 ├── ai_client.py               # 统一 OpenAI 客户端初始化
@@ -153,8 +161,8 @@ EXA_API_KEY=your_exa_api_key
 | 📰 IT新闻简报 | 科技新闻采集与 AI 简报生成 |
 | 📊 NVD CVE 数据 | CVE 漏洞数据采集、搜索、删除 |
 | 🏢 Dell 安全公告 | Dell 安全公告抓取与管理 |
-| 🔗 CVE-Dell 关联 | 漏洞与公告自动关联匹配 |
-| 💡 解决方案 | AI 分析历史记录与导出 |
+| 🔗 CVE-DSA 关联 | 漏洞与公告自动关联匹配，支持多行联合分析 |
+| 💡 AI 解决方案 | AI 分析历史记录与导出（双语 HTML/MD/CSV/TXT） |
 | 📖 Dell技术库 | Dell 技术文档抓取、导入导出 |
 | 📈 统计分析 | 数据可视化（饼图/趋势图/汇聚图） |
 | 🧠 智能学习 | 费曼学习法 AI 对话、学习产物生成 |
@@ -169,6 +177,7 @@ EXA_API_KEY=your_exa_api_key
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| v5.5.0 | 2026-05-10 | 全面双语化（GUI/日志/AI 报告/导出），AI 联合分析富排版（图标/星级/粗体），修复进度条初始化 Bug |
 | v5.4.0 | 2026-04-26 | 智能学习增强（自动摘要/来源引用/学习产物），项目架构优化 |
 | v5.3.0 | 2026-04-10 | 数据导入导出面板，8 数据源 3 格式导出，Dell 技术库导入 |
 | v5.2.0 | 2026-04-08 | 统计分析可视化增强，智能学习关键字搜索，关联详情修复 |
