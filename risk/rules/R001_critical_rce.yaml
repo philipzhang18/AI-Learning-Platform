@@ -1,0 +1,47 @@
+# 关键远程代码执行漏洞规则
+# 触发条件：CVE 严重度为 CRITICAL 且 CWE 属于 RCE 类
+rule_id: R001
+name: 未修复的关键远程代码执行漏洞
+severity: CRITICAL
+description: >
+  产品存在 CRITICAL 级别的远程代码执行漏洞（RCE）。
+  RCE 是攻击者最青睐的漏洞类型之一，可导致完全系统接管。
+  相关 CWE 包括：CWE-78 (OS 命令注入)、CWE-94 (代码注入)、
+  CWE-502 (不安全反序列化)、CWE-77 (命令注入)。
+tags: [rce, critical, patching]
+match_mode: all
+conditions:
+  - type: cve_severity
+    operator: in
+    value: [CRITICAL]
+  - type: cwe_match
+    operator: in
+    value: [CWE-78, CWE-94, CWE-502, CWE-77, CWE-20]
+
+recommendations:
+  - title: 立即应用官方安全补丁
+    description: >
+      登录厂商支持门户下载最新固件/补丁，按维护窗口尽快部署。
+      如无法立即停机，优先对对外暴露的实例打补丁。
+    priority: P0
+    timeline: 24 小时内
+    action_type: patch
+    estimated_effort: 中
+
+  - title: 实施网络分段与访问控制
+    description: >
+      在补丁就绪前，通过防火墙/ACL 限制受影响服务的访问来源，
+      仅允许受信任的管理网段访问管理接口。
+    priority: P0
+    timeline: 立即
+    action_type: config
+    estimated_effort: 低
+
+  - title: 启用 IDS/IPS 规则集更新
+    description: >
+      确认 IDS/IPS 已加载针对此类 CVE 的最新特征库，
+      配合 SIEM 实时监控异常连接与命令执行行为。
+    priority: P1
+    timeline: 48 小时内
+    action_type: monitor
+    estimated_effort: 低

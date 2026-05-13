@@ -1,0 +1,44 @@
+# 认证绕过
+rule_id: R008
+name: 认证绕过漏洞
+severity: CRITICAL
+description: >
+  产品存在可绕过认证机制的漏洞。
+  相关 CWE：CWE-287 (不当认证)、CWE-306 (缺失认证)、
+  CWE-798 (硬编码凭据)、CWE-521 (弱密码策略)。
+tags: [auth_bypass, identity]
+match_mode: all
+conditions:
+  - type: cwe_match
+    operator: in
+    value: [CWE-287, CWE-306, CWE-798, CWE-521, CWE-304]
+  - type: cve_severity
+    operator: in
+    value: [CRITICAL, HIGH]
+
+recommendations:
+  - title: 立即禁用或隔离受影响服务
+    description: >
+      在补丁就绪前，将受影响服务从公网下线或限制在白名单网络中。
+    priority: P0
+    timeline: 立即
+    action_type: config
+    estimated_effort: 低
+
+  - title: 强制密码重置与会话失效
+    description: >
+      假设认证已被绕过，对所有用户强制密码重置，
+      使现有会话 token 全部失效。
+    priority: P0
+    timeline: 24 小时内
+    action_type: response
+    estimated_effort: 中
+
+  - title: 审计近期登录日志
+    description: >
+      排查异常登录（异地 IP、非工作时间、失败后成功等）
+      确认是否已有账号被攻破。
+    priority: P0
+    timeline: 24 小时内
+    action_type: monitor
+    estimated_effort: 中

@@ -1,0 +1,53 @@
+# 内存安全缺陷
+rule_id: R010
+name: 内存安全缺陷
+severity: HIGH
+description: >
+  产品存在缓冲区溢出、UAF、释放后使用等内存安全漏洞。
+  这类漏洞常被用于开发 0day 攻击和可靠的漏洞利用链。
+  相关 CWE：CWE-119 (缓冲区错误)、CWE-120 (经典缓冲区溢出)、
+  CWE-416 (UAF)、CWE-125 (越界读)、CWE-787 (越界写)。
+tags: [memory_safety, native]
+match_mode: all
+conditions:
+  - type: cwe_match
+    operator: in
+    value: [CWE-119, CWE-120, CWE-416, CWE-125, CWE-787, CWE-476]
+  - type: cve_severity
+    operator: in
+    value: [CRITICAL, HIGH]
+
+recommendations:
+  - title: 启用操作系统级防护
+    description: >
+      确保启用 ASLR、DEP/NX、Control Flow Guard、Stack Canaries 等防护。
+      Linux 系统确认开启 PIE 编译和 seccomp。
+    priority: P1
+    timeline: 7 天内
+    action_type: config
+    estimated_effort: 低
+
+  - title: 启用编译器加固选项
+    description: >
+      若为自研组件，使用 -fstack-protector-strong、-D_FORTIFY_SOURCE=2、
+      -Wl,-z,relro,-z,now 等加固选项重新编译。
+    priority: P2
+    timeline: 30 天内
+    action_type: patch
+    estimated_effort: 中
+
+  - title: 考虑内存安全语言迁移
+    description: >
+      新组件优先选用 Rust/Go 等内存安全语言，
+      现有 C/C++ 核心组件逐步评估迁移可行性。
+    priority: P4
+    timeline: 长期规划
+    action_type: architect
+    estimated_effort: 高
+
+  - title: 应用安全补丁
+    description: 补丁是根本解决办法，优先部署。
+    priority: P1
+    timeline: 48 小时内
+    action_type: patch
+    estimated_effort: 中

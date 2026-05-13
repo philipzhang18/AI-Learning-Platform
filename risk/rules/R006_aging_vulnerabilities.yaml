@@ -1,0 +1,44 @@
+# 长期未修复漏洞（陈旧风险）
+rule_id: R006
+name: 长期未修复的已知漏洞
+severity: MEDIUM
+description: >
+  产品存在超过 180 天仍未修复的已知漏洞，表明补丁管理流程存在缺口。
+  陈旧漏洞是 APT 攻击的常见入口。
+tags: [patch_management, aging]
+match_mode: all
+conditions:
+  - type: age_days
+    operator: greater_than
+    value: 180
+  - type: cve_severity
+    operator: in
+    value: [CRITICAL, HIGH]
+
+recommendations:
+  - title: 建立补丁管理 SLA
+    description: >
+      按 CVSS 等级制定补丁部署时限（Critical 7 天、High 30 天、
+      Medium 90 天），通过 KPI 推动落实。
+    priority: P1
+    timeline: 30 天内
+    action_type: architect
+    estimated_effort: 中
+
+  - title: 清点所有陈旧 CVE 制定修复计划
+    description: >
+      对超过 180 天未修复的漏洞做专项清单，
+      按优先级排期在下一个维护窗口处理。
+    priority: P1
+    timeline: 14 天内
+    action_type: patch
+    estimated_effort: 高
+
+  - title: 启用自动化补丁部署
+    description: >
+      对非关键系统启用自动化补丁工具（如 WSUS、Ansible 自动化）
+      降低人工成本。
+    priority: P2
+    timeline: 60 天内
+    action_type: config
+    estimated_effort: 中

@@ -1,0 +1,43 @@
+# 敏感信息泄露漏洞
+rule_id: R003
+name: 敏感信息泄露风险
+severity: HIGH
+description: >
+  产品存在可能导致凭据、密钥、配置或用户数据泄露的漏洞。
+  相关 CWE：CWE-200 (信息暴露)、CWE-522 (凭据保护不足)、
+  CWE-798 (硬编码凭据)、CWE-532 (日志敏感信息泄露)。
+tags: [information_disclosure, secrets]
+match_mode: all
+conditions:
+  - type: cwe_match
+    operator: in
+    value: [CWE-200, CWE-522, CWE-798, CWE-532, CWE-209]
+  - type: cve_severity
+    operator: in
+    value: [CRITICAL, HIGH, MEDIUM]
+
+recommendations:
+  - title: 轮换所有可能泄露的凭据
+    description: >
+      假设已被获取，立即轮换 API Key、服务账号密码、证书等。
+      重点关注存储在配置文件、环境变量、日志中的凭据。
+    priority: P0
+    timeline: 24 小时内
+    action_type: response
+    estimated_effort: 中
+
+  - title: 审计访问日志排查泄露面
+    description: >
+      检索受影响时段的访问日志，确认是否已发生实际数据访问。
+      必要时通知合规团队启动数据泄露响应流程。
+    priority: P1
+    timeline: 48 小时内
+    action_type: monitor
+    estimated_effort: 中
+
+  - title: 启用传输层加密（如尚未启用）
+    description: 强制 TLS 1.2+，禁用明文传输协议。
+    priority: P1
+    timeline: 7 天内
+    action_type: config
+    estimated_effort: 低

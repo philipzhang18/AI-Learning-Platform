@@ -1,0 +1,44 @@
+# 高漏洞密度产品风险（基于风险评分）
+rule_id: R005
+name: 高风险产品（综合评分）
+severity: HIGH
+description: >
+  产品综合风险评分 >= 75，表明存在多重高危漏洞、曝光面广、时效性新。
+  需要从架构层面审视该产品的安全态势。
+tags: [high_risk, strategic]
+match_mode: all
+conditions:
+  - type: score_above
+    operator: greater_than
+    value: 75
+  - type: cve_count
+    operator: greater_than
+    value: 5
+
+recommendations:
+  - title: 制定该产品的年度安全路线图
+    description: >
+      将本产品纳入年度安全评审重点：制定补丁计划、
+      安全培训、渗透测试、架构评估等全生命周期管控。
+    priority: P2
+    timeline: 30 天内
+    action_type: architect
+    estimated_effort: 高
+
+  - title: 部署集中化漏洞管理
+    description: >
+      使用漏洞管理平台（如 Tenable、Qualys）对该产品进行持续扫描，
+      建立 CVE-资产-补丁的追踪闭环。
+    priority: P2
+    timeline: 30 天内
+    action_type: monitor
+    estimated_effort: 中
+
+  - title: 评估替代产品或版本升级
+    description: >
+      如产品长期处于高风险状态，考虑升级到厂商主推的新系列
+      或评估市场同类产品。
+    priority: P3
+    timeline: 90 天内
+    action_type: architect
+    estimated_effort: 高

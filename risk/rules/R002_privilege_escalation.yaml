@@ -1,0 +1,42 @@
+# 权限提升漏洞规则
+rule_id: R002
+name: 本地或远程权限提升漏洞
+severity: HIGH
+description: >
+  产品存在权限提升（EoP）漏洞，攻击者可从普通权限获取管理员/root 权限。
+  相关 CWE：CWE-269 (权限管理不当)、CWE-284 (访问控制不当)、
+  CWE-287 (认证不当)、CWE-863 (授权不正确)。
+tags: [privilege_escalation, authorization]
+match_mode: all
+conditions:
+  - type: cve_severity
+    operator: in
+    value: [CRITICAL, HIGH]
+  - type: cwe_match
+    operator: in
+    value: [CWE-269, CWE-284, CWE-287, CWE-863, CWE-264]
+
+recommendations:
+  - title: 审查并收敛服务账号权限
+    description: >
+      梳理受影响产品使用的服务账号，遵循最小权限原则，
+      移除未使用的管理员/高权限角色绑定。
+    priority: P1
+    timeline: 7 天内
+    action_type: config
+    estimated_effort: 中
+
+  - title: 启用多因子认证（MFA）
+    description: >
+      对管理员账号强制启用 MFA，降低凭据被盗后的横向移动风险。
+    priority: P1
+    timeline: 7 天内
+    action_type: config
+    estimated_effort: 低
+
+  - title: 应用厂商补丁
+    description: 按官方安全公告升级到修复版本。
+    priority: P1
+    timeline: 48 小时内
+    action_type: patch
+    estimated_effort: 中

@@ -1,0 +1,41 @@
+# 加密弱点
+rule_id: R009
+name: 加密实现弱点
+severity: MEDIUM
+description: >
+  产品使用弱加密算法或存在加密实现缺陷。
+  相关 CWE：CWE-327 (弱加密算法)、CWE-326 (密钥强度不足)、
+  CWE-329 (可预测 IV)、CWE-328 (弱哈希)。
+tags: [crypto, compliance]
+match_mode: all
+conditions:
+  - type: cwe_match
+    operator: in
+    value: [CWE-327, CWE-326, CWE-329, CWE-328, CWE-330, CWE-338]
+
+recommendations:
+  - title: 升级到现代加密标准
+    description: >
+      弃用 MD5/SHA-1/DES/RC4，使用 SHA-256+、AES-GCM。
+      TLS 配置强制 1.2+，禁用弱密码套件。
+    priority: P2
+    timeline: 30 天内
+    action_type: config
+    estimated_effort: 中
+
+  - title: 实施 PKI 与证书管理
+    description: >
+      建立集中证书管理（自动申请、轮换、吊销），
+      所有证书至少 2048 位 RSA 或 256 位 ECDSA。
+    priority: P3
+    timeline: 60 天内
+    action_type: architect
+    estimated_effort: 高
+
+  - title: 合规性自查
+    description: >
+      对照 PCI-DSS / HIPAA / 等级保护等标准检查加密合规性。
+    priority: P2
+    timeline: 30 天内
+    action_type: config
+    estimated_effort: 低

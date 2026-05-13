@@ -1,0 +1,41 @@
+# 注入类漏洞（SQL、命令、XSS 等）
+rule_id: R007
+name: 注入类漏洞
+severity: HIGH
+description: >
+  产品存在注入类漏洞（SQL 注入、XSS、命令注入等），
+  这类漏洞历来在 OWASP Top 10 榜首，利用门槛低、危害大。
+  相关 CWE：CWE-89 (SQL 注入)、CWE-79 (XSS)、CWE-78 (OS 命令注入)、
+  CWE-91 (XML 注入)、CWE-90 (LDAP 注入)。
+tags: [injection, owasp_top10]
+match_mode: all
+conditions:
+  - type: cwe_match
+    operator: in
+    value: [CWE-89, CWE-79, CWE-78, CWE-91, CWE-90, CWE-917]
+
+recommendations:
+  - title: 部署 Web 应用防火墙 (WAF)
+    description: >
+      在受影响应用前置 WAF 规则，拦截常见注入载荷。
+      推荐使用 OWASP ModSecurity CRS 规则集。
+    priority: P1
+    timeline: 7 天内
+    action_type: config
+    estimated_effort: 中
+
+  - title: 实施参数化查询与输出编码
+    description: >
+      开发团队对所有用户输入实施参数化/预编译处理，
+      对输出到 HTML/JS/SQL 的数据做上下文编码。
+    priority: P1
+    timeline: 30 天内
+    action_type: patch
+    estimated_effort: 高
+
+  - title: 应用安全补丁
+    description: 升级到厂商修复版本。
+    priority: P1
+    timeline: 48 小时内
+    action_type: patch
+    estimated_effort: 中
