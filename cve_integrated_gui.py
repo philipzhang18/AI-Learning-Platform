@@ -1329,11 +1329,15 @@ class CVEIntegratedGUI:
         self.stats_frame = tk.Frame(self.notebook, bg="white")
         self.stats_tab_id = self.notebook.add(self.stats_frame, text=t("tab_stats"))
 
-        # 7. 智能学习标签页
+        # 7. 知识图谱标签页
+        self.graph_frame = tk.Frame(self.notebook, bg="white")
+        self.graph_tab_id = self.notebook.add(self.graph_frame, text=t("tab_graph"))
+
+        # 8. 智能学习标签页
         self.learn_frame = tk.Frame(self.notebook, bg="white")
         self.learn_tab_id = self.notebook.add(self.learn_frame, text=t("tab_learn"))
 
-        # 8. 日志标签页
+        # 9. 日志标签页
         self.log_frame = tk.Frame(self.notebook, bg="white")
         self.log_tab_id = self.notebook.add(self.log_frame, text=t("tab_log"))
 
@@ -1345,6 +1349,7 @@ class CVEIntegratedGUI:
         self.create_solution_view()
         self.create_dell_kb_view()
         self.create_stats_view()
+        self.create_graph_view()
         self.create_learn_view()
         self.create_log_view()
 
@@ -5514,6 +5519,423 @@ Script requirements:
 
         for ci in range(3):
             table_frame.columnconfigure(ci, weight=1)
+
+    # ════════════════════════════════════════════════════════════════════
+    # 知识图谱标签页（NetworkX 内存图）
+    # ════════════════════════════════════════════════════════════════════
+    def create_graph_view(self):
+        """创建知识图谱标签页：构图 / 查询 / 可视化 / 导出"""
+        from tkinter import filedialog as _fd
+
+        # 懒加载状态
+        self._kg = None  # 实例在首次构建时创建
+
+        root_frame = tk.Frame(self.graph_frame, bg="white")
+        root_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ── 顶部说明 ─────────────────────────────────────────────────
+        header = tk.Frame(root_frame, bg="#eaf3fb")
+        header.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(header, text=t("kg_title"), bg="#eaf3fb",
+                 fg=self.primary_color,
+                 font=("Microsoft YaHei", 14, "bold")).pack(anchor="w", padx=10, pady=(8, 0))
+        tk.Label(header, text=t("kg_desc"), bg="#eaf3fb", fg="#555",
+                 font=("Microsoft YaHei", 9)).pack(anchor="w", padx=10, pady=(0, 8))
+
+        # ── 控制行 ──────────────────────────────────────────────────
+        ctrl = tk.Frame(root_frame, bg="white")
+        ctrl.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(ctrl, text=t("kg_limit_cve") + ":", bg="white").pack(side=tk.LEFT)
+        self.kg_limit_cve_var = tk.StringVar(value="5000")
+        tk.Entry(ctrl, textvariable=self.kg_limit_cve_var, width=8).pack(side=tk.LEFT, padx=(4, 12))
+
+        tk.Label(ctrl, text=t("kg_limit_dsa") + ":", bg="white").pack(side=tk.LEFT)
+        self.kg_limit_dsa_var = tk.StringVar(value="")  # 空 = 全量
+        tk.Entry(ctrl, textvariable=self.kg_limit_dsa_var, width=8).pack(side=tk.LEFT, padx=(4, 12))
+
+        tk.Label(ctrl, text=t("kg_severity_filter") + ":", bg="white").pack(side=tk.LEFT)
+        self.kg_severity_var = tk.StringVar(value=t("kg_severity_all"))
+        ttk.Combobox(
+            ctrl, textvariable=self.kg_severity_var,
+            values=[t("kg_severity_all"), "CRITICAL", "HIGH", "MEDIUM", "LOW"],
+            state="readonly", width=10,
+        ).pack(side=tk.LEFT, padx=(4, 12))
+
+        tk.Button(
+            ctrl, text=t("kg_build"), command=self._kg_build_async,
+            bg=self.primary_color, fg="white", relief=tk.FLAT,
+            font=("Microsoft YaHei", 9, "bold"), padx=12, pady=4,
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            ctrl, text=t("kg_export_graphml"),
+            command=lambda: self._kg_export("graphml", _fd),
+            bg="#95a5a6", fg="white", relief=tk.FLAT, padx=10, pady=4,
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            ctrl, text=t("kg_export_json"),
+            command=lambda: self._kg_export("json", _fd),
+            bg="#95a5a6", fg="white", relief=tk.FLAT, padx=10, pady=4,
+        ).pack(side=tk.LEFT, padx=4)
+
+        self.kg_status_label = tk.Label(
+            ctrl, text=t("kg_not_built"), bg="white", fg="#888",
+            font=("Microsoft YaHei", 9, "italic"),
+        )
+        self.kg_status_label.pack(side=tk.LEFT, padx=12)
+
+        # ── 主体：左侧查询面板 + 右侧画布 ─────────────────────────────
+        body = tk.Frame(root_frame, bg="white")
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # 左面板
+        left = tk.LabelFrame(body, text=t("kg_query"), bg="white",
+                             font=("Microsoft YaHei", 10, "bold"),
+                             fg=self.primary_color)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
+
+        tk.Label(left, text=t("kg_node_input"), bg="white",
+                 font=("Microsoft YaHei", 9)).pack(anchor="w", padx=8, pady=(8, 2))
+        self.kg_node_var = tk.StringVar()
+        tk.Entry(left, textvariable=self.kg_node_var, width=32).pack(padx=8, pady=(0, 6))
+
+        row = tk.Frame(left, bg="white")
+        row.pack(anchor="w", padx=8, pady=(0, 6))
+        tk.Label(row, text=t("kg_radius") + ":", bg="white").pack(side=tk.LEFT)
+        self.kg_radius_var = tk.IntVar(value=1)
+        ttk.Spinbox(row, from_=1, to=3, textvariable=self.kg_radius_var,
+                    width=4).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(row, text=t("kg_layout") + ":", bg="white").pack(side=tk.LEFT, padx=(12, 0))
+        self.kg_layout_var = tk.StringVar(value="spring")
+        ttk.Combobox(row, textvariable=self.kg_layout_var,
+                     values=["spring", "kamada_kawai", "circular"],
+                     state="readonly", width=14).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            left, text=t("kg_visualize"), command=self._kg_visualize,
+            bg=self.success_color, fg="white", relief=tk.FLAT,
+            font=("Microsoft YaHei", 9, "bold"),
+        ).pack(fill=tk.X, padx=8, pady=(0, 10))
+
+        # 统计区
+        stats_lf = tk.LabelFrame(left, text=t("kg_stats"), bg="white",
+                                 font=("Microsoft YaHei", 9, "bold"),
+                                 fg=self.info_color)
+        stats_lf.pack(fill=tk.X, padx=6, pady=4)
+        self.kg_stats_text = tk.Text(stats_lf, height=8, width=34,
+                                     font=("Consolas", 9), wrap=tk.NONE,
+                                     bg="#fafafa", relief=tk.FLAT)
+        self.kg_stats_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.kg_stats_text.insert("1.0", t("kg_no_data"))
+        self.kg_stats_text.config(state=tk.DISABLED)
+
+        # 邻居 / Top 列表
+        neigh_lf = tk.LabelFrame(left, text=t("kg_neighbors"), bg="white",
+                                 font=("Microsoft YaHei", 9, "bold"),
+                                 fg=self.info_color)
+        neigh_lf.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self.kg_neighbors_tree = ttk.Treeview(
+            neigh_lf,
+            columns=("type", "relation", "label"),
+            show="headings", height=14,
+        )
+        self.kg_neighbors_tree.heading("type", text="type")
+        self.kg_neighbors_tree.heading("relation", text=t("kg_relation"))
+        self.kg_neighbors_tree.heading("label", text="label")
+        self.kg_neighbors_tree.column("type", width=70, anchor="w")
+        self.kg_neighbors_tree.column("relation", width=90, anchor="w")
+        self.kg_neighbors_tree.column("label", width=180, anchor="w")
+        self.kg_neighbors_tree.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        # 双击邻居 → 以之为中心重绘
+        self.kg_neighbors_tree.bind("<Double-1>", self._kg_on_neighbor_dblclick)
+
+        # 右画布
+        right = tk.LabelFrame(body, text="Graph view", bg="white",
+                              font=("Microsoft YaHei", 10, "bold"),
+                              fg=self.primary_color)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.kg_canvas_host = tk.Frame(right, bg="white")
+        self.kg_canvas_host.pack(fill=tk.BOTH, expand=True)
+        # 占位提示
+        tk.Label(self.kg_canvas_host, text=t("kg_no_data"), bg="white",
+                 fg="#aaa", font=("Microsoft YaHei", 10, "italic")).pack(expand=True)
+
+    # ─── 内部方法：构图 / 查询 / 可视化 / 导出 ─────────────────────────
+    def _kg_build_async(self):
+        """异步构建图谱，避免阻塞 UI（支持缓存加载）"""
+        def _worker():
+            try:
+                from knowledge_graph import KnowledgeGraph
+                from pathlib import Path
+
+                limit_cve = self._kg_parse_int(self.kg_limit_cve_var.get())
+                limit_dsa = self._kg_parse_int(self.kg_limit_dsa_var.get())
+                sev_sel = self.kg_severity_var.get()
+                all_label = t("kg_severity_all")
+                sev_wl = None if sev_sel == all_label else {sev_sel}
+                db_path = str(self.data_dir / "cve_database.db")
+                cache_path = self.data_dir / "kg_cache.pkl"
+
+                # 尝试从缓存加载
+                if cache_path.exists():
+                    try:
+                        self.root.after(0, lambda: self._kg_set_status("正在从缓存加载知识图谱..."))
+                        kg = KnowledgeGraph.load_cache(cache_path)
+                        self._kg = kg
+                        self.root.after(0, self._kg_refresh_stats)
+                        self.root.after(0, lambda: self._kg_set_status("知识图谱已从缓存加载"))
+                        return
+                    except Exception as cache_err:
+                        # 缓存加载失败，回退到构图
+                        self.root.after(0, lambda: self._kg_set_status(
+                            f"缓存加载失败，重新构图: {cache_err}"))
+
+                # 构建新图谱
+                kg = KnowledgeGraph.from_sqlite(db_path)
+                self.root.after(0, lambda: self._kg_set_status(t("kg_building")))
+                kg.build(limit_cve=limit_cve, limit_dsa=limit_dsa,
+                         severity_whitelist=sev_wl)
+
+                # 保存缓存
+                try:
+                    kg.save_cache(cache_path)
+                    self.root.after(0, lambda: self._kg_set_status("知识图谱已构建并缓存"))
+                except Exception as save_err:
+                    self.root.after(0, lambda: self._kg_set_status(
+                        f"知识图谱已构建（缓存保存失败: {save_err}）"))
+
+                self._kg = kg
+                self.root.after(0, self._kg_refresh_stats)
+            except Exception as e:
+                err = str(e)
+                self.root.after(0, lambda: self._kg_set_status(
+                    t("kg_export_failed").format(err=err)))
+
+        self._kg_set_status(t("kg_building"))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @staticmethod
+    def _kg_parse_int(s):
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            n = int(s)
+            return n if n > 0 else None
+        except ValueError:
+            return None
+
+    def _kg_set_status(self, msg):
+        if hasattr(self, "kg_status_label") and self.kg_status_label.winfo_exists():
+            self.kg_status_label.config(text=msg)
+
+    def _kg_refresh_stats(self):
+        """刷新左侧统计与 Top 列表。"""
+        if not self._kg:
+            return
+        stats = self._kg.stats()
+        lines = []
+        lines.append(f"{t('kg_nodes')}: {stats.get('nodes_total', 0)}")
+        lines.append(f"  cve      : {stats.get('node:cve', 0)}")
+        lines.append(f"  dsa      : {stats.get('node:dsa', 0)}")
+        lines.append(f"  product  : {stats.get('node:product', 0)}")
+        lines.append(f"  cwe      : {stats.get('node:cwe', 0)}")
+        lines.append(f"{t('kg_edges')}: {stats.get('edges_total', 0)}")
+        lines.append(f"  mentions : {stats.get('edge:mentions', 0)}")
+        lines.append(f"  affects  : {stats.get('edge:affects', 0)}")
+        lines.append(f"  class_as : {stats.get('edge:classified_as', 0)}")
+        lines.append("")
+        lines.append(f"── {t('kg_top_products')} ──")
+        for name, cnt in self._kg.top_products(k=8):
+            lines.append(f"  {cnt:>4}  {name[:30]}")
+        lines.append("")
+        lines.append(f"── {t('kg_top_cwes')} ──")
+        for name, cnt in self._kg.top_cwes(k=8):
+            lines.append(f"  {cnt:>4}  {name}")
+
+        self.kg_stats_text.config(state=tk.NORMAL)
+        self.kg_stats_text.delete("1.0", tk.END)
+        self.kg_stats_text.insert("1.0", "\n".join(lines))
+        self.kg_stats_text.config(state=tk.DISABLED)
+
+    def _kg_visualize(self):
+        if not self._kg:
+            messagebox.showinfo(t("kg_title"), t("kg_not_built"))
+            return
+        node = (self.kg_node_var.get() or "").strip()
+        if not node:
+            messagebox.showinfo(t("kg_title"), t("kg_node_input"))
+            return
+        radius = max(1, int(self.kg_radius_var.get() or 1))
+        layout = self.kg_layout_var.get() or "spring"
+
+        # 1) 精确 / 规范化 / 模糊解析
+        resolved = self._kg._resolve_node(node)
+
+        # 2) 若仍找不到，弹出产品模糊候选
+        if resolved not in self._kg.G:
+            candidates = self._kg.fuzzy_candidates(node, limit=15)
+            if candidates:
+                picked = self._kg_pick_candidate(node, candidates)
+                if not picked:
+                    return
+                resolved = picked
+                self.kg_node_var.set(self._kg.G.nodes[resolved].get("label", resolved))
+            else:
+                messagebox.showinfo(
+                    t("kg_title"), t("kg_not_found").format(node=node))
+                return
+
+        # 3) 如果命中结果与输入不一致，提示用户
+        if resolved != node and resolved != f"product::{node}":
+            shown = self._kg.G.nodes[resolved].get("label", resolved)
+            self._kg_set_status(f"→ {shown}")
+
+        subG = self._kg.ego_subgraph(resolved, radius=radius)
+        if subG.number_of_nodes() == 0:
+            messagebox.showinfo(
+                t("kg_title"), t("kg_not_found").format(node=node))
+            return
+        self._kg_populate_neighbors(resolved)
+        self._kg_render_subgraph(subG, layout)
+
+    def _kg_pick_candidate(self, query, candidates):
+        """弹出候选选择框，返回被选中的节点 id；取消返回 None。"""
+        top = tk.Toplevel(self.root)
+        top.title(f"{t('kg_title')} — {query}")
+        top.geometry("520x360")
+        top.transient(self.root)
+        top.grab_set()
+
+        tk.Label(
+            top, text=f'"{query}" 模糊匹配产品候选（按关联度排序）：',
+            font=("Microsoft YaHei", 10), anchor="w",
+        ).pack(fill=tk.X, padx=10, pady=(10, 4))
+
+        cols = ("degree", "label")
+        tree = ttk.Treeview(top, columns=cols, show="headings", height=12)
+        tree.heading("degree", text="关联数")
+        tree.heading("label", text="产品全名")
+        tree.column("degree", width=70, anchor="center")
+        tree.column("label", width=420, anchor="w")
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+        id_map = {}
+        for node_id, label, deg in candidates:
+            iid = tree.insert("", tk.END, values=(deg, label))
+            id_map[iid] = node_id
+        # 默认选中第一行（关联度最高）
+        if id_map:
+            first = list(id_map.keys())[0]
+            tree.selection_set(first)
+            tree.focus(first)
+
+        selected = {"id": None}
+
+        def _ok():
+            sel = tree.selection()
+            if sel:
+                selected["id"] = id_map.get(sel[0])
+            top.destroy()
+
+        def _cancel():
+            top.destroy()
+
+        tree.bind("<Double-1>", lambda _e: _ok())
+
+        btns = tk.Frame(top)
+        btns.pack(fill=tk.X, padx=10, pady=8)
+        tk.Button(btns, text="选择", command=_ok, bg=self.primary_color,
+                  fg="white", relief=tk.FLAT, padx=14, pady=4).pack(side=tk.RIGHT, padx=4)
+        tk.Button(btns, text="取消", command=_cancel, bg="#95a5a6",
+                  fg="white", relief=tk.FLAT, padx=14, pady=4).pack(side=tk.RIGHT, padx=4)
+
+        self.root.wait_window(top)
+        return selected["id"]
+
+    def _kg_populate_neighbors(self, node):
+        for row in self.kg_neighbors_tree.get_children():
+            self.kg_neighbors_tree.delete(row)
+        G = self._kg.G
+        resolved = self._kg._resolve_node(node)
+        if resolved not in G:
+            return
+        seen = set()
+        for u, v, attr in G.out_edges(resolved, data=True):
+            if v in seen:
+                continue
+            seen.add(v)
+            ntype = G.nodes[v].get("type", "?")
+            label = G.nodes[v].get("label", v)
+            self.kg_neighbors_tree.insert(
+                "", tk.END, values=(ntype, attr.get("relation", ""), label))
+        for u, v, attr in G.in_edges(resolved, data=True):
+            if u in seen:
+                continue
+            seen.add(u)
+            ntype = G.nodes[u].get("type", "?")
+            label = G.nodes[u].get("label", u)
+            self.kg_neighbors_tree.insert(
+                "", tk.END,
+                values=(ntype, "← " + attr.get("relation", ""), label))
+
+    def _kg_on_neighbor_dblclick(self, _event):
+        sel = self.kg_neighbors_tree.selection()
+        if not sel:
+            return
+        vals = self.kg_neighbors_tree.item(sel[0], "values")
+        if not vals or len(vals) < 3:
+            return
+        ntype, _rel, label = vals
+        # 用 label 作为查询输入；对 product 节点需带前缀
+        self.kg_node_var.set(label)
+        self._kg_visualize()
+
+    def _kg_render_subgraph(self, subG, layout):
+        try:
+            import matplotlib
+            matplotlib.use("Agg")  # 非阻塞后端，Figure 通过 TkAgg canvas 嵌入
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
+            from knowledge_graph import draw_subgraph
+        except Exception as e:
+            messagebox.showerror(t("kg_title"), str(e))
+            return
+
+        # 清空旧画布
+        for w in self.kg_canvas_host.winfo_children():
+            w.destroy()
+
+        fig = Figure(figsize=(8, 5.5), dpi=100)
+        ax = fig.add_subplot(111)
+        draw_subgraph(subG, ax, layout=layout)
+        canvas = FigureCanvasTkAgg(fig, master=self.kg_canvas_host)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _kg_export(self, fmt, fd):
+        if not self._kg:
+            messagebox.showinfo(t("kg_title"), t("kg_not_built"))
+            return
+        ext = ".graphml" if fmt == "graphml" else ".json"
+        path = fd.asksaveasfilename(
+            defaultextension=ext,
+            filetypes=[(fmt.upper(), f"*{ext}"), ("All", "*.*")],
+            initialfile=f"knowledge_graph{ext}",
+        )
+        if not path:
+            return
+        try:
+            if fmt == "graphml":
+                self._kg.export_graphml(path)
+            else:
+                self._kg.export_json(path)
+            self._kg_set_status(t("kg_export_success").format(path=path))
+        except Exception as e:
+            self._kg_set_status(t("kg_export_failed").format(err=str(e)))
 
     def create_learn_view(self):
         """创建智能学习（费曼学习法）标签页内容"""
