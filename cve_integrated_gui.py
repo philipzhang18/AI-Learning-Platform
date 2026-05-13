@@ -1329,9 +1329,9 @@ class CVEIntegratedGUI:
         self.stats_frame = tk.Frame(self.notebook, bg="white")
         self.stats_tab_id = self.notebook.add(self.stats_frame, text=t("tab_stats"))
 
-        # 7. 知识图谱与风险分析（合并标签页）
+        # 7. 趋势预测标签页（知识图谱 + 风险分析合并）
         self.unified_risk_frame = tk.Frame(self.notebook, bg="white")
-        self.unified_risk_tab_id = self.notebook.add(self.unified_risk_frame, text="知识图谱与风险分析")
+        self.unified_risk_tab_id = self.notebook.add(self.unified_risk_frame, text="趋势预测")
 
         # 8. 智能学习标签页
         self.learn_frame = tk.Frame(self.notebook, bg="white")
