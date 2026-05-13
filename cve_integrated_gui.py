@@ -1337,7 +1337,11 @@ class CVEIntegratedGUI:
         self.learn_frame = tk.Frame(self.notebook, bg="white")
         self.learn_tab_id = self.notebook.add(self.learn_frame, text=t("tab_learn"))
 
-        # 9. 日志标签页
+        # 9. 风险分析标签页
+        self.risk_frame = tk.Frame(self.notebook, bg="white")
+        self.risk_tab_id = self.notebook.add(self.risk_frame, text="风险分析")
+
+        # 10. 日志标签页
         self.log_frame = tk.Frame(self.notebook, bg="white")
         self.log_tab_id = self.notebook.add(self.log_frame, text=t("tab_log"))
 
@@ -1351,6 +1355,7 @@ class CVEIntegratedGUI:
         self.create_stats_view()
         self.create_graph_view()
         self.create_learn_view()
+        self.create_risk_analysis_view()
         self.create_log_view()
 
         # 底部状态栏
@@ -8854,6 +8859,235 @@ mindmap
 
         # 居中显示
         self._center_window(fc_win, 580, 450)
+
+    # ════════════════════════════════════════════════════════════════════
+    # 风险分析标签页
+    # ════════════════════════════════════════════════════════════════════
+    def create_risk_analysis_view(self):
+        """创建风险分析标签页"""
+        self._risk_report = None
+
+        root_frame = tk.Frame(self.risk_frame, bg="white")
+        root_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # 顶部说明
+        header = tk.Frame(root_frame, bg="#fef3e2")
+        header.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(header, text="CVE 风险分析与预防性维护", bg="#fef3e2",
+                 fg="#d35400", font=("Microsoft YaHei", 14, "bold")).pack(
+            anchor="w", padx=10, pady=(8, 0))
+        tk.Label(header, text="基于知识图谱的多因子风险评分、传播分析、趋势预测与维护建议",
+                 bg="#fef3e2", fg="#555", font=("Microsoft YaHei", 9)).pack(
+            anchor="w", padx=10, pady=(0, 8))
+
+        # 控制行
+        ctrl = tk.Frame(root_frame, bg="white")
+        ctrl.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(ctrl, text="CVE 加载量:", bg="white").pack(side=tk.LEFT)
+        self.risk_limit_var = tk.StringVar(value="3000")
+        tk.Entry(ctrl, textvariable=self.risk_limit_var, width=8).pack(side=tk.LEFT, padx=(4, 12))
+
+        tk.Button(ctrl, text="分析 Top-10 产品", command=self._risk_analyze_top,
+                  bg="#d35400", fg="white", relief=tk.FLAT,
+                  font=("Microsoft YaHei", 9, "bold"), padx=12, pady=4).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(ctrl, text="指定产品:", bg="white").pack(side=tk.LEFT, padx=(12, 0))
+        self.risk_product_var = tk.StringVar()
+        tk.Entry(ctrl, textvariable=self.risk_product_var, width=25).pack(side=tk.LEFT, padx=4)
+        tk.Button(ctrl, text="分析", command=self._risk_analyze_single,
+                  bg="#2980b9", fg="white", relief=tk.FLAT, padx=8, pady=4).pack(side=tk.LEFT)
+
+        tk.Button(ctrl, text="导出报告", command=self._risk_export_report,
+                  bg="#27ae60", fg="white", relief=tk.FLAT, padx=8, pady=4).pack(side=tk.RIGHT)
+
+        # 状态栏
+        self.risk_status_var = tk.StringVar(value="就绪")
+        tk.Label(ctrl, textvariable=self.risk_status_var, bg="white", fg="#888",
+                 font=("Microsoft YaHei", 8)).pack(side=tk.RIGHT, padx=10)
+
+        # 主内容区：左右分栏
+        paned = tk.PanedWindow(root_frame, orient=tk.HORIZONTAL, bg="white", sashwidth=4)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        # 左侧：产品风险列表
+        left = tk.Frame(paned, bg="white", width=280)
+        paned.add(left, minsize=200)
+
+        tk.Label(left, text="风险产品排名", bg="white",
+                 font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
+        list_frame = tk.Frame(left, bg="white")
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.risk_tree = ttk.Treeview(list_frame, columns=("score", "level"), show="headings", height=20)
+        self.risk_tree.heading("score", text="评分")
+        self.risk_tree.heading("level", text="等级")
+        self.risk_tree.column("score", width=60, anchor="center")
+        self.risk_tree.column("level", width=80, anchor="center")
+        self.risk_tree["displaycolumns"] = ("score", "level")
+
+        # 添加产品名列
+        self.risk_tree["columns"] = ("product", "score", "level")
+        self.risk_tree.heading("product", text="产品")
+        self.risk_tree.column("product", width=160)
+        self.risk_tree["displaycolumns"] = ("product", "score", "level")
+
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.risk_tree.yview)
+        self.risk_tree.configure(yscrollcommand=scrollbar.set)
+        self.risk_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.risk_tree.bind("<<TreeviewSelect>>", self._risk_on_select)
+
+        # 右侧：详细报告
+        right = tk.Frame(paned, bg="white")
+        paned.add(right, minsize=400)
+
+        tk.Label(right, text="详细分析报告", bg="white",
+                 font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
+        self.risk_detail_text = tk.Text(right, wrap=tk.WORD, font=("Consolas", 9),
+                                        bg="#fafafa", relief=tk.FLAT, padx=8, pady=8)
+        detail_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.risk_detail_text.yview)
+        self.risk_detail_text.configure(yscrollcommand=detail_scroll.set)
+        self.risk_detail_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _risk_analyze_top(self):
+        """异步分析 Top-10 高风险产品"""
+        def _worker():
+            try:
+                from risk.report_builder import RiskReportBuilder
+                from knowledge_graph import KnowledgeGraph
+
+                self.root.after(0, lambda: self.risk_status_var.set("正在构建知识图谱..."))
+                limit = int(self.risk_limit_var.get() or "3000")
+                db_path = str(self.data_dir / "cve_database.db")
+
+                kg = KnowledgeGraph.from_sqlite(db_path)
+                kg.build(limit_cve=limit, limit_dsa=500)
+
+                self.root.after(0, lambda: self.risk_status_var.set("正在分析风险..."))
+                builder = RiskReportBuilder(kg)
+                reports = builder.analyze_top_products(k=10, min_score=20.0)
+
+                self._risk_reports = reports
+                self._risk_builder = builder
+                self.root.after(0, lambda: self._risk_display_results(reports))
+                self.root.after(0, lambda: self.risk_status_var.set(
+                    f"分析完成，共 {len(reports)} 个产品"))
+            except Exception as e:
+                self.root.after(0, lambda: self.risk_status_var.set(f"分析失败: {e}"))
+
+        self.risk_status_var.set("正在分析...")
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _risk_analyze_single(self):
+        """分析指定产品"""
+        product = self.risk_product_var.get().strip()
+        if not product:
+            self.risk_status_var.set("请输入产品名称")
+            return
+
+        def _worker():
+            try:
+                from risk.report_builder import RiskReportBuilder
+                from knowledge_graph import KnowledgeGraph
+
+                self.root.after(0, lambda: self.risk_status_var.set(f"正在分析 {product}..."))
+                limit = int(self.risk_limit_var.get() or "3000")
+                db_path = str(self.data_dir / "cve_database.db")
+
+                kg = KnowledgeGraph.from_sqlite(db_path)
+                kg.build(limit_cve=limit, limit_dsa=500)
+
+                builder = RiskReportBuilder(kg)
+                report = builder.analyze_product(product)
+
+                self._risk_reports = [report]
+                self._risk_builder = builder
+                self.root.after(0, lambda: self._risk_display_results([report]))
+                self.root.after(0, lambda: self._risk_show_detail(report))
+                self.root.after(0, lambda: self.risk_status_var.set(f"分析完成: {product}"))
+            except Exception as e:
+                self.root.after(0, lambda: self.risk_status_var.set(f"分析失败: {e}"))
+
+        self.risk_status_var.set("正在分析...")
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _risk_display_results(self, reports):
+        """在左侧列表中显示分析结果"""
+        for item in self.risk_tree.get_children():
+            self.risk_tree.delete(item)
+
+        for report in reports:
+            if not report.risk_scores:
+                continue
+            score = report.risk_scores[0]
+            self.risk_tree.insert("", tk.END, values=(
+                score.entity_id,
+                f"{score.score:.1f}",
+                score.level.value,
+            ))
+
+    def _risk_on_select(self, event):
+        """选中产品时显示详细报告"""
+        selection = self.risk_tree.selection()
+        if not selection:
+            return
+        item = self.risk_tree.item(selection[0])
+        product = item["values"][0]
+
+        if hasattr(self, "_risk_reports"):
+            for report in self._risk_reports:
+                if report.subject == product:
+                    self._risk_show_detail(report)
+                    return
+
+    def _risk_show_detail(self, report):
+        """在右侧文本框中显示 Markdown 报告"""
+        if hasattr(self, "_risk_builder"):
+            md = self._risk_builder.to_markdown(report)
+        else:
+            md = f"报告: {report.subject}\n评分: {report.risk_scores[0].score if report.risk_scores else 'N/A'}"
+
+        self.risk_detail_text.config(state=tk.NORMAL)
+        self.risk_detail_text.delete("1.0", tk.END)
+        self.risk_detail_text.insert("1.0", md)
+        self.risk_detail_text.config(state=tk.DISABLED)
+
+    def _risk_export_report(self):
+        """导出风险报告"""
+        from tkinter import filedialog
+        if not hasattr(self, "_risk_reports") or not self._risk_reports:
+            self.risk_status_var.set("无报告可导出，请先执行分析")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md"), ("JSON", "*.json")],
+            initialfile="risk_report.md",
+        )
+        if not path:
+            return
+
+        try:
+            if path.endswith(".json"):
+                import json
+                data = [r.to_dict() for r in self._risk_reports]
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            else:
+                lines = []
+                for report in self._risk_reports:
+                    lines.append(self._risk_builder.to_markdown(report))
+                    lines.append("\n\n---\n\n")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines))
+            self.risk_status_var.set(f"报告已导出: {path}")
+        except Exception as e:
+            self.risk_status_var.set(f"导出失败: {e}")
 
     # ==================== 操作日志 ====================
 
