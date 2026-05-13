@@ -1329,19 +1329,15 @@ class CVEIntegratedGUI:
         self.stats_frame = tk.Frame(self.notebook, bg="white")
         self.stats_tab_id = self.notebook.add(self.stats_frame, text=t("tab_stats"))
 
-        # 7. 知识图谱标签页
-        self.graph_frame = tk.Frame(self.notebook, bg="white")
-        self.graph_tab_id = self.notebook.add(self.graph_frame, text=t("tab_graph"))
+        # 7. 知识图谱与风险分析（合并标签页）
+        self.unified_risk_frame = tk.Frame(self.notebook, bg="white")
+        self.unified_risk_tab_id = self.notebook.add(self.unified_risk_frame, text="知识图谱与风险分析")
 
         # 8. 智能学习标签页
         self.learn_frame = tk.Frame(self.notebook, bg="white")
         self.learn_tab_id = self.notebook.add(self.learn_frame, text=t("tab_learn"))
 
-        # 9. 风险分析标签页
-        self.risk_frame = tk.Frame(self.notebook, bg="white")
-        self.risk_tab_id = self.notebook.add(self.risk_frame, text="风险分析")
-
-        # 10. 日志标签页
+        # 9. 日志标签页
         self.log_frame = tk.Frame(self.notebook, bg="white")
         self.log_tab_id = self.notebook.add(self.log_frame, text=t("tab_log"))
 
@@ -1353,9 +1349,8 @@ class CVEIntegratedGUI:
         self.create_solution_view()
         self.create_dell_kb_view()
         self.create_stats_view()
-        self.create_graph_view()
+        self.create_unified_risk_view()
         self.create_learn_view()
-        self.create_risk_analysis_view()
         self.create_log_view()
 
         # 底部状态栏
@@ -5526,10 +5521,19 @@ Script requirements:
             table_frame.columnconfigure(ci, weight=1)
 
     # ════════════════════════════════════════════════════════════════════
-    # 知识图谱标签页（NetworkX 内存图）
+    # 统一知识图谱与风险分析标签页
+    # ════════════════════════════════════════════════════════════════════
+    def create_unified_risk_view(self):
+        """创建统一的知识图谱与风险分析标签页（委托给独立模块）"""
+        from unified_risk_tab import create_unified_risk_view
+        create_unified_risk_view(self)
+
+    # ════════════════════════════════════════════════════════════════════
+    # 知识图谱标签页（旧版，保留内部方法供统一Tab复用）
     # ════════════════════════════════════════════════════════════════════
     def create_graph_view(self):
-        """创建知识图谱标签页：构图 / 查询 / 可视化 / 导出"""
+        """旧版知识图谱标签页（已合并到统一Tab，此方法保留为空）"""
+        pass
         from tkinter import filedialog as _fd
 
         # 懒加载状态
@@ -8861,11 +8865,11 @@ mindmap
         self._center_window(fc_win, 580, 450)
 
     # ════════════════════════════════════════════════════════════════════
-    # 风险分析标签页
+    # 风险分析标签页（旧版，已合并到统一Tab）
     # ════════════════════════════════════════════════════════════════════
     def create_risk_analysis_view(self):
-        """创建风险分析标签页"""
-        self._risk_report = None
+        """旧版风险分析标签页（已合并到统一Tab，此方法保留为空）"""
+        pass
 
         root_frame = tk.Frame(self.risk_frame, bg="white")
         root_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
