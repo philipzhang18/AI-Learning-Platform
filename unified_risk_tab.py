@@ -1,14 +1,14 @@
 """
-趋势预测标签页模块
+智能预测标签页模块
 
 布局设计（上下两区）：
 ┌─────────────────────────────────────────────────────────────────────┐
 │ 工具栏: [全量分析] [导出]  状态信息                                   │
 ├──────────────┬──────────────────────────────────────────────────────┤
-│ 产品风险排名  │  上区：知识图谱可视化 + 评分/传播/趋势/规则 Notebook   │
+│ 产品风险排名  │  上区：知识图谱可视化（占主要空间） + 分析详情侧栏     │
 │ (Treeview)   │                                                      │
 ├──────────────┼──────────────────────────────────────────────────────┤
-│ 图谱统计     │  下区：预防性维护建议（卡片列表）+ 算法说明            │
+│ 图谱统计     │  下区：预防性维护建议（卡片列表）                      │
 │ + 算法摘要   │                                                      │
 └──────────────┴──────────────────────────────────────────────────────┘
 """
@@ -124,32 +124,43 @@ def create_unified_risk_view(gui) -> None:
 
     # ─── 右栏：上下分区 ──────────────────────────────────────────────
     right = tk.Frame(body, bg="#f5f6fa")
-    body.add(right, minsize=500)
+    body.add(right, minsize=600)
 
     right_paned = tk.PanedWindow(right, orient=tk.VERTICAL, bg="#ecf0f1", sashwidth=4, sashrelief=tk.FLAT)
     right_paned.pack(fill=tk.BOTH, expand=True)
 
     # ─── 上区：图谱 + 分析详情 ───────────────────────────────────────
     upper = tk.Frame(right_paned, bg="white")
-    right_paned.add(upper, minsize=200)
+    right_paned.add(upper, minsize=380, height=460)
 
     upper_paned = tk.PanedWindow(upper, orient=tk.HORIZONTAL, bg="#ecf0f1", sashwidth=3)
     upper_paned.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-    # 图谱画布
-    graph_frame = tk.Frame(upper_paned, bg="white")
-    upper_paned.add(graph_frame, minsize=280)
-    tk.Label(graph_frame, text="知识图谱", bg="white", fg="#2c3e50",
-             font=("Microsoft YaHei", 9, "bold")).pack(anchor="w", padx=6, pady=(4, 0))
-    gui._ur_canvas_host = tk.Frame(graph_frame, bg="#fafafa", relief=tk.SUNKEN, bd=1)
-    gui._ur_canvas_host.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+    # 图谱画布（占主要空间，更大更醒目）
+    graph_frame = tk.Frame(upper_paned, bg="white", relief=tk.FLAT, bd=0)
+    upper_paned.add(graph_frame, minsize=480, width=620)
 
-    # 分析详情 Notebook
+    graph_header = tk.Frame(graph_frame, bg="white")
+    graph_header.pack(fill=tk.X, padx=8, pady=(6, 2))
+    tk.Label(graph_header, text="◆ 知识图谱可视化", bg="white", fg="#2c3e50",
+             font=("Microsoft YaHei", 11, "bold")).pack(side=tk.LEFT)
+    tk.Label(graph_header, text="CVE · DSA · Product · CWE 关联网络",
+             bg="white", fg="#95a5a6",
+             font=("Microsoft YaHei", 8)).pack(side=tk.LEFT, padx=(8, 0))
+
+    gui._ur_canvas_host = tk.Frame(graph_frame, bg="#fafafa", relief=tk.SOLID, bd=1,
+                                    highlightbackground="#e0e0e0", highlightthickness=1)
+    gui._ur_canvas_host.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 8))
+
+    # 分析详情 Notebook（侧栏，较窄）
     detail_frame = tk.Frame(upper_paned, bg="white")
-    upper_paned.add(detail_frame, minsize=280)
+    upper_paned.add(detail_frame, minsize=240, width=300)
+
+    tk.Label(detail_frame, text="◆ 分析详情", bg="white", fg="#2c3e50",
+             font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
 
     detail_nb = ttk.Notebook(detail_frame)
-    detail_nb.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+    detail_nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=(2, 4))
 
     gui._ur_score_text = tk.Text(detail_nb, wrap=tk.WORD, font=("Consolas", 9),
                                   bg="#fafafa", relief=tk.FLAT, padx=6, pady=4)
@@ -169,7 +180,7 @@ def create_unified_risk_view(gui) -> None:
 
     # ─── 下区：预防性维护建议 ─────────────────────────────────────────
     lower = tk.Frame(right_paned, bg="white")
-    right_paned.add(lower, minsize=150)
+    right_paned.add(lower, minsize=180, height=240)
 
     # 建议标题栏
     rec_title_bar = tk.Frame(lower, bg="#2c3e50")
@@ -355,14 +366,29 @@ def _ur_render_graph(gui, product: str) -> None:
                      font=("Microsoft YaHei", 9)).pack(expand=True)
             return
 
-        fig, ax = plt.subplots(figsize=(5.5, 3.5), dpi=85)
-        fig.patch.set_facecolor("#fafafa")
-        # 设置中文字体
+        # 设置中文字体（必须在 plt.subplots 之前）
         plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
         plt.rcParams["axes.unicode_minus"] = False
-        draw_subgraph(sub, ax, layout="spring", seed=42)
-        ax.set_title(product, fontsize=8, pad=6, color="#555",
-                     fontfamily="Microsoft YaHei")
+
+        # 根据节点数量自适应图谱尺寸
+        n_nodes = sub.number_of_nodes()
+        # 默认更大尺寸，让图谱更清晰美观
+        fig_w = 8.5
+        fig_h = 6.0
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=95)
+        fig.patch.set_facecolor("#fafafa")
+        ax.set_facecolor("#fafafa")
+
+        # 节点过多时使用 kamada_kawai 布局更清晰
+        layout = "kamada_kawai" if n_nodes > 30 else "spring"
+        draw_subgraph(sub, ax, layout=layout, seed=42)
+
+        ax.set_title(f"{product}  —  {n_nodes} 节点 · {sub.number_of_edges()} 边",
+                     fontsize=11, pad=10, color="#2c3e50",
+                     fontfamily="Microsoft YaHei", fontweight="bold")
+
+        # 紧凑布局，去除多余边距
+        fig.tight_layout(pad=1.0)
 
         canvas = FigureCanvasTkAgg(fig, master=gui._ur_canvas_host)
         canvas.draw()
