@@ -45,6 +45,32 @@ from config import COLORS, AI_CONFIG, get_api_key, get_language_setting, save_la
 from db_backup import backup_database, list_backups
 from i18n import t, set_language, get_language, is_english
 
+# 导入 CVE ID 清洗工具
+try:
+    from cve_utils import clean_cve_ids
+except ImportError:
+    # 回退：如果 cve_utils 不可用，使用简化版
+    def clean_cve_ids(cve_input):
+        """简化版 CVE ID 清洗函数"""
+        if not cve_input:
+            return []
+        if isinstance(cve_input, str):
+            text = cve_input
+        elif isinstance(cve_input, (list, set)):
+            text = ' '.join(str(item) for item in cve_input if item)
+        else:
+            return []
+        matches = re.findall(r'CVE-\d{4}-\d{4,7}', text, re.IGNORECASE)
+        seen = set()
+        cleaned = []
+        for cve_id in matches:
+            cve_id_upper = cve_id.upper()
+            if cve_id_upper not in seen:
+                seen.add(cve_id_upper)
+                cleaned.append(cve_id_upper)
+        cleaned.sort()
+        return cleaned
+
 
 def _extract_cvss_from_metrics(metrics: dict) -> tuple:
     """从 NVD metrics 中提取 CVSS 评分（优先级：v4.0 → v3.1 → v3.0 → v2.0）
@@ -10897,12 +10923,9 @@ mindmap
                         dsa_id = title_field
                         title = title_field
 
-                    # 提取CVE IDs
+                    # 提取CVE IDs - 使用清洗函数确保格式正确、去重
                     cve_str = row.get('CVE IDENTIFIER', '').strip()
-                    cve_ids = []
-                    if cve_str:
-                        # CVE可能用逗号分隔
-                        cve_ids = [cve.strip() for cve in cve_str.split(',') if cve.strip()]
+                    cve_ids = clean_cve_ids(cve_str) if cve_str else []
 
                     # 解析发布日期
                     published_str = row.get('PUBLISHED', '').strip()

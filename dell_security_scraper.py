@@ -18,6 +18,32 @@ except ImportError:
     def _t(key, **kwargs):
         return key
 
+try:
+    from cve_utils import clean_cve_ids
+except ImportError:
+    # 回退：如果 cve_utils 不可用，使用本地实现
+    def clean_cve_ids(cve_input):
+        """简化版 CVE ID 清洗函数"""
+        import re
+        if not cve_input:
+            return []
+        if isinstance(cve_input, str):
+            text = cve_input
+        elif isinstance(cve_input, (list, set)):
+            text = ' '.join(str(item) for item in cve_input if item)
+        else:
+            return []
+        matches = re.findall(r'CVE-\d{4}-\d{4,7}', text, re.IGNORECASE)
+        seen = set()
+        cleaned = []
+        for cve_id in matches:
+            cve_id_upper = cve_id.upper()
+            if cve_id_upper not in seen:
+                seen.add(cve_id_upper)
+                cleaned.append(cve_id_upper)
+        cleaned.sort()
+        return cleaned
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -504,10 +530,8 @@ class DellSecurityScraper:
 
     def _parse_advisory_content(self, dsa_id, url, content, html=""):
         """将页面文本解析为安全公告字典"""
-        # CVE IDs
-        cve_ids = list(set(
-            c.upper() for c in re.findall(r'CVE-\d{4}-\d{4,7}', content, re.IGNORECASE)
-        ))
+        # CVE IDs - 使用清洗函数确保格式正确、去重
+        cve_ids = clean_cve_ids(content)
 
         # 标题：前 10 行中含 DSA/Dell/Security 关键词的行
         lines = [l.strip() for l in content.split('\n') if l.strip()]
@@ -850,8 +874,8 @@ class DellSecurityScraper:
     # ================================================================
 
     def extract_cve_ids(self, text: str) -> List[str]:
-        """提取 CVE ID"""
-        return list(set(re.findall(r'CVE-\d{4}-\d{4,7}', text.upper())))
+        """提取 CVE ID（使用清洗函数确保格式正确、去重）"""
+        return clean_cve_ids(text)
 
     def extract_products_from_text(self, text: str) -> List[Dict[str, Any]]:
         """从文本中提取产品信息"""
