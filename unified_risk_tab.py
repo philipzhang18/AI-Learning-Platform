@@ -20,6 +20,12 @@ from tkinter import ttk, filedialog
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    from i18n import t
+except ImportError:
+    def t(key: str, **kwargs) -> str:
+        return key
+
 
 PRIORITY_COLORS = {
     "P0": "#c0392b",
@@ -294,11 +300,14 @@ def create_unified_risk_view(gui) -> None:
     # ── P1-9：产品线联动过滤 ──
     filter_row = tk.Frame(micro_outer, bg="#fafafa")
     filter_row.pack(fill=tk.X, padx=4, pady=(2, 2))
-    tk.Label(filter_row, text="显示:", bg="#fafafa", fg="#555",
+    tk.Label(filter_row, text=t("ur_micro_filter_label"), bg="#fafafa", fg="#555",
              font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
     gui._ur_micro_filter_var = tk.StringVar(value="all")
-    for label, val in (("全部", "all"), ("仅有版本", "versioned"),
-                        ("仅大类", "unversioned")):
+    for label, val in (
+        (t("ur_micro_filter_all"), "all"),
+        (t("ur_micro_filter_versioned"), "versioned"),
+        (t("ur_micro_filter_unversioned"), "unversioned"),
+    ):
         tk.Radiobutton(
             filter_row, text=label, variable=gui._ur_micro_filter_var,
             value=val, bg="#fafafa", fg="#2c3e50",
@@ -310,9 +319,9 @@ def create_unified_risk_view(gui) -> None:
     # 产品线联动下拉框（选中产品线 DSA 表格时自动同步）
     pl_row = tk.Frame(micro_outer, bg="#fafafa")
     pl_row.pack(fill=tk.X, padx=4, pady=(0, 2))
-    tk.Label(pl_row, text="产品线:", bg="#fafafa", fg="#555",
+    tk.Label(pl_row, text=t("ur_micro_pl_label"), bg="#fafafa", fg="#555",
              font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
-    gui._ur_micro_pl_var = tk.StringVar(value="(全部)")
+    gui._ur_micro_pl_var = tk.StringVar(value=t("ur_micro_pl_all"))
     gui._ur_micro_pl_combo = ttk.Combobox(
         pl_row, textvariable=gui._ur_micro_pl_var, width=24,
         state="readonly", font=("Microsoft YaHei", 8)
@@ -325,7 +334,7 @@ def create_unified_risk_view(gui) -> None:
 
     # ── P1-7：反向查询区（紧凑型）──
     query_frame = tk.LabelFrame(
-        micro_outer, text=" 🔍 反向查询：我有这个版本，受哪些 DSA 影响？ ",
+        micro_outer, text=" " + t("ur_micro_lookup_title") + " ",
         bg="#fafafa", fg="#2c3e50",
         font=("Microsoft YaHei", 8, "bold"), padx=4, pady=2
     )
@@ -333,30 +342,30 @@ def create_unified_risk_view(gui) -> None:
 
     query_row = tk.Frame(query_frame, bg="#fafafa")
     query_row.pack(fill=tk.X)
-    tk.Label(query_row, text="机型:", bg="#fafafa",
+    tk.Label(query_row, text=t("ur_micro_lookup_model"), bg="#fafafa",
              font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
     gui._ur_query_model_var = tk.StringVar()
     tk.Entry(query_row, textvariable=gui._ur_query_model_var, width=10,
              font=("Consolas", 9)).pack(side=tk.LEFT, padx=(2, 6))
-    tk.Label(query_row, text="类型:", bg="#fafafa",
+    tk.Label(query_row, text=t("ur_micro_lookup_type"), bg="#fafafa",
              font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
     gui._ur_query_ftype_var = tk.StringVar(value="")
     ttk.Combobox(query_row, textvariable=gui._ur_query_ftype_var, width=8,
                  values=["", "BIOS", "Firmware", "iDRAC", "OS", "Software"],
                  state="readonly", font=("Consolas", 8)
                  ).pack(side=tk.LEFT, padx=(2, 6))
-    tk.Label(query_row, text="版本:", bg="#fafafa",
+    tk.Label(query_row, text=t("ur_micro_lookup_version"), bg="#fafafa",
              font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
     gui._ur_query_version_var = tk.StringVar()
     tk.Entry(query_row, textvariable=gui._ur_query_version_var, width=10,
              font=("Consolas", 9)).pack(side=tk.LEFT, padx=(2, 4))
-    tk.Button(query_row, text="查询",
+    tk.Button(query_row, text=t("ur_micro_lookup_btn"),
               command=lambda: _ur_micro_query(gui),
               bg="#2c3e50", fg="white", relief=tk.FLAT, cursor="hand2",
               font=("Microsoft YaHei", 8, "bold"), padx=8, pady=1
               ).pack(side=tk.LEFT, padx=(4, 0))
 
-    gui._ur_query_result_var = tk.StringVar(value="提示: 例如 R640 / BIOS / 2.10.0")
+    gui._ur_query_result_var = tk.StringVar(value=t("ur_micro_lookup_hint"))
     tk.Label(query_frame, textvariable=gui._ur_query_result_var,
              bg="#fafafa", fg="#7f8c8d",
              font=("Consolas", 8), anchor="w",
@@ -406,9 +415,26 @@ def create_unified_risk_view(gui) -> None:
     gui._ur_micro_tree.tag_configure("LOW", background="#eaf2f8", foreground="#2980b9")
     gui._ur_micro_tree.tag_configure("MINIMAL", background="#f4f6f6", foreground="#7f8c8d")
 
+    # ── P2-12：月度趋势迷你图 ──
+    trend_frame = tk.LabelFrame(
+        micro_outer, text=t("ur_micro_trend_title"),
+        bg="#fafafa", fg="#2c3e50",
+        font=("Microsoft YaHei", 8, "bold"), padx=2, pady=2
+    )
+    trend_frame.pack(fill=tk.X, padx=4, pady=(2, 0))
+    gui._ur_micro_trend_canvas = tk.Canvas(
+        trend_frame, height=70, bg="white", relief=tk.SOLID, bd=1,
+        highlightthickness=0
+    )
+    gui._ur_micro_trend_canvas.pack(fill=tk.X)
+    gui._ur_micro_trend_caption = tk.StringVar(value="")
+    tk.Label(trend_frame, textvariable=gui._ur_micro_trend_caption,
+             bg="#fafafa", fg="#7f8c8d", font=("Consolas", 7),
+             anchor="w", justify=tk.LEFT).pack(fill=tk.X)
+
     micro_explain_frame = tk.Frame(micro_outer, bg="#fafafa")
     micro_explain_frame.pack(fill=tk.BOTH, expand=False, padx=4, pady=(2, 4))
-    tk.Label(micro_explain_frame, text="风险因子拆解", bg="#fafafa",
+    tk.Label(micro_explain_frame, text=t("ur_micro_explain_title"), bg="#fafafa",
              fg="#2c3e50", font=("Microsoft YaHei", 9, "bold")).pack(anchor="w")
     gui._ur_micro_explain_text = tk.Text(
         micro_explain_frame, wrap=tk.WORD, font=("Consolas", 8),
@@ -905,59 +931,141 @@ def _ur_export(gui, fmt: str) -> None:
             with open(path, "w", encoding="utf-8") as f:
                 _json.dump(data, f, ensure_ascii=False, indent=2)
         else:
-            sections = [_ur_build_overview(gui)]
-            if gui._ur_dsa_results:
-                sections.append(_ur_dsa_to_markdown(gui._ur_dsa_results))
-            if gui._ur_micro_results:
-                sections.append(_ur_micro_to_markdown(gui._ur_micro_results))
-            if gui._ur_reports and gui._ur_builder:
-                sections.append("\n\n---\n\n".join(
-                    gui._ur_builder.to_markdown(r) for r in gui._ur_reports
-                ))
+            md = _ur_build_hierarchical_markdown(gui)
             with open(path, "w", encoding="utf-8") as f:
-                f.write("\n\n---\n\n".join(sections))
+                f.write(md)
         gui._ur_status_var.set(f"已导出: {Path(path).name}")
     except Exception as e:
         gui._ur_status_var.set(f"导出失败: {e}")
 
 
-def _ur_dsa_to_markdown(results) -> str:
-    """将 DSA 产品线预测结果格式化为 Markdown"""
-    if not results:
-        return ""
-    days = results[0].forecast_days
-    lines = [
-        f"# Dell 产品线 DSA 概率预测（未来 {days} 天）",
-        "",
-        "## 算法",
-        "",
-        "Poisson 速率模型，可解释因子：",
-        "",
-        "```",
-        "λ_eff = λ_base × trend_multiplier × severity_factor + 0.04 × open_cve_pressure",
-        "P(≥1 DSA in D 天) = 1 − exp(−λ_eff × D / 30)",
-        "```",
-        "",
-        "- λ_base: 过去 12 个月该产品线月均 DSA 数",
-        "- trend_multiplier: 近 3 个月速率 / 12 个月基线，裁剪到 [0.5, 3.0]",
-        "- severity_factor: 1 + 0.5 × (近期 CVE 平均 CVSS / 10)，∈ [1.0, 1.5]",
-        "- open_cve_pressure: 近 90 天匹配该产品线但尚未进入 DSA 的 CVE 数",
-        "",
-        "## 预测结果",
-        "",
-        "| 产品线 | 全量DSA | 12M | 3M | λ_base | λ_recent | trend | sev | open | E[DSA] | P(≥1) | 等级 |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|",
-    ]
-    for r in results:
-        lines.append(
-            f"| {r.product_line} | {r.historical_dsa_total} | "
-            f"{r.historical_dsa_12m} | {r.historical_dsa_3m} | "
-            f"{r.base_rate_per_month:.2f} | {r.recent_rate_per_month:.2f} | "
-            f"{r.trend_multiplier:.2f} | {r.severity_factor:.2f} | "
-            f"{r.open_cve_pressure} | {r.expected_dsa_count:.2f} | "
-            f"{r.probability:.1%} | {r.risk_level} |"
-        )
-    return "\n".join(lines)
+def _ur_anchor(text: str) -> str:
+    """规范化锚点：保留中英数字，其他转为 -，去除连续 - 和首尾 -"""
+    import re
+    s = re.sub(r"[^\w一-鿿]+", "-", text.lower())
+    return re.sub(r"-+", "-", s).strip("-")
+
+
+def _ur_build_hierarchical_markdown(gui) -> str:
+    """
+    P3-15：按产品线分组的层次化 Markdown 报告。
+
+    结构:
+        # 智能预测综合报告
+        ## 概览
+        ## 目录
+        ## 产品线 A
+            ### DSA 预测（30/60/90 天）
+            ### 微码风险 Top N
+        ## 产品线 B
+            ...
+        ## 知识图谱产品评分（如有）
+    """
+    from collections import defaultdict
+    sections = [_ur_build_overview(gui), ""]
+
+    dsa_by_pl: Dict[str, Any] = {}
+    for r in gui._ur_dsa_results:
+        dsa_by_pl[r.product_line] = r
+
+    micro_by_pl: Dict[str, List[Any]] = defaultdict(list)
+    for s in gui._ur_micro_results:
+        micro_by_pl[s.key.product_line].append(s)
+
+    # 产品线集合 = 出现在 DSA 预测或微码评分里的所有产品线
+    all_pls = sorted(set(dsa_by_pl.keys()) | set(micro_by_pl.keys()))
+
+    # ── TOC ──
+    if all_pls:
+        sections.append("## 目录")
+        sections.append("")
+        for pl in all_pls:
+            anchor = _ur_anchor(pl)
+            sections.append(f"- [{pl}](#{anchor})")
+        sections.append("")
+
+    # ── 算法说明（仅一次） ──
+    if dsa_by_pl:
+        sections.append("## 算法说明")
+        sections.append("")
+        sections.append("Poisson 速率模型，可解释因子：")
+        sections.append("")
+        sections.append("```")
+        sections.append("λ_eff = λ_base × trend_multiplier × severity_factor + 0.04 × open_cve_pressure")
+        sections.append("P(≥1 DSA in D 天) = 1 − exp(−λ_eff × D / 30)")
+        sections.append("```")
+        sections.append("")
+        sections.append("- λ_base: 过去 12 个月该产品线月均 DSA 数")
+        sections.append("- trend_multiplier: 近 3 个月速率 / 12 个月基线，裁剪到 [0.5, 3.0]")
+        sections.append("- severity_factor: 1 + 0.5 × (近期 CVE 平均 CVSS / 10)，∈ [1.0, 1.5]")
+        sections.append("- open_cve_pressure: 近 90 天匹配该产品线但尚未进入 DSA 的 CVE 数")
+        sections.append("")
+        sections.append("微码 exposure_score：freq_score(50) + severity_score(25) + recency_score(25) + KEV(+5/CVE，上限 +15)")
+        sections.append("")
+
+    # ── 按产品线嵌套 ──
+    for pl in all_pls:
+        anchor = _ur_anchor(pl)
+        sections.append(f"## {pl}")
+        sections.append("")
+        sections.append(f'<a id="{anchor}"></a>')
+        sections.append("")
+
+        # DSA 预测
+        if pl in dsa_by_pl:
+            r = dsa_by_pl[pl]
+            sections.append(f"### DSA 概率预测（未来 {r.forecast_days} 天）")
+            sections.append("")
+            sections.append(
+                "| 全量 DSA | 12M | 3M | λ_base | λ_recent | trend | "
+                "sev | open | E[DSA] | P(≥1) | 等级 |"
+            )
+            sections.append(
+                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|"
+            )
+            sections.append(
+                f"| {r.historical_dsa_total} | {r.historical_dsa_12m} | "
+                f"{r.historical_dsa_3m} | {r.base_rate_per_month:.2f} | "
+                f"{r.recent_rate_per_month:.2f} | {r.trend_multiplier:.2f} | "
+                f"{r.severity_factor:.2f} | {r.open_cve_pressure} | "
+                f"{r.expected_dsa_count:.2f} | {r.probability:.1%} | "
+                f"{r.risk_level} |"
+            )
+            sections.append("")
+
+        # 微码评分（按当前产品线过滤后的 Top N，最多 10 条避免冗长）
+        if pl in micro_by_pl:
+            scores = sorted(micro_by_pl[pl],
+                            key=lambda s: s.exposure_score, reverse=True)[:10]
+            sections.append(f"### 微码风险 Top {len(scores)}")
+            sections.append("")
+            sections.append(
+                "| 机型 | 类型 | 版本 | exposure | 等级 | KEV | "
+                "命中数 | avg CVSS | 距今(月) |"
+            )
+            sections.append(
+                "|---|---|---|---:|:---:|---:|---:|---:|---:|"
+            )
+            for s in scores:
+                last = "—" if s.months_since_last >= 999 else str(s.months_since_last)
+                sections.append(
+                    f"| {s.key.model} | {s.key.firmware_type} | {s.key.version} | "
+                    f"{s.exposure_score:.1f} | {s.risk_band} | {s.kev_hit_count} | "
+                    f"{s.expanded_dsa_count} | {s.severity_avg_cvss:.1f} | {last} |"
+                )
+            sections.append("")
+
+    # ── 知识图谱产品评分（独立段，因不是按产品线分布）──
+    if gui._ur_reports and gui._ur_builder:
+        sections.append("## 知识图谱产品风险评分")
+        sections.append("")
+        sections.append("\n\n---\n\n".join(
+            gui._ur_builder.to_markdown(r) for r in gui._ur_reports
+        ))
+
+    return "\n".join(sections)
+
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1078,7 +1186,7 @@ def _ur_micro_apply_filter(gui) -> None:
 
 
 def _ur_micro_on_select(gui) -> None:
-    """选中微码版本后展示因子拆解"""
+    """选中微码版本后展示因子拆解 + 月度趋势迷你图"""
     sel = gui._ur_micro_tree.selection()
     if not sel:
         return
@@ -1092,6 +1200,96 @@ def _ur_micro_on_select(gui) -> None:
     txt.delete("1.0", tk.END)
     txt.insert("1.0", "\n".join(score.explanation))
     txt.config(state=tk.DISABLED)
+
+    # P2-12：迷你图（同步绘制，从已构建索引取数据，毫秒级）
+    canvas = getattr(gui, "_ur_micro_trend_canvas", None)
+    caption = getattr(gui, "_ur_micro_trend_caption", None)
+    if canvas is None or caption is None:
+        return
+    if gui._ur_micro_assessor is None:
+        return
+    try:
+        series = gui._ur_micro_assessor.monthly_hits(score.key, months=12)
+    except Exception:
+        return
+    _ur_micro_draw_trend(canvas, caption, series, score)
+
+
+def _ur_micro_draw_trend(canvas: tk.Canvas, caption_var: tk.StringVar,
+                          series, score) -> None:
+    """在 Canvas 上绘制 12 月柱状图。每月一根，按比例高，缺月留白。"""
+    canvas.delete("all")
+    canvas.update_idletasks()
+    w = canvas.winfo_width() or 280
+    h = canvas.winfo_height() or 70
+
+    if not series:
+        canvas.create_text(w / 2, h / 2, text="无数据",
+                            fill="#bdc3c7", font=("Consolas", 8))
+        caption_var.set("")
+        return
+
+    counts = [c for _, c in series]
+    max_c = max(counts) if counts else 1
+    if max_c == 0:
+        canvas.create_text(
+            w / 2, h / 2, text=t("ur_micro_trend_no_data"),
+            fill="#bdc3c7", font=("Consolas", 8)
+        )
+        caption_var.set("")
+        return
+
+    pad_l, pad_r, pad_t, pad_b = 4, 4, 4, 14
+    plot_w = w - pad_l - pad_r
+    plot_h = h - pad_t - pad_b
+    bar_w = plot_w / len(series)
+
+    # 风险带颜色
+    band_color = {
+        "EXTREME": "#c0392b", "HIGH": "#d35400",
+        "MEDIUM": "#b7950b", "LOW": "#2980b9",
+        "MINIMAL": "#95a5a6",
+    }.get(score.risk_band, "#7f8c8d")
+
+    for i, (label, cnt) in enumerate(series):
+        x0 = pad_l + i * bar_w + 1
+        x1 = pad_l + (i + 1) * bar_w - 1
+        bar_h = (cnt / max_c) * plot_h if max_c > 0 else 0
+        y0 = pad_t + plot_h - bar_h
+        y1 = pad_t + plot_h
+        if cnt > 0:
+            canvas.create_rectangle(x0, y0, x1, y1,
+                                     fill=band_color, outline="")
+            # 命中数标注（高于 0 的柱顶）
+            canvas.create_text((x0 + x1) / 2, y0 - 1,
+                                text=str(cnt), anchor="s",
+                                font=("Consolas", 6), fill="#2c3e50")
+        # 月份 x 轴（只画 1/4/7/10 月，避免拥挤）
+        month = label.split("-")[1]
+        if month in ("01", "04", "07", "10"):
+            canvas.create_text((x0 + x1) / 2, h - 2,
+                                text=label[2:], anchor="s",
+                                font=("Consolas", 6), fill="#7f8c8d")
+
+    total = sum(counts)
+    nonzero_months = sum(1 for c in counts if c > 0)
+    last_3 = sum(counts[-3:])
+    prev_3 = sum(counts[-6:-3]) if len(counts) >= 6 else 0
+    if prev_3 == 0 and last_3 == 0:
+        trend = t("ur_micro_trend_none")
+    elif prev_3 == 0:
+        trend = t("ur_micro_trend_new")
+    elif last_3 > prev_3 * 1.5:
+        trend = t("ur_micro_trend_accel")
+    elif last_3 < prev_3 * 0.5:
+        trend = t("ur_micro_trend_cool")
+    else:
+        trend = t("ur_micro_trend_steady")
+    caption_var.set(t(
+        "ur_micro_trend_caption",
+        total=total, months=nonzero_months,
+        last3=last_3, prev3=prev_3, trend=trend,
+    ))
 
 
 def _ur_build_overview(gui) -> str:
@@ -1178,45 +1376,3 @@ def _ur_micro_query(gui) -> None:
     gui._ur_query_result_var.set("\n".join(lines))
 
 
-def _ur_micro_to_markdown(scores) -> str:
-    """将微码级风险评估结果格式化为 Markdown"""
-    if not scores:
-        return ""
-    from collections import Counter
-    bands = Counter(s.risk_band for s in scores)
-    lines = [
-        "# Dell 微码级风险评估（Top {}）".format(len(scores)),
-        "",
-        "## 评分公式",
-        "",
-        "```",
-        "exposure_score = freq_score (50%) + severity_score (25%) + recency_score (25%)",
-        "  freq_score    = (展开命中数 / 全局最大命中数) × 50",
-        "  severity_score = (avg_cvss / 10) × 25",
-        "  recency_score = (1 − 月数_距最近一次出现 / 24) × 25",
-        "```",
-        "",
-        "数据源：Dell DSA 历史 + cves.cvss_score（NVD）+ severity 文本兜底",
-        "",
-        f"## 风险带分布",
-        "",
-        f"- EXTREME: {bands.get('EXTREME', 0)}",
-        f"- HIGH: {bands.get('HIGH', 0)}",
-        f"- MEDIUM: {bands.get('MEDIUM', 0)}",
-        f"- LOW: {bands.get('LOW', 0)}",
-        f"- MINIMAL: {bands.get('MINIMAL', 0)}",
-        "",
-        "## Top 评分明细",
-        "",
-        "| 分 | 等级 | 产品线 | 机型 | 类型 | 版本 | 命中 | CVSS | 最近 |",
-        "|---:|:---|:---|:---|:---|:---|---:|---:|---:|",
-    ]
-    for s in scores:
-        recent = f"{s.months_since_last}月前" if s.months_since_last < 999 else "—"
-        lines.append(
-            f"| {s.exposure_score:.1f} | {s.risk_band} | "
-            f"{s.key.product_line} | {s.key.model or '-'} | "
-            f"{s.key.firmware_type} | {s.key.version} | "
-            f"{s.expanded_dsa_count} | {s.severity_avg_cvss} | {recent} |"
-        )
-    return "\n".join(lines)

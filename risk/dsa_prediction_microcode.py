@@ -277,79 +277,44 @@ class MicrocodeRiskAssessor:
         if self._dsa_records is not None:
             return self._dsa_records
 
-        # 第一步：把 cves 表里的 cvss_score 一次性读进内存（双源 CVSS 的优先源）
-        cve_score_map: Dict[str, float] = {}
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT cve_id, data FROM cves")
-            for cve_id, data_str in cur.fetchall():
-                if not data_str:
-                    continue
-                try:
-                    d = json.loads(data_str)
-                    s = d.get("cvss_score")
-                    if s is not None:
-                        cve_score_map[cve_id] = float(s)
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    pass
-        finally:
-            conn.close()
+        from risk._dsa_base import (
+            affected_text_of,
+            fetch_advisory_rows,
+            load_cve_score_map,
+            parse_advisory_data,
+            parse_cve_ids,
+            resolve_cvss,
+            severity_text_of,
+        )
+
+        # 第一步：cves 表 cvss_score 一次性读进内存
+        cve_score_map = load_cve_score_map(self.db_path)
 
         records: List[Dict[str, Any]] = []
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT title, cve_ids, published_date, data FROM dell_advisories")
-            for title, cve_ids_str, pub, data_str in cur.fetchall():
-                if not pub:
-                    continue
-                pub_dt = self._parse_date(pub)
-                if pub_dt is None:
-                    continue
-                affected_text = ""
-                severity_text = ""
-                cve_ids: List[str] = []
-                if cve_ids_str:
-                    cve_ids = [
-                        c for c in re.split(r"[,\s]+", cve_ids_str.strip())
-                        if c.startswith("CVE-")
-                    ]
-                if data_str:
-                    try:
-                        d = json.loads(data_str)
-                        ap = d.get("affected_products", []) or []
-                        # 同时拼接 name / model / version_range —— version_range 含真实版本号
-                        affected_text = " ".join(
-                            (p.get("name", "") + " " + p.get("model", "") + " " + p.get("version_range", ""))
-                            for p in ap if isinstance(p, dict)
-                        )
-                        severity_text = (d.get("severity") or "").upper().strip()
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+        for title, cve_ids_str, pub, data_str in fetch_advisory_rows(self.db_path):
+            if not pub:
+                continue
+            pub_dt = self._parse_date(pub)
+            if pub_dt is None:
+                continue
+            cve_ids = parse_cve_ids(cve_ids_str)
+            d = parse_advisory_data(data_str)
+            affected_text = affected_text_of(d, include_version_range=True)
+            severity_text = severity_text_of(d)
+            avg_cvss, cvss_source = resolve_cvss(cve_ids, cve_score_map, severity_text)
 
-                # ── 双源 CVSS：优先 cves.cvss_score 取最大；缺失退回 severity 文本映射 ──
-                hit_scores = [cve_score_map[c] for c in cve_ids if c in cve_score_map]
-                if hit_scores:
-                    avg_cvss = max(hit_scores)   # 取最大代表 DSA 风险上限
-                    cvss_source = "nvd"
-                else:
-                    avg_cvss = _SEVERITY_TO_CVSS.get(severity_text, 0.0)
-                    cvss_source = "severity_fallback" if avg_cvss > 0 else "none"
+            lines = classify_dsa(title or "", affected_text)
+            records.append({
+                "title": title or "",
+                "affected_text": affected_text,
+                "published": pub_dt,
+                "product_lines": lines,
+                "avg_cvss": avg_cvss,
+                "cvss_source": cvss_source,
+                "cve_ids": cve_ids,
+                "severity": severity_text,
+            })
 
-                lines = classify_dsa(title or "", affected_text)
-                records.append({
-                    "title": title or "",
-                    "affected_text": affected_text,
-                    "published": pub_dt,
-                    "product_lines": lines,
-                    "avg_cvss": avg_cvss,
-                    "cvss_source": cvss_source,
-                    "cve_ids": cve_ids,
-                    "severity": severity_text,
-                })
-        finally:
-            conn.close()
         self._dsa_records = records
         return records
 
@@ -686,6 +651,70 @@ class MicrocodeRiskAssessor:
             })
         out.sort(key=lambda d: d["published"], reverse=True)
         return out
+
+    # ── P2-12：月度趋势 ─────────────────────────────────────────────────
+
+    def monthly_hits(
+        self,
+        key: MicrocodeKey,
+        months: int = 12,
+    ) -> List[Tuple[str, int]]:
+        """
+        返回该 key 近 N 个月的 DSA 命中数序列（按月升序）。
+
+        :param key: 微码 key（产品线 × 机型 × 类型 × 版本）
+        :param months: 回溯月数（默认 12）
+        :return: [(YYYY-MM, count), ...] 长度为 months，缺月填 0
+        """
+        index = self._build_index()
+        bucket = index.get(key, {"direct": [], "anchors": [], "qualifier": ""})
+
+        # 收集该 key 经范围展开后的所有命中 DSA
+        hit_dsas: Dict[int, Dict[str, Any]] = {}
+        for dsa in bucket["direct"]:
+            hit_dsas[id(dsa)] = dsa
+        for q, dsa in bucket["anchors"]:
+            hit_dsas[id(dsa)] = dsa
+
+        # 跨 key 范围扩散
+        target_triple = (key.product_line, key.model, key.firmware_type)
+        for other_key, other_bucket in index.items():
+            if (other_key.product_line, other_key.model, other_key.firmware_type) != target_triple:
+                continue
+            if other_key.version == key.version:
+                continue
+            for q, dsa in other_bucket["anchors"]:
+                if q == "<" and version_lt(key.version, other_key.version):
+                    hit_dsas[id(dsa)] = dsa
+                elif q == "<=" and version_le(key.version, other_key.version):
+                    hit_dsas[id(dsa)] = dsa
+                elif q == ">=" and version_le(other_key.version, key.version):
+                    hit_dsas[id(dsa)] = dsa
+
+        # 月度桶
+        from collections import OrderedDict
+        bucket_map: "OrderedDict[str, int]" = OrderedDict()
+        # 初始化最近 N 月（升序）
+        cur_year, cur_month = self.now.year, self.now.month
+        keys_in_order: List[str] = []
+        for offset in range(months - 1, -1, -1):
+            y, m = cur_year, cur_month - offset
+            while m <= 0:
+                m += 12
+                y -= 1
+            label = f"{y:04d}-{m:02d}"
+            keys_in_order.append(label)
+            bucket_map[label] = 0
+
+        for dsa in hit_dsas.values():
+            pub: datetime = dsa.get("published")
+            if not pub:
+                continue
+            label = f"{pub.year:04d}-{pub.month:02d}"
+            if label in bucket_map:
+                bucket_map[label] += 1
+
+        return list(bucket_map.items())
 
     def coverage_summary(self) -> Dict[str, Any]:
         """统计抽取覆盖率（用于评估原型可用性）"""

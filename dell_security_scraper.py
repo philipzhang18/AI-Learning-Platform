@@ -48,6 +48,51 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _extract_initial_revision_date(content: str) -> str | None:
+    """从 Revision History 表格中提取第一条（Initial Release）的日期。
+
+    支持格式：
+      1.0  2024-11-06  Initial Release
+      1.0  06 Nov 2024  Initial Release
+      Revision  Date  Description
+      1.0  November 6, 2024  Initial Release
+    返回 YYYY-MM-DD 或 None。
+    """
+    if not content:
+        return None
+
+    # 找到 Revision History 区块
+    block_m = re.search(
+        r'[Rr]evision\s+[Hh]istory.*?(?=\n\n|\Z)',
+        content,
+        re.DOTALL,
+    )
+    block = block_m.group(0) if block_m else content
+
+    date_fmts = [
+        '%Y-%m-%d',
+        '%d %B %Y', '%d %b %Y',
+        '%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y',
+        '%m/%d/%Y',
+    ]
+
+    # 匹配版本号行（1.0 / 1 / A）后紧跟日期
+    row_patterns = [
+        # "1.0  2024-11-06  ..."  or  "1.0  06 Nov 2024  ..."
+        r'(?:^|\n)\s*(?:\d+\.?\d*|[A-Z])\s+(\d{4}-\d{2}-\d{2}|\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},?\s+\d{4})',
+    ]
+    for pat in row_patterns:
+        for m in re.finditer(pat, block):
+            raw = m.group(1).strip()
+            for fmt in date_fmts:
+                try:
+                    return datetime.strptime(raw, fmt).strftime('%Y-%m-%d')
+                except ValueError:
+                    continue
+
+    return None
+
+
 class DellSecurityScraper:
     """Dell 安全公告爬取器 — Exa API / HTTP / Selenium 多策略"""
 
@@ -542,37 +587,74 @@ class DellSecurityScraper:
                 title = line
                 break
 
-        # 发布日期：优先取 Article Properties 中的 Last Modified
+        # 发布日期：优先取原始发布日期，回退到 Last Modified
         published_date = datetime.now().strftime('%Y-%m-%d')
 
-        # 优先匹配 "Last Modified: 22 May 2021" 等格式
-        last_modified_patterns = [
-            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
-            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
-            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
-            r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}/\d{1,2}/\d{4})',
-        ]
-        last_modified_fmts = [
+        _date_fmts = [
             '%d %B %Y', '%d %b %Y',
             '%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y',
-            '%Y-%m-%d',
-            '%m/%d/%Y',
+            '%Y-%m-%d', '%m/%d/%Y',
         ]
+
+        def _try_parse_date(raw: str) -> str | None:
+            for fmt in _date_fmts:
+                try:
+                    return datetime.strptime(raw.strip(), fmt).strftime('%Y-%m-%d')
+                except ValueError:
+                    continue
+            return None
+
         found_date = False
-        for pat in last_modified_patterns:
-            m = re.search(pat, content)
-            if m:
-                for fmt in last_modified_fmts:
-                    try:
-                        published_date = datetime.strptime(m.group(1).strip(), fmt).strftime('%Y-%m-%d')
+
+        # 1) 最高优先：Revision History 第一条（Initial Release 日期）
+        revision_date = _extract_initial_revision_date(content)
+        if revision_date:
+            published_date = revision_date
+            found_date = True
+
+        # 2) Original Release Date / Article Created / Published Date
+        if not found_date:
+            original_date_patterns = [
+                r'[Oo]riginal\s+[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+                r'[Oo]riginal\s+[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+                r'[Oo]riginal\s+[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+                r'[Aa]rticle\s+[Cc]reated\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+                r'[Aa]rticle\s+[Cc]reated\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+                r'[Aa]rticle\s+[Cc]reated\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+                r'[Pp]ublished\s+[Dd]ate\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+                r'[Pp]ublished\s+[Dd]ate\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+                r'[Pp]ublished\s+[Dd]ate\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+                r'[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+                r'[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+                r'[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+            ]
+            for pat in original_date_patterns:
+                m = re.search(pat, content)
+                if m:
+                    parsed = _try_parse_date(m.group(1))
+                    if parsed:
+                        published_date = parsed
                         found_date = True
                         break
-                    except ValueError:
-                        continue
-                if found_date:
-                    break
 
-        # 回退：全文匹配第一个日期
+        # 3) Last Modified（无更好来源时使用）
+        if not found_date:
+            last_modified_patterns = [
+                r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+                r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+                r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+                r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}/\d{1,2}/\d{4})',
+            ]
+            for pat in last_modified_patterns:
+                m = re.search(pat, content)
+                if m:
+                    parsed = _try_parse_date(m.group(1))
+                    if parsed:
+                        published_date = parsed
+                        found_date = True
+                        break
+
+        # 4) 全文匹配第一个日期
         if not found_date:
             date_patterns = [
                 (r'(\w+ \d{1,2},?\s+\d{4})', ['%B %d, %Y', '%B %d %Y']),
@@ -592,7 +674,7 @@ class DellSecurityScraper:
                     if found_date:
                         break
 
-        # 最终回退：从 DSA ID 提取年份，避免使用当天日期
+        # 5) 最终回退：从 DSA ID 提取年份
         if not found_date:
             dsa_year_m = re.match(r'DSA-(\d{4})-', dsa_id)
             if dsa_year_m:
@@ -654,10 +736,34 @@ class DellSecurityScraper:
         return self._extract_remediation_from_text(content)
 
     def _parse_remediation_table_html(self, html):
-        """从 HTML 中解析 Affected Products & Remediation 表格"""
+        """从 HTML 中解析 Affected Products & Remediation 表格。
+
+        识别的表头变体（按优先级）：
+        - product / products
+        - affected version / affected versions / vulnerable version / version affected
+        - remediated version / fixed version / patched version / remediation
+        """
         soup = BeautifulSoup(html, 'html.parser')
         products = []
         solution_parts = []
+
+        affected_keywords = (
+            ('affected', 'version'),
+            ('vulnerable', 'version'),
+            ('version', 'affected'),
+        )
+        remediated_keywords = (
+            ('remediat', 'version'),
+            ('fixed', 'version'),
+            ('patched', 'version'),
+            ('remediation',),
+        )
+
+        def header_matches(header_text: str, keyword_groups) -> bool:
+            for kws in keyword_groups:
+                if all(k in header_text for k in kws):
+                    return True
+            return False
 
         for table in soup.find_all('table'):
             header_row = table.find('tr')
@@ -667,11 +773,20 @@ class DellSecurityScraper:
                        for cell in header_row.find_all(['th', 'td'])]
 
             # 定位列索引
-            prod_idx = next((i for i, h in enumerate(headers) if 'product' in h), None)
-            affected_idx = next((i for i, h in enumerate(headers)
-                                 if 'affected' in h and 'version' in h), None)
-            remediated_idx = next((i for i, h in enumerate(headers)
-                                   if 'remediat' in h and 'version' in h), None)
+            prod_idx = next(
+                (i for i, h in enumerate(headers) if 'product' in h),
+                None,
+            )
+            affected_idx = next(
+                (i for i, h in enumerate(headers)
+                 if header_matches(h, affected_keywords)),
+                None,
+            )
+            remediated_idx = next(
+                (i for i, h in enumerate(headers)
+                 if header_matches(h, remediated_keywords)),
+                None,
+            )
 
             if prod_idx is None:
                 continue
@@ -1139,32 +1254,71 @@ class DellSecurityScraper:
         return updated
 
     def _extract_date_from_content(self, content: str, dsa_id: str) -> str:
-        """从内容中提取发布日期，返回 YYYY-MM-DD 或 None"""
+        """从内容中提取发布日期，返回 YYYY-MM-DD 或 None。
+
+        优先级：Revision History 第一条 > Original Release Date > Last Modified
+        """
         if not content:
             return None
 
-        # 优先匹配 Last Modified
+        # 1) 最高优先：Revision History 第一条（Initial Release）
+        result = _extract_initial_revision_date(content)
+        if result:
+            return result
+
+        fmts = [
+            '%d %B %Y', '%d %b %Y',
+            '%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y',
+            '%Y-%m-%d', '%m/%d/%Y',
+        ]
+
+        def _try_parse(raw: str) -> str | None:
+            for fmt in fmts:
+                try:
+                    return datetime.strptime(raw.strip(), fmt).strftime('%Y-%m-%d')
+                except ValueError:
+                    continue
+            return None
+
+        # 1) 最高优先：Revision History 第一条（Initial Release 日期）
+        result = _extract_initial_revision_date(content)
+        if result:
+            return result
+
+        # 2) Original Release Date / Article Created / Published Date
+        original_patterns = [
+            r'[Oo]riginal\s+[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Oo]riginal\s+[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+            r'[Oo]riginal\s+[Rr]elease\s+[Dd]ate\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+            r'[Aa]rticle\s+[Cc]reated\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Aa]rticle\s+[Cc]reated\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+            r'[Aa]rticle\s+[Cc]reated\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+            r'[Pp]ublished\s+[Dd]ate\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
+            r'[Pp]ublished\s+[Dd]ate\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
+            r'[Pp]ublished\s+[Dd]ate\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
+        ]
+        for pat in original_patterns:
+            m = re.search(pat, content)
+            if m:
+                result = _try_parse(m.group(1))
+                if result:
+                    return result
+
+        # 3) Last Modified（无更好来源时使用）
         last_modified_patterns = [
             r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}\s+\w+\s+\d{4})',
             r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\w+\s+\d{1,2},?\s+\d{4})',
             r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{4}-\d{2}-\d{2})',
             r'[Ll]ast\s+[Mm]odified\s*[:\s]\s*(\d{1,2}/\d{1,2}/\d{4})',
         ]
-        fmts = [
-            '%d %B %Y', '%d %b %Y',
-            '%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y',
-            '%Y-%m-%d', '%m/%d/%Y',
-        ]
         for pat in last_modified_patterns:
             m = re.search(pat, content)
             if m:
-                for fmt in fmts:
-                    try:
-                        return datetime.strptime(m.group(1).strip(), fmt).strftime('%Y-%m-%d')
-                    except ValueError:
-                        continue
+                result = _try_parse(m.group(1))
+                if result:
+                    return result
 
-        # 回退：全文日期
+        # 4) 全文日期
         date_patterns = [
             (r'(\w+ \d{1,2},?\s+\d{4})', ['%B %d, %Y', '%B %d %Y']),
             (r'(\d{4}-\d{2}-\d{2})', ['%Y-%m-%d']),
@@ -1175,7 +1329,7 @@ class DellSecurityScraper:
                 for fmt in pfmts:
                     try:
                         d = datetime.strptime(m.group(1), fmt)
-                        if d.year < 2026:
+                        if d.year < 2027:
                             return d.strftime('%Y-%m-%d')
                     except ValueError:
                         continue

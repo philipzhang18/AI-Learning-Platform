@@ -155,49 +155,32 @@ class DSAVersionPredictor:
             return self._dsa_records
 
         records: List[Dict[str, Any]] = []
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT title, cve_ids, published_date, data FROM dell_advisories")
-            for title, cve_ids_str, pub, data_str in cur.fetchall():
-                if not pub:
-                    continue
-                pub_dt = self._parse_date(pub)
-                if pub_dt is None:
-                    continue
+        from risk._dsa_base import (
+            affected_text_of, fetch_advisory_rows, parse_advisory_data,
+            parse_cve_ids, severity_text_of,
+        )
+        for title, cve_ids_str, pub, data_str in fetch_advisory_rows(self.db_path):
+            if not pub:
+                continue
+            pub_dt = self._parse_date(pub)
+            if pub_dt is None:
+                continue
 
-                affected_text = ""
-                severity = ""
-                affected_products = []
-                if data_str:
-                    try:
-                        d = json.loads(data_str)
-                        affected_products = d.get("affected_products", []) or []
-                        ap = affected_products
-                        affected_text = " ".join(
-                            (p.get("name", "") + " " + p.get("model", ""))
-                            for p in ap if isinstance(p, dict)
-                        )
-                        severity = (d.get("severity") or "").upper()
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            d = parse_advisory_data(data_str)
+            affected_products = d.get("affected_products", []) or []
+            affected_text = affected_text_of(d, include_version_range=False)
+            severity = severity_text_of(d)
+            lines = classify_dsa(title or "", affected_text)
+            versions = extract_versions_from_dsa(title or "", affected_products, lines)
 
-                # 产品线分类
-                lines = classify_dsa(title or "", affected_text)
-
-                # 版本提取
-                versions = extract_versions_from_dsa(title or "", affected_products, lines)
-
-                records.append({
-                    "title": title or "",
-                    "cve_ids": [c for c in re.split(r"[,\s]+", (cve_ids_str or "").strip()) if c.startswith("CVE-")],
-                    "published": pub_dt,
-                    "severity": severity,
-                    "product_lines": lines,
-                    "versions": versions,  # List[VersionInfo]
-                })
-        finally:
-            conn.close()
+            records.append({
+                "title": title or "",
+                "cve_ids": parse_cve_ids(cve_ids_str),
+                "published": pub_dt,
+                "severity": severity,
+                "product_lines": lines,
+                "versions": versions,
+            })
 
         self._dsa_records = records
         return records
