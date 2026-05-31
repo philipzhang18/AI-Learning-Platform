@@ -171,9 +171,6 @@ chunk_size = timedelta(days=120)  # 默认 120 天
 # 关联数据显示限制
 max_display = 1000  # 默认 1000
 
-# 统计图表缩放（默认 110%）
-stats_chart_scale = 1.1  # 范围 0.7 - 1.6
-
 # 智能学习搜索结果上限
 learn_search_limit = 500  # 有关键字时
 learn_default_limit = 200  # 无关键字时
