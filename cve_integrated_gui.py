@@ -1357,7 +1357,7 @@ class CVEIntegratedGUI:
 
         # 7. 智能预测标签页（知识图谱 + 风险分析合并）
         self.unified_risk_frame = tk.Frame(self.notebook, bg="white")
-        self.unified_risk_tab_id = self.notebook.add(self.unified_risk_frame, text="智能预测")
+        self.unified_risk_tab_id = self.notebook.add(self.unified_risk_frame, text=t("tab_smart_predict"))
 
         # 8. 智能学习标签页
         self.learn_frame = tk.Frame(self.notebook, bg="white")
@@ -5308,42 +5308,36 @@ Script requirements:
             return []
 
     def _get_monthly_matched_stats(self):
-        """查询 CVE-Dell 关联最近 13 个月的统计数据（从 dell_advisories.cve_ids 解析）"""
+        """查询 CVE-Dell 关联最近 13 个月的统计数据。
+
+        统计口径：每月 DSA 公告中引用的 CVE 总条数（精确计数 'CVE-' 出现次数）。
+        """
         try:
             with self.db_lock:
-                # 检查是否有 cve_dell_mapping 表
-                has_mapping = self.conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='cve_dell_mapping'"
-                ).fetchone()
+                rows = self.conn.execute("""
+                    SELECT strftime('%Y-%m', published_date) as month,
+                           cve_ids
+                    FROM dell_advisories
+                    WHERE published_date IS NOT NULL AND published_date != ''
+                      AND cve_ids IS NOT NULL AND cve_ids != ''
+                    ORDER BY month DESC
+                """).fetchall()
 
-                if has_mapping:
-                    rows = self.conn.execute("""
-                        SELECT strftime('%Y-%m', c.published_date) as month, COUNT(DISTINCT m.id) as count
-                        FROM cve_dell_mapping m
-                        JOIN cves c ON m.cve_id = c.cve_id
-                        WHERE c.published_date IS NOT NULL AND c.published_date != ''
-                        GROUP BY month
-                        ORDER BY month DESC
-                        LIMIT 13
-                    """).fetchall()
-                else:
-                    # 从 dell_advisories.cve_ids 统计关联 CVE 数量（按 Dell 公告发布月份）
-                    rows = self.conn.execute("""
-                        SELECT strftime('%Y-%m', published_date) as month,
-                               SUM(LENGTH(cve_ids) - LENGTH(REPLACE(cve_ids, ',', '')) + 1) as count
-                        FROM dell_advisories
-                        WHERE published_date IS NOT NULL AND published_date != ''
-                          AND cve_ids IS NOT NULL AND cve_ids != ''
-                        GROUP BY month
-                        ORDER BY month DESC
-                        LIMIT 13
-                    """).fetchall()
+            import re
+            from collections import defaultdict
+            month_counts: dict = defaultdict(int)
+            for month, cve_ids_str in rows:
+                if not month:
+                    continue
+                count = len(re.findall(r'CVE-\d{4}-\d+', cve_ids_str or ''))
+                month_counts[month] += count
 
-            result = [(row[0], row[1]) for row in reversed(rows)]
+            # 取最近 13 个月，按月份升序返回
+            sorted_months = sorted(month_counts.keys(), reverse=True)[:13]
+            result = [(m, month_counts[m]) for m in reversed(sorted_months)]
             return result
         except Exception as e:
             print(f"查询关联月度统计失败: {e}")
-            return []
             return []
 
     def _update_db_info(self):

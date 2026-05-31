@@ -18,8 +18,21 @@ TEXTS = {
         "tab_solution": "💡 AI解决方案",
         "tab_dell_kb": "📖 Dell技术库",
         "tab_stats": "📈 统计分析",
+        "tab_graph": "🕸 知识图谱",
         "tab_learn": "🧠 智能学习",
         "tab_log": "📝 操作日志",
+        "tab_smart_predict": "🔮 智能预测",
+        "smart_predict_banner": (
+            "ℹ️ 智能预测：基于知识图谱 + Dell DSA 历史 + NVD CVE 压力，"
+            "采用 Poisson 速率模型预测产品线/版本/微码级未来风险。"
+            "「全量分析」生成知识图谱与产品评分；"
+            "「产品线DSA预测」按 30/60/90 天给出概率与风险等级；"
+            "「微码风险」按 BIOS/Firmware/iDRAC/OS 评估具体微码版本暴露面。"
+        ),
+        "btn_full_analyze": "▶ 全量分析",
+        "btn_dsa_predict": "🎯 产品线DSA预测",
+        "btn_microcode_risk": "🔬 微码风险",
+        "btn_export_report": "导出报告",
         "sub_brief": "📝 简报",
         "sub_podcast": "🎙 播客",
         "sub_history": "📅 历史资讯",
@@ -816,6 +829,39 @@ TEXTS = {
         # AI 提示词语言
         "ai_language_instruction": "请使用中文回答。",
 
+        # 知识图谱
+        "kg_title": "🕸 知识图谱",
+        "kg_desc": "基于 NetworkX 内存图，关联 CVE × DSA × 产品 × CWE",
+        "kg_build": "🔨 构建 / 刷新图谱",
+        "kg_building": "正在构建内存图谱…",
+        "kg_built": "图谱构建完成",
+        "kg_not_built": "请先点击「构建 / 刷新图谱」",
+        "kg_limit_cve": "CVE 采样数",
+        "kg_limit_dsa": "DSA 采样数",
+        "kg_severity_filter": "严重度过滤",
+        "kg_severity_all": "全部",
+        "kg_query": "🔍 查询节点",
+        "kg_node_input": "节点 ID (CVE-xxxx-xxxx / DSA-xxxx-xxx / 产品名)",
+        "kg_radius": "邻域半径",
+        "kg_stats": "📊 图谱统计",
+        "kg_nodes": "节点",
+        "kg_edges": "边",
+        "kg_top_products": "Top 产品",
+        "kg_top_cwes": "Top CWE",
+        "kg_neighbors": "邻居节点",
+        "kg_export_graphml": "📤 导出 GraphML",
+        "kg_export_json": "📤 导出 JSON",
+        "kg_export_success": "导出成功：{path}",
+        "kg_export_failed": "导出失败：{err}",
+        "kg_not_found": "节点 {node} 不在图谱中",
+        "kg_relation": "关系",
+        "kg_layout": "布局",
+        "kg_layout_spring": "spring",
+        "kg_layout_kamada": "kamada_kawai",
+        "kg_layout_circular": "circular",
+        "kg_visualize": "🎨 绘制子图",
+        "kg_no_data": "暂无数据，请先构建图谱",
+
         # 底部文本
         "powered_by": "基于 Claude 和 Qwen AI",
     },
@@ -834,8 +880,22 @@ TEXTS = {
         "tab_solution": "💡 AI Solutions",
         "tab_dell_kb": "📖 Dell KB",
         "tab_stats": "📈 Statistics",
+        "tab_graph": "🕸 Knowledge Graph",
         "tab_learn": "🧠 Smart Learning",
         "tab_log": "📝 Operation Log",
+        "tab_smart_predict": "🔮 Smart Prediction",
+        "smart_predict_banner": (
+            "ℹ️ Smart Prediction: Based on knowledge graph + Dell DSA history "
+            "+ NVD CVE pressure, uses Poisson rate model to predict product-line / "
+            "version / microcode-level future risks. "
+            "「Full Analysis」builds knowledge graph and product scores; "
+            "「DSA Prediction」forecasts 30/60/90-day probability and risk level; "
+            "「Microcode Risk」assesses BIOS/Firmware/iDRAC/OS exposure."
+        ),
+        "btn_full_analyze": "▶ Full Analysis",
+        "btn_dsa_predict": "🎯 DSA Prediction",
+        "btn_microcode_risk": "🔬 Microcode Risk",
+        "btn_export_report": "Export",
         "sub_brief": "📝 Brief",
         "sub_podcast": "🎙 Podcast",
         "sub_history": "📅 History",
@@ -1631,6 +1691,39 @@ TEXTS = {
 
         # AI 提示词语言
         "ai_language_instruction": "Please respond in English.",
+
+        # Knowledge Graph
+        "kg_title": "🕸 Knowledge Graph",
+        "kg_desc": "In-memory graph on NetworkX, linking CVE × DSA × Product × CWE",
+        "kg_build": "🔨 Build / Refresh Graph",
+        "kg_building": "Building in-memory graph…",
+        "kg_built": "Graph built successfully",
+        "kg_not_built": "Please click 'Build / Refresh Graph' first",
+        "kg_limit_cve": "CVE sample size",
+        "kg_limit_dsa": "DSA sample size",
+        "kg_severity_filter": "Severity filter",
+        "kg_severity_all": "All",
+        "kg_query": "🔍 Query node",
+        "kg_node_input": "Node ID (CVE-xxxx-xxxx / DSA-xxxx-xxx / product name)",
+        "kg_radius": "Neighborhood radius",
+        "kg_stats": "📊 Graph statistics",
+        "kg_nodes": "Nodes",
+        "kg_edges": "Edges",
+        "kg_top_products": "Top products",
+        "kg_top_cwes": "Top CWEs",
+        "kg_neighbors": "Neighbors",
+        "kg_export_graphml": "📤 Export GraphML",
+        "kg_export_json": "📤 Export JSON",
+        "kg_export_success": "Export OK: {path}",
+        "kg_export_failed": "Export failed: {err}",
+        "kg_not_found": "Node {node} not found in the graph",
+        "kg_relation": "Relation",
+        "kg_layout": "Layout",
+        "kg_layout_spring": "spring",
+        "kg_layout_kamada": "kamada_kawai",
+        "kg_layout_circular": "circular",
+        "kg_visualize": "🎨 Draw subgraph",
+        "kg_no_data": "No data. Build the graph first.",
 
         # 底部文本
         "powered_by": "Powered by Claude and Qwen AI",
