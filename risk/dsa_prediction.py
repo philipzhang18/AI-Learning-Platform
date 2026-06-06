@@ -62,6 +62,11 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from risk._dsa_base import (
+    parse_date as _shared_parse_date,
+    load_recent_cves_base,
+)
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Dell EMC 产品线分类法
@@ -232,6 +237,9 @@ class DSAProductLinePredictor:
             pub_dt = self._parse_date(pub)
             if pub_dt is None:
                 continue
+            # 时间一致性：回测场景下 self.now 表示"截止时刻"，未来的 DSA 不可见
+            if pub_dt > self.now:
+                continue
             d = parse_advisory_data(data_str)
             affected_text = affected_text_of(d, include_version_range=False)
             severity = severity_text_of(d)
@@ -248,99 +256,15 @@ class DSAProductLinePredictor:
         return records
 
     def _load_recent_cves(self, days: int = 90) -> List[Dict[str, Any]]:
-        """加载最近 N 天 CVE（用于压力 + 严重度因子计算）
+        """加载最近 N 天 Dell 相关 CVE（迁移至 risk._dsa_base.load_recent_cves_base）
 
-        CVE 完整信息存储在 `cves.data` 列（JSON），需在 Python 侧解析
-        description 与 CVSS 分数。
-
-        优化：使用 SQL LIKE 预筛选含 Dell/EMC/PowerXxx 等关键词的 CVE，
-        避免对每条 CVE 都做 JSON 解析（13K+ 条 → 通常剩几百条）。
+        基础字段：cve_id / description / published / cvss
+        见 [risk/_dsa_base.py](risk/_dsa_base.py) load_recent_cves_base 实现。
         """
         if self._recent_cves is not None:
             return self._recent_cves
-
-        cutoff = self.now - timedelta(days=days)
-        cutoff_str = cutoff.strftime("%Y-%m-%d")
-
-        # 预筛选关键词（覆盖所有产品线常见标识）。在 SQL 层完成 → 大幅减少 JSON 解析量
-        prefilter_keywords = [
-            "dell", "emc", "powerstore", "powermax", "vmax", "symmetrix",
-            "unity", "vnx", "compellent", "xtremio", "powerflex", "scaleio", "vxflex",
-            "powerscale", "isilon", "onefs", "celerra", "ecs", "objectscale",
-            "data domain", "ddos", "ddve", "avamar", "networker", "powerprotect",
-            "recoverpoint", "centera", "connectrix", "vplex", "os10", "sonic",
-            "vxrail", "apex", "cloudiq", "dataiq", "powerpath", "openmanage",
-            "idrac", "supportassist", "command|update", "poweredge",
-            "precision", "latitude", "optiplex", "thinos", "client bios",
-        ]
-        like_clauses = " OR ".join(["LOWER(data) LIKE ?"] * len(prefilter_keywords))
-        params = [cutoff_str] + [f"%{kw}%" for kw in prefilter_keywords]
-
-        records: List[Dict[str, Any]] = []
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                f"""SELECT cve_id, published_date, data
-                    FROM cves
-                    WHERE published_date >= ?
-                      AND ({like_clauses})""",
-                params,
-            )
-            for cve_id, pub, data_str in cur.fetchall():
-                pub_dt = self._parse_date(pub)
-                if pub_dt is None or pub_dt < cutoff:
-                    continue
-
-                desc = ""
-                cvss = 0.0
-                if data_str:
-                    try:
-                        d = json.loads(data_str)
-                        # 本项目 cves 表 data 是预解析过的扁平结构
-                        desc = d.get("description", "") or ""
-                        if not desc:
-                            cve_obj = d.get("cve", d)
-                            for item in cve_obj.get("descriptions", []) or []:
-                                if isinstance(item, dict) and item.get("lang") == "en":
-                                    desc = item.get("value", "")
-                                    break
-                        s = d.get("cvss_score")
-                        if s is not None:
-                            try:
-                                cvss = float(s)
-                            except (TypeError, ValueError):
-                                cvss = 0.0
-                        # 兜底：NVD 嵌套（兼容遗留数据）
-                        if cvss <= 0:
-                            cve_obj = d.get("cve", d)
-                            metrics = cve_obj.get("metrics", {}) or {}
-                            for ver_key in ("cvssMetricV40", "cvssMetricV31",
-                                            "cvssMetricV30", "cvssMetricV2"):
-                                entries = metrics.get(ver_key) or []
-                                if entries and isinstance(entries, list):
-                                    cd = entries[0].get("cvssData", {}) if isinstance(entries[0], dict) else {}
-                                    score = cd.get("baseScore")
-                                    if score is not None:
-                                        try:
-                                            cvss = float(score)
-                                            break
-                                        except (TypeError, ValueError):
-                                            pass
-                    except (json.JSONDecodeError, TypeError, AttributeError):
-                        pass
-
-                records.append({
-                    "cve_id": cve_id,
-                    "description": desc,
-                    "published": pub_dt,
-                    "cvss": cvss,
-                })
-        finally:
-            conn.close()
-
-        self._recent_cves = records
-        return records
+        self._recent_cves = load_recent_cves_base(self.db_path, days=days, now=self.now)
+        return self._recent_cves
 
     def _load_dsa_cve_set(self) -> set:
         """加载所有已被 DSA 引用的 CVE-ID 集合（用于 open_cve_pressure 排除）"""
@@ -485,19 +409,8 @@ class DSAProductLinePredictor:
 
     @staticmethod
     def _parse_date(s: str) -> Optional[datetime]:
-        if not s:
-            return None
-        s = s[:19].split(".")[0].replace("T", " ")
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(s[:len(fmt)], fmt)
-            except ValueError:
-                continue
-        # 仅 YYYY-MM-DD 部分
-        try:
-            return datetime.strptime(s[:10], "%Y-%m-%d")
-        except ValueError:
-            return None
+        """[已迁移至 risk._dsa_base.parse_date] 保留薄包装维持向后兼容"""
+        return _shared_parse_date(s)
 
     @staticmethod
     def _level_from_probability(p: float) -> str:

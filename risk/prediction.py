@@ -18,17 +18,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from knowledge_graph import KnowledgeGraph, NODE_CVE, NODE_CWE, NODE_PRODUCT
 from risk.base import TrendForecast
-
-
-def _parse_date(s: str) -> Optional[datetime]:
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s[:len(fmt) + 5].split(".")[0][:19], fmt)
-        except (ValueError, TypeError):
-            continue
-    return None
+from risk._dsa_base import parse_date as _parse_date
 
 
 class TrendPredictor:

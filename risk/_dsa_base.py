@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -146,6 +146,117 @@ def fetch_advisory_rows(db_path: str) -> List[Tuple[str, str, str, str]]:
         conn.close()
 
 
+# Dell/EMC 全产品线预筛选关键词（CVE description LIKE 预过滤用）
+DELL_CVE_PREFILTER_KEYWORDS: Tuple[str, ...] = (
+    "dell", "emc", "powerstore", "powermax", "vmax", "symmetrix",
+    "unity", "vnx", "compellent", "xtremio", "powerflex", "scaleio", "vxflex",
+    "powerscale", "isilon", "onefs", "celerra", "ecs", "objectscale",
+    "data domain", "ddos", "ddve", "avamar", "networker", "powerprotect",
+    "recoverpoint", "centera", "connectrix", "vplex", "os10", "sonic",
+    "vxrail", "apex", "cloudiq", "dataiq", "powerpath", "openmanage",
+    "idrac", "supportassist", "command|update", "poweredge",
+    "precision", "latitude", "optiplex", "thinos", "client bios",
+)
+
+
+def _extract_cve_desc_and_cvss(data_str: str) -> Tuple[str, float]:
+    """
+    从 cves.data JSON 字段提取 (description, cvss_score)。
+
+    优先取扁平结构（本项目主路径），未命中再回退到 NVD 嵌套结构。
+    任何解析失败返回 ("", 0.0)，不抛异常。
+    """
+    if not data_str:
+        return "", 0.0
+    try:
+        d = json.loads(data_str)
+    except (json.JSONDecodeError, TypeError):
+        return "", 0.0
+    if not isinstance(d, dict):
+        return "", 0.0
+
+    desc = d.get("description", "") or ""
+    if not desc:
+        cve_obj = d.get("cve", d)
+        for item in (cve_obj.get("descriptions") or []):
+            if isinstance(item, dict) and item.get("lang") == "en":
+                desc = item.get("value", "")
+                break
+
+    cvss: float = 0.0
+    s = d.get("cvss_score")
+    if s is not None:
+        try:
+            cvss = float(s)
+        except (TypeError, ValueError):
+            cvss = 0.0
+
+    if cvss <= 0:
+        cve_obj = d.get("cve", d)
+        metrics = cve_obj.get("metrics", {}) or {}
+        for ver_key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            entries = metrics.get(ver_key) or []
+            if entries and isinstance(entries, list) and isinstance(entries[0], dict):
+                cd = entries[0].get("cvssData", {}) or {}
+                score = cd.get("baseScore")
+                if score is not None:
+                    try:
+                        cvss = float(score)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+    return desc or "", cvss
+
+
+def load_recent_cves_base(
+    db_path: str,
+    days: int = 90,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """
+    加载最近 N 天与 Dell/EMC 相关的 CVE 基础信息。
+
+    返回字段：cve_id / description / published (datetime) / cvss (float)
+    上层（产品线/版本/微码预测器）可在此基础上再做分类/版本提取。
+
+    SQL 用 LIKE 预筛关键词避免对 124K+ CVE 全量 JSON 解析。
+    """
+    cutoff_dt = (now or datetime.now()) - timedelta(days=days)
+    cutoff_str = cutoff_dt.strftime("%Y-%m-%d")
+    upper_dt = now or datetime.now()
+    upper_str = upper_dt.strftime("%Y-%m-%d")
+    keywords = DELL_CVE_PREFILTER_KEYWORDS
+    like_clauses = " OR ".join(["LOWER(data) LIKE ?"] * len(keywords))
+    params = [cutoff_str, upper_str] + [f"%{kw}%" for kw in keywords]
+
+    records: List[Dict[str, Any]] = []
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""SELECT cve_id, published_date, data
+                FROM cves
+                WHERE published_date >= ?
+                  AND published_date <= ?
+                  AND ({like_clauses})""",
+            params,
+        )
+        for cve_id, pub, data_str in cur.fetchall():
+            pub_dt = parse_date(pub)
+            if pub_dt is None or pub_dt < cutoff_dt or pub_dt > upper_dt:
+                continue
+            desc, cvss = _extract_cve_desc_and_cvss(data_str or "")
+            records.append({
+                "cve_id": cve_id,
+                "description": desc,
+                "published": pub_dt,
+                "cvss": cvss,
+            })
+    finally:
+        conn.close()
+    return records
+
+
 def resolve_cvss(
     cve_ids: List[str],
     cve_score_map: Dict[str, float],
@@ -168,6 +279,7 @@ def resolve_cvss(
 
 __all__ = [
     "SEVERITY_TO_CVSS",
+    "DELL_CVE_PREFILTER_KEYWORDS",
     "parse_date",
     "parse_cve_ids",
     "parse_advisory_data",
@@ -176,4 +288,5 @@ __all__ = [
     "load_cve_score_map",
     "fetch_advisory_rows",
     "resolve_cvss",
+    "load_recent_cves_base",
 ]

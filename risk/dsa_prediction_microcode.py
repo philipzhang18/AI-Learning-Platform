@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from risk.dsa_prediction import classify_dsa, _COMPILED_PATTERNS
+from risk._dsa_base import parse_date as _shared_parse_date
 
 # DSA 没有 CVSS 数值字段时，按 severity 文本兜底为典型分数
 _SEVERITY_TO_CVSS = {
@@ -797,18 +798,8 @@ class MicrocodeRiskAssessor:
 
     @staticmethod
     def _parse_date(s: str) -> Optional[datetime]:
-        if not s:
-            return None
-        s = s[:19].split(".")[0].replace("T", " ")
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(s[:len(fmt)], fmt)
-            except ValueError:
-                continue
-        try:
-            return datetime.strptime(s[:10], "%Y-%m-%d")
-        except ValueError:
-            return None
+        """[已迁移至 risk._dsa_base.parse_date] 保留薄包装"""
+        return _shared_parse_date(s)
 
     @staticmethod
     def _band_from_score(s: float) -> str:

@@ -49,18 +49,12 @@ from risk.base import (
 # ────────────────────────────────────────────────────────────────────────────
 
 def _parse_iso_date(date_str: str) -> Optional[datetime]:
-    """解析 ISO 日期字符串，失败返回 None"""
-    if not date_str:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(date_str[:len(fmt) + 5].split(".")[0][:19], fmt)
-        except (ValueError, TypeError):
-            continue
-    try:
-        return datetime.fromisoformat(date_str.replace("Z", "+00:00").split(".")[0])
-    except (ValueError, TypeError):
-        return None
+    """解析 ISO 日期字符串，失败返回 None。
+
+    [已迁移至 risk._dsa_base.parse_date] 保留薄包装维持向后兼容。
+    """
+    from risk._dsa_base import parse_date as _shared_parse_date
+    return _shared_parse_date(date_str)
 
 
 def _days_since(date_str: str, now: Optional[datetime] = None) -> Optional[int]:

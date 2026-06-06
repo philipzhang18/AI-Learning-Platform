@@ -68,6 +68,10 @@ temp_*.json
 dsa_DSA-*.json
 dsa_DSA-*.csv
 configuration_summary.json
+backtest_*.json
+ml_baseline_*.json
+weight_calibration_*.json
+graph_risk_*.json
 
 # ==================== Model / Checkpoint ====================
 checkpoints/
@@ -101,12 +105,17 @@ msedgedriver*
 .env.dev
 .env.prod
 .env.llm.example
+.env.enc
+.secret_key
 .claude/
 .qwen/
 claude.config.json
 qwen_http_tools.json
 secrets.json
 credentials.json
+*.pem
+*.key
+*.crt
 
 # ==================== Git Temp ====================
 *.orig
@@ -137,6 +146,8 @@ system_test.py
 test_gpu_services.sh
 scripts/
 PROJECT_OPTIMIZATION_REPORT.md
+OPTIMIZATION_REPORT.md
+TODO_OPTIMIZATION.md
 
 # ==================== Unused Source ====================
 gpu_cve_sync.py
@@ -150,6 +161,7 @@ sync_sqlite_to_redis.py
 sample_*.csv
 *_backup_*.py
 *_sqlite_backup*.py
+gui/
 
 # ==================== Unused Config ====================
 .wslconfig.example
@@ -170,6 +182,8 @@ start_gpu_wsl.sh
 FIXES_CHECKLIST.txt
 files_to_delete.txt
 claude code Ubuntu.txt
+db_perf_monitor.py
+.secrets.baseline
 
 # ==================== Node.js ====================
 node_modules/

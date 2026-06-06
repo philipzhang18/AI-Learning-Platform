@@ -1,0 +1,77 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install linting tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install black isort flake8 mypy
+
+      - name: Check formatting (Black)
+        run: |
+          black --check --line-length 100 *.py gui/ tests/ scripts/ || true
+        continue-on-error: true
+
+      - name: Check imports (isort)
+        run: |
+          isort --check-only --profile black *.py gui/ tests/ || true
+        continue-on-error: true
+
+      - name: Lint (flake8)
+        run: |
+          flake8 *.py --max-line-length 120 --ignore E203,W503,E501 --exclude .venv,archive,build || true
+        continue-on-error: true
+
+      - name: Type check (mypy)
+        run: |
+          mypy --ignore-missing-imports --no-strict-optional --no-error-summary cve_utils.py error_utils.py gui/ || true
+        continue-on-error: true
+
+  security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit safety detect-secrets
+
+      - name: Security scan (Bandit)
+        run: |
+          bandit -r *.py gui/ -f json -o bandit-report.json || true
+          bandit -r *.py gui/ --severity-level medium || true
+        continue-on-error: true
+
+      - name: Check dependencies (Safety)
+        run: |
+          safety check --json || true
+        continue-on-error: true
+
+      - name: Detect secrets
+        run: |
+          detect-secrets scan --baseline .secrets.baseline || true
+        continue-on-error: true
