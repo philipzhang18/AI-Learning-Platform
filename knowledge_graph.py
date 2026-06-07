@@ -116,7 +116,13 @@ def _is_valid_product_name(s: str) -> bool:
 
 
 def _extract_products_from_dsa(dsa_data: Dict[str, Any], title: str) -> List[str]:
-    """优先从 data.affected_products[*].name 取，回退到标题正则。"""
+    """优先从 data.affected_products[*].name 取，回退到标题正则。
+
+    集成 [risk/product_taxonomy.py](risk/product_taxonomy.py) clean_product_name：
+    过滤 "an IAM" 等抽取噪声，并尝试从标题恢复真实产品名（如 ECS）。
+    """
+    from risk.product_taxonomy import clean_product_name
+
     products: List[str] = []
     ap = dsa_data.get("affected_products") if isinstance(dsa_data, dict) else None
     if isinstance(ap, list):
@@ -124,8 +130,12 @@ def _extract_products_from_dsa(dsa_data: Dict[str, Any], title: str) -> List[str
             if not isinstance(item, dict):
                 continue
             n = normalize_product_name(item.get("name") or item.get("model") or "")
-            if _is_valid_product_name(n):
-                products.append(n)
+            if not _is_valid_product_name(n):
+                continue
+            # 噪声清洗：'an IAM' 等回退到标题真实产品，无法恢复则丢弃
+            cleaned = clean_product_name(n, title)
+            if cleaned and _is_valid_product_name(cleaned):
+                products.append(cleaned)
     if products:
         return sorted(set(products))
     # 回退：从标题里粗抓 "Dell XXX"

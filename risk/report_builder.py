@@ -100,6 +100,10 @@ class RiskReportBuilder:
             if s in severity_counts:
                 severity_counts[s] += 1
 
+        # 8. 产品线归属（解决 "an IAM"/"Color Management" 等显示为孤立产品的问题）
+        from risk.product_taxonomy import resolve_product_line
+        product_line = resolve_product_line(product)
+
         return RiskReport(
             report_id=f"RPT-{uuid.uuid4().hex[:8]}",
             subject=product,
@@ -114,6 +118,7 @@ class RiskReportBuilder:
             metadata={
                 "total_cves": len(cves),
                 "total_cwes": len(cwes),
+                "product_line": product_line,
                 "similar_products": [
                     (p, s) for p, s in self.similarity.similar_products(product, k=3)
                 ],
@@ -144,6 +149,10 @@ class RiskReportBuilder:
         lines.append(f"")
         lines.append(f"**生成时间**: {report.generated_at.strftime('%Y-%m-%d %H:%M')}")
         lines.append(f"**报告 ID**: {report.report_id}")
+        # 产品线归属（若能判定）
+        product_line = report.metadata.get("product_line")
+        if product_line:
+            lines.append(f"**所属产品线**: {product_line}")
         lines.append(f"")
 
         # 风险评分

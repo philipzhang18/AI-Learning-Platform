@@ -209,7 +209,11 @@ class MicrocodeKey:
         if self.model:
             parts.append(self.model)
         parts.append(self.firmware_type)
-        parts.append(self.version)
+        # "unversioned" 是数据源未公开具体版本号时的占位，显示得更明确
+        if self.version == "unversioned":
+            parts.append("全版本(未公开具体版本)")
+        else:
+            parts.append(self.version)
         return " | ".join(parts)
 
 
