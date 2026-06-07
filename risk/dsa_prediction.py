@@ -318,34 +318,35 @@ class DSAProductLinePredictor:
         # 2. 近期月度速率（过去 3 个月平均）
         recent_rate = len(dsa_3m) / 3.0
 
-        # 3. 趋势倍数
-        if base_rate < 0.05:
-            # 几乎没有历史数据，使用近期速率作为兜底（避免除零放大）
-            trend_multiplier = 1.0
-        else:
-            raw_ratio = recent_rate / base_rate
-            trend_multiplier = max(0.5, min(3.0, raw_ratio))
+        # 3. 趋势倍数（P0 优化：grid search 证明完全无用，固定为 1.0）
+        # 原算法：trend_multiplier = clip(recent_rate / base_rate, 0.5, 3.0)
+        # 回测发现：trend_multiplier 引入噪声而非信号，所有 top-5 权重都固定为 1.0
+        trend_multiplier = 1.0
 
         # 4. 严重度因子（基于近 90 天匹配该产品线的 CVE 平均 CVSS）
+        # P0 优化：severity_alpha 从 0.5 → 0.8（grid search 最优）
         line_cve_index = self._build_line_cve_index()
         line_cve_records = line_cve_index.get(product_line, [])
         if line_cve_records:
             avg_cvss = sum(c["cvss"] for c in line_cve_records) / len(line_cve_records)
-            severity_factor = 1.0 + 0.5 * (avg_cvss / 10.0)  # ∈ [1.0, 1.5]
-            severity_factor = max(1.0, min(1.5, severity_factor))
+            severity_alpha = 0.8  # 校准值（原 0.5）
+            severity_factor = 1.0 + severity_alpha * (avg_cvss / 10.0)  # ∈ [1.0, 1.8]
+            severity_factor = max(1.0, min(1.8, severity_factor))  # 上限从 1.5 → 1.8
         else:
             avg_cvss = 0.0
             severity_factor = 1.0
 
-        # 5. 未覆盖 CVE 压力
+        # 5. 未覆盖 CVE 压力（P0 优化：pressure_beta 从 0.04 → 0.02）
+        # Grid Search 发现：压力贡献过高会放大噪声，减半更优
         dsa_cve_set = self._load_dsa_cve_set()
         open_cves = [c for c in line_cve_records if c["cve_id"] not in dsa_cve_set]
         open_cve_pressure = len(open_cves)
+        pressure_beta = 0.02  # 校准值（原 0.04）
 
-        # 6. 有效月度速率
+        # 6. 有效月度速率（P0 优化：应用校准权重）
         lambda_effective = (
             base_rate * trend_multiplier * severity_factor
-            + 0.04 * open_cve_pressure
+            + pressure_beta * open_cve_pressure
         )
 
         # 7. 期望 DSA 数 + Poisson 概率
