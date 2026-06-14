@@ -125,6 +125,43 @@ def resolve_product_line(product_name: str, dsa_title: str = "") -> Optional[str
     return None
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 3. 产品系列名规范化（剥离尾部微码/版本号）
+# ────────────────────────────────────────────────────────────────────────────
+# 尾部微码/版本号：点分版本串（6.2.0 / 5978.714.714 / 10.1.0.5 / 3.44.00.08）。
+# 仅匹配"含点"的版本串，避免误删型号位（PowerStore 1000T / PowerScale H700 /
+# Unity 300 这类无点的数字是型号，应保留）。可选前缀 v、可选尾部单字母（1.2.3a）。
+_TRAILING_VERSION = re.compile(r"[\s,;:]+v?\d+(?:\.\d+)+[A-Za-z]?\s*$")
+
+# 行首列表标记（"* "、"- "、"• "）——公告里常见的项目符号
+_LEADING_BULLET = re.compile(r"^[\*\-•]+\s*")
+
+
+def normalize_series_name(name: str) -> str:
+    """
+    规范化为产品系列名：剥离尾部微码/版本号，使下拉框只显示系列而非具体版本。
+
+    例：
+      'Dell PowerMaxOS 5978.714.714' → 'Dell PowerMaxOS'
+      'Dell EMC VPLEX 6.2.0'         → 'Dell EMC VPLEX'
+      'Dell PowerMax OS 10.1.0.5'    → 'Dell PowerMax OS'
+      'Dell VxRail 8.0.300'          → 'Dell VxRail'
+      'Dell EMC SRS Virtual Edition 3.44.00.08' → 'Dell EMC SRS Virtual Edition'
+      'PowerStore 1000T'             → 'PowerStore 1000T'（型号位无点，保留）
+
+    无法识别的名称去除首尾空白与列表标记后原样返回。
+    """
+    if not name:
+        return ""
+    s = _LEADING_BULLET.sub("", name.strip())
+    # 反复剥离尾部版本号，覆盖 "Foo 1.2.3 4.5.6" 这类多段拼接
+    prev = None
+    while prev != s:
+        prev = s
+        s = _TRAILING_VERSION.sub("", s).strip()
+    return s.strip()
+
+
 def clean_product_name(name: str, dsa_title: str = "") -> Optional[str]:
     """
     清洗产品名：噪声短语回退到标题里的真实产品，合法名原样返回。
@@ -159,4 +196,5 @@ __all__ = [
     "is_noise_product",
     "resolve_product_line",
     "clean_product_name",
+    "normalize_series_name",
 ]
