@@ -205,6 +205,20 @@ README.txt
 llm_config.py.example
 start_cve_sqlite.sh
 DOCUMENTATION_INDEX.md
+*_REPORT.md
+*_REPORT.txt
+TODO_*.md
+OPTIMIZATION_*.md
+
+# 临时目录
+archive/
+ppt_output/
+
+# cve_data 临时导出文件
+cve_data/*.txt
+cve_data/*.md
+cve_data/tmp*.txt
+!cve_data/README.md
 
 # Docs: 忽略未追踪的历史文档，保留核心设计文档和归档
 docs/*
