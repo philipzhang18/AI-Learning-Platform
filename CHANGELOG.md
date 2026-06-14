@@ -1,5 +1,56 @@
 # Changelog
 
+## [v5.6.1] - 2026-06-14
+
+### Fixed — 国际化与启动体验
+- **智能预测标签页全面国际化**：`unified_risk_tab.py` 此前约 60 处硬编码中文（工具栏按钮、
+  表格列头、Notebook 子标签、状态/摘要/因子拆解文本、运行时提示）在英文模式下仍显示中文。
+  现统一抽取为 `ur_*` i18n key（zh_CN/en_US 各 138 条，占位符两语言完全对等），英文模式下全部正确显示英文
+- **微码产品线过滤 key 一致性**：下拉框默认值与渲染过滤逻辑此前一边用 `t("ur_micro_pl_all")`、
+  一边硬编码 `"(全部)"`，英文模式下过滤会失效；现统一走 i18n key
+- **启动脚本显示运行环境版本**：`start_cve_gui.bat` 不再打印解释器明文绝对路径，改为显示
+  Python 运行环境版本（如 `Python 运行环境: 3.14.0`）；修复 `for /f` 嵌套双引号导致取版本失败显示"未知"的问题
+- **补齐 tkcalendar 依赖**：IT 新闻简报标签页"日历·资讯存档"模块所需的 `tkcalendar` 此前缺失于
+  所有依赖清单，换环境部署会退化为提示文字；现加入 `requirements.txt`
+- **产品系列下拉框规范化**：智能模型预测标签页的产品系列列表此前混入微码版本号
+  （如 `Dell PowerMaxOS 5978.714.714`、`Dell EMC VPLEX 6.2.0`、`Dell VxRail 8.0.300`），
+  版本号被当作系列名。新增 `risk/product_taxonomy.normalize_series_name()` 纯函数剥离尾部点分版本串
+  （保留 `PowerStore 1000T` / `Unity 600F` 这类无点型号位），知识图谱与数据库两条加载路径统一规范化 + 去重
+  （Top-100 → 93 条，版本号清零），系列名剥离后仍能正常匹配历史 DSA 并产出预测（已端到端验证）
+
+## [v5.6.0] - 2026-06-13
+
+### Fixed — 交付就绪度修复（可交付他人使用）
+- **启动脚本可移植化 + 统一入口**：合并 `start_cve_gui.bat` 与 `start_cve_with_wsl_redis.bat` 为单一入口
+  `start_cve_gui.bat`，去除硬编码绝对路径（改用 `%~dp0` 脚本目录 + 解释器自动探测：本地 `.venv` →
+  `KMP_PYTHON` → 系统 PATH），并自动探测 WSL Redis：可用则启用缓存模式，否则优雅降级为 SQLite 轻量模式。
+  统一为 UTF-8(无BOM)+CRLF+`chcp 65001`，解决 cmd.exe 因 LF 行尾解析错位崩溃的问题
+- **产品型号预测查询 bug**：修复 `_mp_query_matched_dsa` 三处缺陷——列名 `advisory_id`→`dsa_id`、
+  CVSS 从 `cves.data` JSON 提取（非独立列）、匹配字段以 title 为主（`affected_products.name` 常为 "Multiple"）
+- **文件不存在友好提示**：新增 `_validate_file_path` 统一校验，5 个文件读取点（Markdown/学习文件/NVD/Dell/CSV）
+  在读取前预检查，文件不存在时给出清晰提示而非原始 `[Errno 2]` OS 错误
+- **pytest 整体可运行**：修复测试模块在 import 时替换 `sys.stdout/stderr` 导致 `pytest tests/` 整体崩溃
+  （`I/O operation on closed file`）的问题，pytest 环境下跳过编码重配置
+- **系列预测器误匹配 bug**：修复 `_query_series_history` 中运算符优先级错误，
+  导致不存在的产品也匹配到大量历史 DSA（现正确返回 0）
+- **knowledge_graph 抖动测试**：性能计时断言改为带阈值容差 + 正确性校验，消除小数据集下 `0.0 < 0.0` 误报
+- **裸 except 清零**：生产代码所有裸 `except:` 收窄为具体异常类型
+- **静默吞错可诊断**：新增模块级 `logging`（`KMP_LOG_LEVEL` 可调），DB 写入/缓存写入失败改为记录日志
+
+### Added — 工程化交付能力
+- **可 pip 安装**：`pyproject.toml` 新增 `[build-system]` / `[project]` 段，
+  支持 `pip install -e ".[data,dev]"`，并生成 `kmp-gui` 控制台入口
+- **依赖锁定**：`requirements.txt` 全部加上下界版本约束，新增 `requirements.lock` 精确快照；补齐 `cryptography`
+- **CI 全量测试**：GitHub Actions 由手挑 6 文件改为全量 `pytest tests/`，覆盖 risk/ 与集成测试
+
+## [v5.5.0] - 2026-05-31
+
+### Added — DSA 智能预测与风险分析
+- Dell 产品线 DSA 序列预测（Poisson 模型 + 生命周期调整 + EOSS 数据）
+- 统一风险分析标签页（unified_risk_tab）：版本级/系列级/微码级预测
+- 知识图谱风险传播（CVE × DSA × 产品 × CWE 关联分析）
+- 预测回测框架 + Grid Search 权重校准（Brier 0.096→0.068）
+
 ## [v5.4.0] - 2026-04-26
 
 ### Added — 智能学习功能增强（NotebookLM 风格）
