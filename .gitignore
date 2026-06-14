@@ -148,6 +148,15 @@ scripts/
 PROJECT_OPTIMIZATION_REPORT.md
 OPTIMIZATION_REPORT.md
 TODO_OPTIMIZATION.md
+CODE_MATURITY_ASSESSMENT.md
+PREDICTION_REFACTOR_REPORT.md
+SERIES_INTEGRATION_REPORT.txt
+# 根目录散落的临时测试脚本（仅匹配根目录，不影响 tests/ 正式测试）
+/test_*.py
+/*_integration.py
+sample_eoss_load.py
+backtest_series_predictor.py
+benchmark_knowledge_graph.py
 
 # ==================== Unused Source ====================
 gpu_cve_sync.py
@@ -195,6 +204,15 @@ generate_ppt.js
 README.txt
 llm_config.py.example
 start_cve_sqlite.sh
-docs/git_commit_report.md
 DOCUMENTATION_INDEX.md
-docs/
+
+# Docs: 忽略未追踪的历史文档，保留核心设计文档和归档
+docs/*
+!docs/README.md
+!docs/risk_analysis_system_design.md
+!docs/model_level_prediction_architecture.md
+!docs/model_level_prediction_usage.md
+!docs/I18N_IMPLEMENTATION_GUIDE.md
+!docs/archive/
+!docs/archive/*
+
