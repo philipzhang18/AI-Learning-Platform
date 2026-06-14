@@ -2,7 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-5.6.0-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.6.1-orange.svg)](CHANGELOG.md)
 
 以**知识管理**为核心的智能平台，通过多渠道收集学习资料（播客、文件、网页、数据库数据），采用 AI 方法进行深度学习与分析。
 
@@ -51,8 +51,10 @@
 - **统计分析** — 严重等级饼图、月度增长趋势图（13个月）、数据汇聚图
 - **统计卡片** — 7 张实时数据卡片（NVD/Dell/关联/严重等级分布）
 
-### 智能预测（产品线 / 版本 / 微码三层）
+### 智能预测（产品线 / 版本 / 微码三层 + 产品型号预测）
 - **产品线级 DSA 概率** — Poisson 速率模型，29 条 Dell 产品线，30/60/90 天 P(≥1 DSA) + 80% 置信区间
+- **产品型号预测（新）** — 独立标签页，选择产品系列 + 版本号预测未来 30/60/90 天 DSA 发生概率，支持 EOSS 生命周期调整，含 CWE Top-3、历史匹配 DSA 列表、可解释性因子拆解
+- **系列名规范化（新）** — 产品系列下拉框自动剥离微码版本号（'Dell PowerMaxOS 5978.714.714' → 'Dell PowerMaxOS'），保留型号位（PowerStore 1000T / Unity 600F），Top-100 去重至 93 条
 - **版本级预测** — Phase 2 三件套：VMR 验证 / Bayesian 年龄调整先验 / Bootstrap 500 次抽样 CI
 - **微码级风险评分** — 产品线 × 机型 × 类型 × 版本四元组，0~100 exposure_score（freq + severity + recency 三因子）
 - **CISA KEV 加权** — 已被野外利用的 CVE 自动加分（每个 +5，上限 +15），本地 7 天缓存
@@ -61,7 +63,7 @@
 - **三层联动** — 选中产品线自动过滤微码 Tab，钻取式分析
 - **月度趋势迷你图** — 选中微码后下方 Canvas 自动绘制近 12 月命中柱图，含 ↑加速 / ↓冷却 / →平稳 / ↑新发 标签
 - **嵌套 Markdown 导出** — 按产品线分组的层次化报告，含 TOC + 中文锚点 + 双源 CVSS 算法说明
-- **i18n 中英双语** — 微码 Tab 36 个 UI key 全部支持 zh_CN / en_US 切换
+- **i18n 中英双语（全覆盖）** — 智能预测标签页 138 个 UI key、产品型号预测 36 个 key 全部支持 zh_CN / en_US 切换
 
 ### 知识图谱（已合并到智能预测 Tab）
 - **内存图谱** — 基于 NetworkX 在内存中构建 CVE × DSA × 产品 × CWE 四类节点的有向图，无需 Neo4j 等重型数据库
@@ -92,20 +94,21 @@ pip install -r requirements.txt
 
 ### 启动方式
 
-**方式一：SQLite 轻量模式（推荐）**
+**方式一：统一启动入口（推荐）**
 ```
 双击运行：start_cve_gui.bat
 ```
+脚本会自动探测运行环境：
+- 检测到 WSL 且 Redis 可用 → 启用 SQLite + Redis 缓存模式
+- 无 WSL / Redis 不可用 / 未配置 `REDIS_PASSWORD` → 自动降级为 SQLite 轻量模式
 
-**方式二：混合模式（SQLite + WSL Redis）**
-```
-双击运行：start_cve_with_wsl_redis.bat
-```
+无需手动选择，单文件即可。
 
-**方式三：命令行**
+**方式二：命令行**
 ```bash
 python cve_integrated_gui.py
 ```
+（命令行方式默认 SQLite 轻量模式；如需缓存，先设置环境变量 `USE_REDIS=true` 并确保 Redis 已运行）
 
 ### API Key 配置
 
@@ -166,8 +169,7 @@ EXA_API_KEY=your_exa_api_key
 │   └── test_knowledge_graph.py  # 知识图谱模块测试（23 条用例）
 ├── scripts/                   # 维护脚本
 ├── requirements.txt           # Python 依赖
-├── start_cve_gui.bat          # 启动脚本（SQLite 轻量模式）
-├── start_cve_with_wsl_redis.bat # 启动脚本（WSL Redis 混合模式）
+├── start_cve_gui.bat          # 统一启动入口（自动探测 WSL Redis，否则降级 SQLite 轻量模式）
 ├── .env.example               # 环境变量模板
 ├── CLAUDE.md                  # Claude 开发配置
 ├── CONFIG.md                  # 系统配置指南
