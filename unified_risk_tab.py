@@ -62,11 +62,7 @@ def create_unified_risk_view(gui) -> None:
     info_banner.pack(fill=tk.X, padx=0, pady=0)
     tk.Label(
         info_banner,
-        text=(
-            "ℹ️ 智能预测：基于知识图谱 + Dell DSA 历史 + NVD CVE 压力，"
-            "采用 Poisson 速率模型预测产品线/版本/微码级未来风险。"
-            "「全量分析」生成知识图谱与产品评分；「产品线DSA预测」按 30/60/90 天给出概率与风险等级。"
-        ),
+        text=t("ur_info_banner"),
         bg="#d1ecf1",
         fg="#0c5460",
         font=("Microsoft YaHei", 9),
@@ -80,34 +76,34 @@ def create_unified_risk_view(gui) -> None:
     toolbar_inner = tk.Frame(toolbar, bg="white")
     toolbar_inner.pack(fill=tk.X, padx=12, pady=6)
 
-    tk.Button(toolbar_inner, text="▶ 全量分析", command=lambda: _ur_full_analyze(gui),
+    tk.Button(toolbar_inner, text=t("ur_btn_full_analyze"), command=lambda: _ur_full_analyze(gui),
               bg="#2c3e50", fg="white", relief=tk.FLAT, cursor="hand2",
               font=("Microsoft YaHei", 9, "bold"), padx=16, pady=5).pack(side=tk.LEFT)
 
-    tk.Button(toolbar_inner, text="🎯 产品线DSA预测", command=lambda: _ur_run_dsa_prediction(gui),
+    tk.Button(toolbar_inner, text=t("ur_btn_dsa_predict"), command=lambda: _ur_run_dsa_prediction(gui),
               bg="#8e44ad", fg="white", relief=tk.FLAT, cursor="hand2",
               font=("Microsoft YaHei", 9, "bold"), padx=12, pady=5).pack(side=tk.LEFT, padx=(8, 0))
 
-    tk.Button(toolbar_inner, text="🔬 微码风险", command=lambda: _ur_run_microcode_assess(gui),
+    tk.Button(toolbar_inner, text=t("ur_btn_microcode"), command=lambda: _ur_run_microcode_assess(gui),
               bg="#d35400", fg="white", relief=tk.FLAT, cursor="hand2",
               font=("Microsoft YaHei", 9, "bold"), padx=12, pady=5).pack(side=tk.LEFT, padx=(8, 0))
 
-    tk.Button(toolbar_inner, text="导出报告", command=lambda: _ur_export(gui, "md"),
+    tk.Button(toolbar_inner, text=t("ur_btn_export"), command=lambda: _ur_export(gui, "md"),
               bg="#27ae60", fg="white", relief=tk.FLAT, cursor="hand2",
               font=("Microsoft YaHei", 9), padx=10, pady=5).pack(side=tk.LEFT, padx=(8, 0))
 
     # 预测周期选择（30 / 60 / 90 天）
-    tk.Label(toolbar_inner, text="  周期:", bg="white", fg="#555",
+    tk.Label(toolbar_inner, text=t("ur_period_label"), bg="white", fg="#555",
              font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(12, 2))
     gui._ur_dsa_days_var = tk.StringVar(value="30")
     for d in ("30", "60", "90"):
-        tk.Radiobutton(toolbar_inner, text=f"{d}天", variable=gui._ur_dsa_days_var, value=d,
+        tk.Radiobutton(toolbar_inner, text=t("ur_days_suffix", d=d), variable=gui._ur_dsa_days_var, value=d,
                        bg="white", fg="#2c3e50", font=("Microsoft YaHei", 9),
                        activebackground="white", selectcolor="white",
                        command=lambda: _ur_run_dsa_prediction(gui) if gui._ur_dsa_results else None
                        ).pack(side=tk.LEFT)
 
-    gui._ur_status_var = tk.StringVar(value="切换到此标签页自动加载分析")
+    gui._ur_status_var = tk.StringVar(value=t("ur_status_autoload"))
     tk.Label(toolbar_inner, textvariable=gui._ur_status_var, bg="white", fg="#7f8c8d",
              font=("Microsoft YaHei", 8)).pack(side=tk.RIGHT)
 
@@ -125,7 +121,7 @@ def create_unified_risk_view(gui) -> None:
     left_inner = tk.Frame(left, bg="white")
     left_inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-    tk.Label(left_inner, text="产品风险排名", bg="white", fg="#2c3e50",
+    tk.Label(left_inner, text=t("ur_product_ranking"), bg="white", fg="#2c3e50",
              font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", pady=(0, 4))
 
     tree_frame = tk.Frame(left_inner, bg="white")
@@ -133,9 +129,9 @@ def create_unified_risk_view(gui) -> None:
 
     gui._ur_tree = ttk.Treeview(tree_frame, columns=("product", "score", "level"),
                                  show="headings", height=14)
-    gui._ur_tree.heading("product", text="产品")
-    gui._ur_tree.heading("score", text="评分")
-    gui._ur_tree.heading("level", text="等级")
+    gui._ur_tree.heading("product", text=t("ur_col_product"))
+    gui._ur_tree.heading("score", text=t("ur_col_score"))
+    gui._ur_tree.heading("level", text=t("ur_col_level"))
     gui._ur_tree.column("product", width=130)
     gui._ur_tree.column("score", width=45, anchor="center")
     gui._ur_tree.column("level", width=65, anchor="center")
@@ -148,22 +144,15 @@ def create_unified_risk_view(gui) -> None:
 
     # 统计
     tk.Frame(left_inner, bg="#ecf0f1", height=1).pack(fill=tk.X, pady=6)
-    gui._ur_stats_var = tk.StringVar(value="尚未加载")
+    gui._ur_stats_var = tk.StringVar(value=t("ur_not_loaded"))
     tk.Label(left_inner, textvariable=gui._ur_stats_var, bg="white", fg="#555",
              font=("Consolas", 8), justify=tk.LEFT, anchor="w").pack(fill=tk.X)
 
     # 算法摘要
     tk.Frame(left_inner, bg="#ecf0f1", height=1).pack(fill=tk.X, pady=6)
-    tk.Label(left_inner, text="算法说明", bg="white", fg="#2c3e50",
+    tk.Label(left_inner, text=t("ur_algo_title"), bg="white", fg="#2c3e50",
              font=("Microsoft YaHei", 8, "bold")).pack(anchor="w")
-    algo_text = (
-        "评分 = 0.30×CVSS + 0.20×PageRank\n"
-        "     + 0.15×时效 + 0.15×严重度密度\n"
-        "     + 0.10×CWE多样性 + 0.10×暴露度\n"
-        "数据: NVD CVE + Dell DSA\n"
-        "规则: 10条YAML安全规则\n"
-        "预测: 6月滑动窗口线性回归"
-    )
+    algo_text = t("ur_algo_text")
     tk.Label(left_inner, text=algo_text, bg="white", fg="#7f8c8d",
              font=("Consolas", 7), justify=tk.LEFT, anchor="w").pack(fill=tk.X, pady=(2, 0))
 
@@ -187,9 +176,9 @@ def create_unified_risk_view(gui) -> None:
 
     graph_header = tk.Frame(graph_frame, bg="white")
     graph_header.pack(fill=tk.X, padx=8, pady=(6, 2))
-    tk.Label(graph_header, text="◆ 知识图谱可视化", bg="white", fg="#2c3e50",
+    tk.Label(graph_header, text=t("ur_kg_visual_title"), bg="white", fg="#2c3e50",
              font=("Microsoft YaHei", 11, "bold")).pack(side=tk.LEFT)
-    tk.Label(graph_header, text="CVE · DSA · Product · CWE 关联网络",
+    tk.Label(graph_header, text=t("ur_kg_visual_subtitle"),
              bg="white", fg="#95a5a6",
              font=("Microsoft YaHei", 8)).pack(side=tk.LEFT, padx=(8, 0))
 
@@ -201,7 +190,7 @@ def create_unified_risk_view(gui) -> None:
     detail_frame = tk.Frame(upper_paned, bg="white")
     upper_paned.add(detail_frame, minsize=240, width=300)
 
-    tk.Label(detail_frame, text="◆ 分析详情", bg="white", fg="#2c3e50",
+    tk.Label(detail_frame, text=t("ur_detail_title"), bg="white", fg="#2c3e50",
              font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
 
     detail_nb = ttk.Notebook(detail_frame)
@@ -209,12 +198,12 @@ def create_unified_risk_view(gui) -> None:
 
     # ── 产品线 DSA 预测（默认 Tab，作为风险分析关键点）────────────────
     dsa_outer = tk.Frame(detail_nb, bg="#fafafa")
-    detail_nb.add(dsa_outer, text="产品线 DSA 预测")
+    detail_nb.add(dsa_outer, text=t("ur_tab_dsa"))
 
     dsa_top = tk.Frame(dsa_outer, bg="#fafafa")
     dsa_top.pack(fill=tk.X, padx=4, pady=(2, 0))
     gui._ur_dsa_summary_var = tk.StringVar(
-        value="点击工具栏「🎯 产品线DSA预测」按钮开始计算"
+        value=t("ur_dsa_summary_init")
     )
     tk.Label(dsa_top, textvariable=gui._ur_dsa_summary_var, bg="#fafafa",
              fg="#7f8c8d", font=("Microsoft YaHei", 8),
@@ -228,9 +217,9 @@ def create_unified_risk_view(gui) -> None:
         dsa_table_frame, columns=("line", "prob", "level"),
         show="headings", height=10
     )
-    gui._ur_dsa_tree.heading("line", text="产品线")
-    gui._ur_dsa_tree.heading("prob", text="概率")
-    gui._ur_dsa_tree.heading("level", text="等级")
+    gui._ur_dsa_tree.heading("line", text=t("ur_col_product_line"))
+    gui._ur_dsa_tree.heading("prob", text=t("ur_col_prob"))
+    gui._ur_dsa_tree.heading("level", text=t("ur_col_level"))
     gui._ur_dsa_tree.column("line", width=170, anchor="w")
     gui._ur_dsa_tree.column("prob", width=55, anchor="center")
     gui._ur_dsa_tree.column("level", width=70, anchor="center")
@@ -252,7 +241,7 @@ def create_unified_risk_view(gui) -> None:
     # 解释文本（选中产品线后显示因子拆解）
     dsa_explain_frame = tk.Frame(dsa_outer, bg="#fafafa")
     dsa_explain_frame.pack(fill=tk.BOTH, expand=False, padx=4, pady=(2, 4))
-    tk.Label(dsa_explain_frame, text="算法因子拆解", bg="#fafafa",
+    tk.Label(dsa_explain_frame, text=t("ur_dsa_factor_title"), bg="#fafafa",
              fg="#2c3e50", font=("Microsoft YaHei", 9, "bold")
              ).pack(anchor="w")
     gui._ur_dsa_explain_text = tk.Text(
@@ -262,35 +251,22 @@ def create_unified_risk_view(gui) -> None:
     gui._ur_dsa_explain_text.pack(fill=tk.BOTH, expand=True)
     gui._ur_dsa_explain_text.insert(
         "1.0",
-        "算法说明（Poisson 速率模型）\n"
-        "─────────────────────\n"
-        "λ_eff = λ_base × trend × severity + 0.04 × open_cves\n"
-        "P(≥1 DSA) = 1 − exp(−λ_eff × D/30)\n\n"
-        "因子来源：\n"
-        "  λ_base    : 过去 12 个月该产品线月均 DSA 数\n"
-        "  λ_recent  : 过去 3 个月月均 DSA 数\n"
-        "  trend     : λ_recent / λ_base，裁剪到 [0.5, 3.0]\n"
-        "  severity  : 1 + 0.5 × (近期 CVE 平均 CVSS / 10)\n"
-        "  open_cves : 近 90 天匹配该产品线但未进入 DSA 的 CVE 数\n\n"
-        "数据源：\n"
-        "  - dell_advisories 表（2018+ 的全量 DSA）\n"
-        "  - cves 表（NVD CVE，按描述/产品名匹配）\n\n"
-        "选中表格中的产品线查看完整因子拆解"
+        t("ur_dsa_explain_text")
     )
     gui._ur_dsa_explain_text.config(state=tk.DISABLED)
 
     gui._ur_score_text = tk.Text(detail_nb, wrap=tk.WORD, font=("Consolas", 9),
                                   bg="#fafafa", relief=tk.FLAT, padx=6, pady=4)
-    detail_nb.add(gui._ur_score_text, text="评分因子")
+    detail_nb.add(gui._ur_score_text, text=t("ur_tab_score_factor"))
 
     # ── 微码级风险 Tab ────────────────────────────────────────────────
     micro_outer = tk.Frame(detail_nb, bg="#fafafa")
-    detail_nb.add(micro_outer, text="微码级风险")
+    detail_nb.add(micro_outer, text=t("ur_tab_microcode"))
 
     micro_top = tk.Frame(micro_outer, bg="#fafafa")
     micro_top.pack(fill=tk.X, padx=4, pady=(2, 0))
     gui._ur_micro_summary_var = tk.StringVar(
-        value="点击工具栏「🔬 微码风险」按钮开始评估"
+        value=t("ur_micro_summary_init")
     )
     tk.Label(micro_top, textvariable=gui._ur_micro_summary_var, bg="#fafafa",
              fg="#7f8c8d", font=("Microsoft YaHei", 8),
@@ -379,13 +355,13 @@ def create_unified_risk_view(gui) -> None:
         columns=("product_line", "score", "band", "model", "type", "version", "hit"),
         show="headings", height=10
     )
-    gui._ur_micro_tree.heading("product_line", text="产品线")
-    gui._ur_micro_tree.heading("score", text="分")
-    gui._ur_micro_tree.heading("band", text="等级")
-    gui._ur_micro_tree.heading("model", text="机型")
-    gui._ur_micro_tree.heading("type", text="类型")
-    gui._ur_micro_tree.heading("version", text="版本")
-    gui._ur_micro_tree.heading("hit", text="命中")
+    gui._ur_micro_tree.heading("product_line", text=t("ur_col_product_line"))
+    gui._ur_micro_tree.heading("score", text=t("ur_col_score_short"))
+    gui._ur_micro_tree.heading("band", text=t("ur_col_level"))
+    gui._ur_micro_tree.heading("model", text=t("ur_col_model"))
+    gui._ur_micro_tree.heading("type", text=t("ur_col_type"))
+    gui._ur_micro_tree.heading("version", text=t("ur_col_version"))
+    gui._ur_micro_tree.heading("hit", text=t("ur_col_hit"))
     # minwidth + stretch=False 让超出可视区不压缩，配合 xscrollbar
     gui._ur_micro_tree.column("product_line", width=160, minwidth=140, anchor="w", stretch=False)
     gui._ur_micro_tree.column("score", width=40, minwidth=40, anchor="center", stretch=False)
@@ -443,16 +419,7 @@ def create_unified_risk_view(gui) -> None:
     gui._ur_micro_explain_text.pack(fill=tk.BOTH, expand=True)
     gui._ur_micro_explain_text.insert(
         "1.0",
-        "评分公式 (exposure_score 0~100)\n"
-        "──────────────────────────\n"
-        "freq_score    = (展开命中数 / 全局最大) × 50\n"
-        "severity_score = (avg_cvss / 10) × 25\n"
-        "recency_score = (1 − 月数/24) × 25\n\n"
-        "数据源：\n"
-        "  Dell DSA affected_products → 四元组 key\n"
-        "  `prior to` / `<` → 保守范围展开\n"
-        "  CVSS: NVD cvss_score 优先，severity 文本兜底\n\n"
-        "选中表格中的版本查看详细拆解"
+        t("ur_micro_explain_body")
     )
     gui._ur_micro_explain_text.config(state=tk.DISABLED)
 
@@ -460,15 +427,15 @@ def create_unified_risk_view(gui) -> None:
 
     gui._ur_propagation_text = tk.Text(detail_nb, wrap=tk.WORD, font=("Consolas", 9),
                                         bg="#fafafa", relief=tk.FLAT, padx=6, pady=4)
-    detail_nb.add(gui._ur_propagation_text, text="传播分析")
+    detail_nb.add(gui._ur_propagation_text, text=t("ur_tab_propagation"))
 
     gui._ur_trend_text = tk.Text(detail_nb, wrap=tk.WORD, font=("Consolas", 9),
                                   bg="#fafafa", relief=tk.FLAT, padx=6, pady=4)
-    detail_nb.add(gui._ur_trend_text, text="趋势预测")
+    detail_nb.add(gui._ur_trend_text, text=t("ur_tab_trend"))
 
     gui._ur_rules_text = tk.Text(detail_nb, wrap=tk.WORD, font=("Consolas", 9),
                                   bg="#fafafa", relief=tk.FLAT, padx=6, pady=4)
-    detail_nb.add(gui._ur_rules_text, text="触发规则")
+    detail_nb.add(gui._ur_rules_text, text=t("ur_tab_rules"))
 
     # ─── 下区：预防性维护建议 ─────────────────────────────────────────
     lower = tk.Frame(right_paned, bg="white")
@@ -477,9 +444,9 @@ def create_unified_risk_view(gui) -> None:
     # 建议标题栏
     rec_title_bar = tk.Frame(lower, bg="#2c3e50")
     rec_title_bar.pack(fill=tk.X)
-    tk.Label(rec_title_bar, text="  预防性维护建议", bg="#2c3e50", fg="white",
+    tk.Label(rec_title_bar, text=t("ur_maint_title"), bg="#2c3e50", fg="white",
              font=("Microsoft YaHei", 10, "bold")).pack(side=tk.LEFT, pady=5)
-    tk.Label(rec_title_bar, text="基于规则引擎 + 图谱分析自动生成  ", bg="#2c3e50", fg="#bdc3c7",
+    tk.Label(rec_title_bar, text=t("ur_maint_subtitle"), bg="#2c3e50", fg="#bdc3c7",
              font=("Microsoft YaHei", 8)).pack(side=tk.RIGHT, pady=5)
 
     # 建议内容（水平滚动卡片）
@@ -525,20 +492,20 @@ def _ur_auto_load(gui) -> None:
             db_path = str(gui.data_dir / "cve_database.db")
 
             if cache_path.exists():
-                gui.root.after(0, lambda: gui._ur_status_var.set("从缓存加载中..."))
+                gui.root.after(0, lambda: gui._ur_status_var.set(t("ur_status_loading_cache")))
                 try:
                     kg = KnowledgeGraph.load_cache(str(cache_path))
                     gui._ur_kg = kg
                     stats = kg.stats()
                     gui.root.after(0, lambda: gui._ur_status_var.set(
-                        f"已加载 | {stats['nodes_total']} 节点 · {stats['edges_total']} 边"))
+                        t("ur_status_loaded", nodes=stats['nodes_total'], edges=stats['edges_total'])))
                     gui.root.after(0, lambda: _ur_update_stats(gui))
                     _ur_run_analysis(gui)
                     return
                 except Exception:
                     pass
 
-            gui.root.after(0, lambda: gui._ur_status_var.set("首次构建知识图谱（约10秒）..."))
+            gui.root.after(0, lambda: gui._ur_status_var.set(t("ur_status_first_build")))
             kg = KnowledgeGraph.from_sqlite(db_path)
             kg.build(limit_cve=5000, limit_dsa=None)
             try:
@@ -548,11 +515,11 @@ def _ur_auto_load(gui) -> None:
             gui._ur_kg = kg
             stats = kg.stats()
             gui.root.after(0, lambda: gui._ur_status_var.set(
-                f"构建完成 | {stats['nodes_total']} 节点 · {stats['edges_total']} 边"))
+                t("ur_status_build_done", nodes=stats['nodes_total'], edges=stats['edges_total'])))
             gui.root.after(0, lambda: _ur_update_stats(gui))
             _ur_run_analysis(gui)
         except Exception as e:
-            gui.root.after(0, lambda: gui._ur_status_var.set(f"加载失败: {e}"))
+            gui.root.after(0, lambda: gui._ur_status_var.set(t("ur_status_load_fail", err=e)))
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -567,7 +534,7 @@ def _ur_full_analyze(gui) -> None:
             db_path = str(gui.data_dir / "cve_database.db")
             cache_path = gui.data_dir / "kg_cache.pkl"
 
-            gui.root.after(0, lambda: gui._ur_status_var.set("全量构建中..."))
+            gui.root.after(0, lambda: gui._ur_status_var.set(t("ur_status_full_building")))
             kg = KnowledgeGraph.from_sqlite(db_path)
             kg.build(limit_cve=5000, limit_dsa=None)
             try:
@@ -577,11 +544,11 @@ def _ur_full_analyze(gui) -> None:
             gui._ur_kg = kg
             stats = kg.stats()
             gui.root.after(0, lambda: gui._ur_status_var.set(
-                f"构建完成，正在分析... | {stats['nodes_total']} 节点"))
+                t("ur_status_build_analyzing", nodes=stats['nodes_total'])))
             gui.root.after(0, lambda: _ur_update_stats(gui))
             _ur_run_analysis(gui)
         except Exception as e:
-            gui.root.after(0, lambda: gui._ur_status_var.set(f"分析失败: {e}"))
+            gui.root.after(0, lambda: gui._ur_status_var.set(t("ur_status_analyze_fail", err=e)))
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -597,7 +564,7 @@ def _ur_run_analysis(gui) -> None:
     gui.root.after(0, lambda: _ur_display_results(gui, reports))
     n = len(reports)
     gui.root.after(0, lambda: gui._ur_status_var.set(
-        f"分析完成 | {n} 个风险产品 · {gui._ur_kg.stats()['nodes_total']} 节点"))
+        t("ur_status_analyze_done", n=n, nodes=gui._ur_kg.stats()['nodes_total'])))
 
 
 def _ur_update_stats(gui) -> None:
@@ -605,9 +572,10 @@ def _ur_update_stats(gui) -> None:
         return
     s = gui._ur_kg.stats()
     gui._ur_stats_var.set(
-        f"CVE: {s.get('node:cve',0)}  DSA: {s.get('node:dsa',0)}\n"
-        f"产品: {s.get('node:product',0)}  CWE: {s.get('node:cwe',0)}\n"
-        f"总边数: {s.get('edges_total',0)}"
+        t("ur_stats_text",
+          cve=s.get('node:cve', 0), dsa=s.get('node:dsa', 0),
+          product=s.get('node:product', 0), cwe=s.get('node:cwe', 0),
+          edges=s.get('edges_total', 0))
     )
 
 
@@ -654,7 +622,7 @@ def _ur_render_graph(gui, product: str) -> None:
 
         sub = gui._ur_kg.ego_subgraph(product, radius=1)
         if sub.number_of_nodes() == 0:
-            tk.Label(gui._ur_canvas_host, text="(无关联数据)", bg="#fafafa", fg="#aaa",
+            tk.Label(gui._ur_canvas_host, text=t("ur_no_related"), bg="#fafafa", fg="#aaa",
                      font=("Microsoft YaHei", 9)).pack(expand=True)
             return
 
@@ -675,7 +643,7 @@ def _ur_render_graph(gui, product: str) -> None:
         layout = "kamada_kawai" if n_nodes > 30 else "spring"
         draw_subgraph(sub, ax, layout=layout, seed=42)
 
-        ax.set_title(f"{product}  —  {n_nodes} 节点 · {sub.number_of_edges()} 边",
+        ax.set_title(t("ur_graph_title", product=product, nodes=n_nodes, edges=sub.number_of_edges()),
                      fontsize=11, pad=10, color="#2c3e50",
                      fontfamily="Microsoft YaHei", fontweight="bold")
 
@@ -687,7 +655,7 @@ def _ur_render_graph(gui, product: str) -> None:
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         plt.close(fig)
     except Exception as e:
-        tk.Label(gui._ur_canvas_host, text=f"渲染失败: {e}", bg="#fafafa", fg="red",
+        tk.Label(gui._ur_canvas_host, text=t("ur_render_fail", err=e), bg="#fafafa", fg="red",
                  font=("Microsoft YaHei", 8)).pack(expand=True)
 
 
@@ -699,10 +667,10 @@ def _ur_fill_details(gui, report) -> None:
     gui._ur_score_text.delete("1.0", tk.END)
     if score:
         lines = [
-            f"产品: {score.entity_id}",
-            f"综合评分: {score.score:.1f} / 100  ({score.level.value})",
+            t("ur_score_product", product=score.entity_id),
+            t("ur_score_overall", score=f"{score.score:.1f}", level=score.level.value),
             "",
-            f"{'因子':<16s} {'原始分':>6s} {'权重':>5s} {'贡献':>6s}",
+            f"{t('ur_score_factor_col'):<16s} {t('ur_score_raw_col'):>6s} {t('ur_score_weight_col'):>5s} {t('ur_score_contrib_col'):>6s}",
             "─" * 38,
         ]
         weights = {"cvss_avg": 0.30, "pagerank": 0.20, "recency": 0.15,
@@ -710,7 +678,7 @@ def _ur_fill_details(gui, report) -> None:
         for k, v in score.factors.items():
             w = weights.get(k, 0)
             lines.append(f"{k:<16s} {v:>6.1f} {w:>4.0%}  {v * w:>5.1f}")
-        lines.extend(["", f"关键 CVE: {', '.join(score.evidence[:5])}"])
+        lines.extend(["", t("ur_score_key_cve", cves=', '.join(score.evidence[:5]))])
         gui._ur_score_text.insert("1.0", "\n".join(lines))
     gui._ur_score_text.config(state=tk.DISABLED)
 
@@ -718,13 +686,13 @@ def _ur_fill_details(gui, report) -> None:
     gui._ur_propagation_text.config(state=tk.NORMAL)
     gui._ur_propagation_text.delete("1.0", tk.END)
     if report.impact_paths:
-        lines = [f"{'源CVE':<16s} {'影响产品':<22s} {'跳':>2s} {'可信度':>5s} {'共享CWE'}", "─" * 60]
+        lines = [f"{t('ur_prop_src_cve'):<16s} {t('ur_prop_target'):<22s} {t('ur_prop_hops'):>2s} {t('ur_prop_conf'):>5s} {t('ur_prop_shared_cwe')}", "─" * 60]
         for p in report.impact_paths[:10]:
             cwes = ",".join(p.shared_cwes[:2])
             lines.append(f"{p.source_cve:<16s} {p.target_product:<22s} {p.hops:>2d} {p.confidence:>4.0%}  {cwes}")
         gui._ur_propagation_text.insert("1.0", "\n".join(lines))
     else:
-        gui._ur_propagation_text.insert("1.0", "当前产品无高危 CVE 传播路径")
+        gui._ur_propagation_text.insert("1.0", t("ur_prop_none"))
     gui._ur_propagation_text.config(state=tk.DISABLED)
 
     # 趋势预测
@@ -732,22 +700,22 @@ def _ur_fill_details(gui, report) -> None:
     gui._ur_trend_text.delete("1.0", tk.END)
     if report.trend_forecast and report.trend_forecast.method != "no_data":
         f = report.trend_forecast
-        trend_map = {"rising": "↑ 上升", "stable": "→ 稳定", "declining": "↓ 下降"}
+        trend_map = {"rising": t("ur_trend_rising"), "stable": t("ur_trend_stable"), "declining": t("ur_trend_declining")}
         lines = [
-            f"产品: {f.subject}",
-            f"预测周期: 未来 {f.forecast_days} 天",
-            f"预测新增 CVE: {f.predicted_count} 个 (区间: {f.confidence_interval[0]}~{f.confidence_interval[1]})",
-            f"风险趋势: {trend_map.get(f.risk_trend, f.risk_trend)}",
-            f"方法: 6个月月度CVE计数 → 线性回归外推",
+            t("ur_trend_subject", subject=f.subject),
+            t("ur_trend_period", days=f.forecast_days),
+            t("ur_trend_predicted", count=f.predicted_count, lo=f.confidence_interval[0], hi=f.confidence_interval[1]),
+            t("ur_trend_risk", trend=trend_map.get(f.risk_trend, f.risk_trend)),
+            t("ur_trend_method"),
             "",
         ]
         if f.hot_cwes:
-            lines.append("近期高频 CWE:")
+            lines.append(t("ur_trend_hot_cwe"))
             for cwe, ratio in f.hot_cwes[:5]:
                 lines.append(f"  {cwe}: {ratio:.0%}")
         gui._ur_trend_text.insert("1.0", "\n".join(lines))
     else:
-        gui._ur_trend_text.insert("1.0", "历史数据不足，无法生成趋势预测")
+        gui._ur_trend_text.insert("1.0", t("ur_trend_insufficient"))
     gui._ur_trend_text.config(state=tk.DISABLED)
 
     # 触发规则
@@ -757,11 +725,11 @@ def _ur_fill_details(gui, report) -> None:
         lines = []
         for m in report.rule_matches:
             lines.append(f"[{m.severity.value}] {m.rule_name}")
-            lines.append(f"  规则ID: {m.rule_id}  证据: {', '.join(m.matched_evidence[:3])}")
+            lines.append(t("ur_rule_id_evidence", rid=m.rule_id, ev=', '.join(m.matched_evidence[:3])))
             lines.append("")
         gui._ur_rules_text.insert("1.0", "\n".join(lines))
     else:
-        gui._ur_rules_text.insert("1.0", "未触发安全规则（当前产品风险较低）")
+        gui._ur_rules_text.insert("1.0", t("ur_rules_none"))
     gui._ur_rules_text.config(state=tk.DISABLED)
 
 
@@ -770,7 +738,7 @@ def _ur_fill_recommendations(gui, report) -> None:
         w.destroy()
 
     if not report.recommendations:
-        tk.Label(gui._ur_rec_inner, text="  当前产品无紧急维护建议",
+        tk.Label(gui._ur_rec_inner, text=t("ur_rec_none"),
                  bg="#f5f6fa", fg="#7f8c8d", font=("Microsoft YaHei", 9)).pack(
             anchor="w", padx=8, pady=12)
         return
@@ -798,7 +766,7 @@ def _ur_fill_recommendations(gui, report) -> None:
                  font=("Microsoft YaHei", 9, "bold"), anchor="w").pack(side=tk.LEFT)
 
         # 第二行：时间线 + 类型 + 工作量
-        meta = f"{rec.timeline}  ·  {rec.action_type}  ·  工作量: {rec.estimated_effort}"
+        meta = t("ur_rec_meta", timeline=rec.timeline, atype=rec.action_type, effort=rec.estimated_effort)
         tk.Label(content, text=meta, bg=bg, fg="#7f8c8d",
                  font=("Microsoft YaHei", 8), anchor="w").pack(fill=tk.X)
 
@@ -820,7 +788,7 @@ def _ur_run_dsa_prediction(gui) -> None:
 
             db_path = str(gui.data_dir / "cve_database.db")
             gui.root.after(0, lambda: gui._ur_dsa_summary_var.set(
-                f"正在计算（扫描 DSA + 近 90 天 CVE）..."))
+                t("ur_dsa_calculating")))
 
             predictor = DSAProductLinePredictor(db_path)
             results = predictor.forecast_all(forecast_days=days)
@@ -829,7 +797,7 @@ def _ur_run_dsa_prediction(gui) -> None:
             gui.root.after(0, lambda: _ur_dsa_render_table(gui, results, days))
         except Exception as e:
             err = str(e)
-            gui.root.after(0, lambda: gui._ur_dsa_summary_var.set(f"预测失败: {err}"))
+            gui.root.after(0, lambda: gui._ur_dsa_summary_var.set(t("ur_dsa_predict_fail", err=err)))
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -841,15 +809,14 @@ def _ur_dsa_render_table(gui, results, days: int) -> None:
         tree.delete(item)
 
     if not results:
-        gui._ur_dsa_summary_var.set("无可用数据")
+        gui._ur_dsa_summary_var.set(t("ur_dsa_no_data"))
         return
 
     high_count = sum(1 for r in results if r.risk_level in ("CRITICAL", "HIGH"))
     total_dsa = sum(r.historical_dsa_total for r in results)
 
     gui._ur_dsa_summary_var.set(
-        f"未来 {days} 天 · {len(results)} 条产品线 · "
-        f"{high_count} 条高风险 · 历史 DSA 累计 {total_dsa} 条"
+        t("ur_dsa_summary", days=days, n=len(results), high=high_count, total=total_dsa)
     )
 
     for r in results:
@@ -881,15 +848,15 @@ def _ur_dsa_on_select(gui) -> None:
     lines = list(forecast.explanation)
     lines.extend([
         "",
-        "─ 概率与置信区间 ─",
-        f"  P(≥1 DSA) = {forecast.probability:.1%}",
-        f"  80% CI    = [{forecast.probability_ci[0]:.1%}, {forecast.probability_ci[1]:.1%}]",
-        f"  风险等级   = {forecast.risk_level}",
+        t("ur_dsa_ci_header"),
+        t("ur_dsa_ci_prob", prob=f"{forecast.probability:.1%}"),
+        t("ur_dsa_ci_interval", lo=f"{forecast.probability_ci[0]:.1%}", hi=f"{forecast.probability_ci[1]:.1%}"),
+        t("ur_dsa_ci_level", level=forecast.risk_level),
         "",
-        "─ 等级阈值 ─",
-        "  CRITICAL ≥ 80%   HIGH ≥ 50%",
-        "  MEDIUM   ≥ 20%   LOW  ≥ 5%",
-        "  MINIMAL  <  5%",
+        t("ur_dsa_threshold_header"),
+        t("ur_dsa_threshold_1"),
+        t("ur_dsa_threshold_2"),
+        t("ur_dsa_threshold_3"),
     ])
     txt.insert("1.0", "\n".join(lines))
     txt.config(state=tk.DISABLED)
@@ -906,7 +873,7 @@ def _ur_dsa_on_select(gui) -> None:
 
 def _ur_export(gui, fmt: str) -> None:
     if not gui._ur_reports and not gui._ur_dsa_results and not gui._ur_micro_results:
-        gui._ur_status_var.set("无报告可导出，请先执行分析 / DSA 预测 / 微码评估")
+        gui._ur_status_var.set(t("ur_export_no_report"))
         return
 
     if fmt == "json":
@@ -934,9 +901,9 @@ def _ur_export(gui, fmt: str) -> None:
             md = _ur_build_hierarchical_markdown(gui)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(md)
-        gui._ur_status_var.set(f"已导出: {Path(path).name}")
+        gui._ur_status_var.set(t("ur_export_done", name=Path(path).name))
     except Exception as e:
-        gui._ur_status_var.set(f"导出失败: {e}")
+        gui._ur_status_var.set(t("ur_export_fail", err=e))
 
 
 def _ur_anchor(text: str) -> str:
@@ -1083,21 +1050,21 @@ def _ur_run_microcode_assess(gui) -> None:
             # 复用缓存的 assessor 实例（避免重建索引 5-10s）
             if gui._ur_micro_assessor is None:
                 gui.root.after(0, lambda: gui._ur_micro_summary_var.set(
-                    "[1/4] 加载 DSA 与 CVSS 数据..."))
+                    t("ur_micro_status_1")))
                 assessor = MicrocodeRiskAssessor(db_path)
                 gui.root.after(0, lambda: gui._ur_micro_summary_var.set(
-                    "[2/4] 构建微码索引（产品线×机型×类型×版本）..."))
+                    t("ur_micro_status_2")))
                 assessor._build_index()
                 gui.root.after(0, lambda: gui._ur_micro_summary_var.set(
-                    "[3/4] 范围展开与全局归一..."))
+                    t("ur_micro_status_3")))
                 assessor._ensure_global_max_expanded()
                 gui._ur_micro_assessor = assessor
             else:
                 gui.root.after(0, lambda: gui._ur_micro_summary_var.set(
-                    "使用缓存索引，正在评分..."))
+                    t("ur_micro_status_cache")))
 
             gui.root.after(0, lambda: gui._ur_micro_summary_var.set(
-                "[4/4] 计算 Top 50 评分..."))
+                t("ur_micro_status_4")))
             results = gui._ur_micro_assessor.assess_all(top=50)
             gui._ur_micro_results = results
 
@@ -1105,7 +1072,7 @@ def _ur_run_microcode_assess(gui) -> None:
         except Exception as e:
             err = str(e)
             gui.root.after(0, lambda: gui._ur_micro_summary_var.set(
-                f"评估失败: {err}"))
+                t("ur_micro_assess_fail", err=err)))
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -1117,14 +1084,14 @@ def _ur_micro_render_table(gui, results) -> None:
         tree.delete(item)
 
     if not results:
-        gui._ur_micro_summary_var.set("无可用数据")
+        gui._ur_micro_summary_var.set(t("ur_micro_no_data"))
         return
 
     # 首次渲染时填入产品线下拉框选项
     combo = getattr(gui, "_ur_micro_pl_combo", None)
     if combo is not None and not combo["values"]:
         all_lines = sorted({s.key.product_line for s in results})
-        combo["values"] = ["(全部)"] + all_lines
+        combo["values"] = [t("ur_micro_pl_all")] + all_lines
 
     # 应用 P1-8 unversioned/versioned 过滤
     flt = getattr(gui, "_ur_micro_filter_var", None)
@@ -1138,20 +1105,19 @@ def _ur_micro_render_table(gui, results) -> None:
 
     # 应用 P1-9 产品线过滤
     pl_var = getattr(gui, "_ur_micro_pl_var", None)
-    pl_filter = pl_var.get() if pl_var else "(全部)"
-    if pl_filter and pl_filter != "(全部)":
+    pl_filter = pl_var.get() if pl_var else t("ur_micro_pl_all")
+    if pl_filter and pl_filter != t("ur_micro_pl_all"):
         view = [s for s in view if s.key.product_line == pl_filter]
 
     from collections import Counter
     bands = Counter(s.risk_band for s in view)
     kev_total = sum(s.kev_hit_count for s in view)
     gui._ur_micro_summary_var.set(
-        f"显示 {len(view)}/{len(results)} 条 · "
-        f"EXTREME {bands.get('EXTREME', 0)} · "
-        f"HIGH {bands.get('HIGH', 0)} · "
-        f"MEDIUM {bands.get('MEDIUM', 0)} · "
-        f"LOW {bands.get('LOW', 0)} · "
-        f"⚠KEV {kev_total}"
+        t("ur_micro_summary",
+          shown=len(view), total=len(results),
+          ext=bands.get('EXTREME', 0), high=bands.get('HIGH', 0),
+          med=bands.get('MEDIUM', 0), low=bands.get('LOW', 0),
+          kev=kev_total)
     )
 
     for s in view:
@@ -1224,7 +1190,7 @@ def _ur_micro_draw_trend(canvas: tk.Canvas, caption_var: tk.StringVar,
     h = canvas.winfo_height() or 70
 
     if not series:
-        canvas.create_text(w / 2, h / 2, text="无数据",
+        canvas.create_text(w / 2, h / 2, text=t("ur_chart_no_data"),
                             fill="#bdc3c7", font=("Consolas", 8))
         caption_var.set("")
         return
@@ -1332,7 +1298,7 @@ def _ur_micro_query(gui) -> None:
     """反向查询：(机型, 类型, 版本) → 受影响的 DSA 列表"""
     if gui._ur_micro_assessor is None:
         gui._ur_query_result_var.set(
-            "需要先点「🔬 微码风险」初始化索引（5-10s），再做反向查询"
+            t("ur_micro_query_need_init")
         )
         return
 
@@ -1341,7 +1307,7 @@ def _ur_micro_query(gui) -> None:
     version = gui._ur_query_version_var.get().strip() or None
     if not model and not version:
         gui._ur_query_result_var.set(
-            "请至少填写「机型」或「版本」其中一个"
+            t("ur_micro_query_need_input")
         )
         return
 
@@ -1350,19 +1316,19 @@ def _ur_micro_query(gui) -> None:
             model=model, firmware_type=ftype, version=version
         )
     except Exception as e:
-        gui._ur_query_result_var.set(f"查询失败: {e}")
+        gui._ur_query_result_var.set(t("ur_micro_query_fail", err=e))
         return
 
     if not results:
         gui._ur_query_result_var.set(
-            f"未命中: model={model!r} type={ftype!r} version={version!r}"
+            t("ur_micro_query_no_hit", model=repr(model), ftype=repr(ftype), version=repr(version))
         )
         return
 
     # 摘要 + 最近 3 条
     kev_total = sum(len(r["kev_cves"]) for r in results)
     lines = [
-        f"命中 {len(results)} 条 DSA，KEV 引用 {kev_total} 个",
+        t("ur_micro_query_hit_header", n=len(results), kev=kev_total),
         "─" * 40,
     ]
     for r in results[:5]:
@@ -1372,7 +1338,7 @@ def _ur_micro_query(gui) -> None:
         lines.append(f"  [{pub}] CVSS {r['avg_cvss']:.1f}{kev_mark}")
         lines.append(f"    {title}")
     if len(results) > 5:
-        lines.append(f"  ... 还有 {len(results) - 5} 条")
+        lines.append(t("ur_micro_query_more", n=len(results) - 5))
     gui._ur_query_result_var.set("\n".join(lines))
 
 
