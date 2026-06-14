@@ -26,9 +26,18 @@ except ImportError:
 import atexit
 import signal
 import sys
+import logging
 import urllib.request
 import urllib.parse
 import urllib.error
+
+# 模块级日志记录器：用于记录被吞掉的后台异常（缓存写入、DB 提交等），
+# 便于交付环境下诊断问题。默认 WARNING 级别，可通过环境变量 KMP_LOG_LEVEL 调整。
+logging.basicConfig(
+    level=getattr(logging, os.environ.get("KMP_LOG_LEVEL", "WARNING").upper(), logging.WARNING),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("kmp.gui")
 
 # 日历组件（可选）
 try:
@@ -702,8 +711,8 @@ class CVEIntegratedGUI:
         if self.use_redis:
             try:
                 self.redis_manager.store_cve(cve_data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Redis 缓存写入失败（不影响主流程）: %s", e)
 
         return is_new
 
@@ -720,8 +729,8 @@ class CVEIntegratedGUI:
             try:
                 for cve_data in cve_list:
                     self.redis_manager.store_cve(cve_data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Redis 批量缓存写入失败（不影响主流程）: %s", e)
 
         return new_count
 
@@ -1026,8 +1035,8 @@ class CVEIntegratedGUI:
         if self.use_redis:
             try:
                 self.redis_manager.store_dell_advisory(advisory_data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Redis Dell 公告缓存写入失败（不影响主流程）: %s", e)
 
         return is_new
 
@@ -1359,11 +1368,15 @@ class CVEIntegratedGUI:
         self.unified_risk_frame = tk.Frame(self.notebook, bg="white")
         self.unified_risk_tab_id = self.notebook.add(self.unified_risk_frame, text=t("tab_smart_predict"))
 
-        # 8. 智能学习标签页
+        # 8. 产品型号预测标签页
+        self.model_prediction_frame = tk.Frame(self.notebook, bg="white")
+        self.model_prediction_tab_id = self.notebook.add(self.model_prediction_frame, text=t("tab_model_predict"))
+
+        # 9. 智能学习标签页
         self.learn_frame = tk.Frame(self.notebook, bg="white")
         self.learn_tab_id = self.notebook.add(self.learn_frame, text=t("tab_learn"))
 
-        # 9. 日志标签页
+        # 10. 日志标签页
         self.log_frame = tk.Frame(self.notebook, bg="white")
         self.log_tab_id = self.notebook.add(self.log_frame, text=t("tab_log"))
 
@@ -1376,6 +1389,7 @@ class CVEIntegratedGUI:
         self.create_dell_kb_view()
         self.create_stats_view()
         self.create_unified_risk_view()
+        self.create_model_prediction_view()
         self.create_learn_view()
         self.create_log_view()
 
@@ -4600,6 +4614,9 @@ Script requirements:
         if not filepath:
             return
 
+        if not self._validate_file_path(filepath):
+            return
+
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 text = f.read()
@@ -5966,6 +5983,557 @@ Script requirements:
         except Exception as e:
             self._kg_set_status(t("kg_export_failed").format(err=str(e)))
 
+    # ════════════════════════════════════════════════════════════════════
+    # 产品型号预测标签页
+    # ════════════════════════════════════════════════════════════════════
+    def create_model_prediction_view(self):
+        """创建产品型号预测标签页（DSA 概率预测）"""
+        # 主体水平分栏（左侧输入 30%，右侧输出 70%）
+        main_paned = tk.PanedWindow(
+            self.model_prediction_frame, orient=tk.HORIZONTAL,
+            bg="#d0d0d0", sashwidth=5, sashrelief=tk.RAISED
+        )
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ═══ 左侧：输入控制区 ═══════════════════════════════════════════
+        left_frame = tk.Frame(main_paned, bg="white", width=280)
+        main_paned.add(left_frame, minsize=250)
+
+        # 产品系列下拉框
+        tk.Label(
+            left_frame, text=t("mp_product_series"),
+            bg="white", font=("Microsoft YaHei", 9)
+        ).pack(anchor="w", padx=10, pady=(12, 2))
+
+        self.mp_series_var = tk.StringVar()
+        self.mp_series_combo = ttk.Combobox(
+            left_frame,
+            textvariable=self.mp_series_var,
+            width=32,
+            state="readonly",
+            font=("Microsoft YaHei", 9)
+        )
+        self.mp_series_combo.pack(anchor="w", padx=10, pady=(0, 8))
+        self.mp_series_combo.bind("<<ComboboxSelected>>", self._mp_on_series_selected)
+
+        # 版本号输入框（带自动补全提示）
+        tk.Label(
+            left_frame, text=t("mp_version"),
+            bg="white", font=("Microsoft YaHei", 9)
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+
+        self.mp_version_var = tk.StringVar()
+        self.mp_version_entry = tk.Entry(
+            left_frame,
+            textvariable=self.mp_version_var,
+            width=25,
+            font=("Microsoft YaHei", 9)
+        )
+        self.mp_version_entry.pack(anchor="w", padx=10, pady=(0, 2))
+
+        tk.Label(
+            left_frame, text=t("mp_version_hint"),
+            bg="white", font=("Microsoft YaHei", 8), fg="#888"
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+
+        # 预测周期单选框
+        tk.Label(
+            left_frame, text=t("mp_forecast_period"),
+            bg="white", font=("Microsoft YaHei", 9)
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+
+        period_frame = tk.Frame(left_frame, bg="white")
+        period_frame.pack(anchor="w", padx=10, pady=(0, 12))
+
+        self.mp_period_var = tk.IntVar(value=90)
+        for days, label in [(30, "30" + t("mp_days")), (60, "60" + t("mp_days")), (90, "90" + t("mp_days"))]:
+            tk.Radiobutton(
+                period_frame, text=label, variable=self.mp_period_var, value=days,
+                bg="white", font=("Microsoft YaHei", 9), selectcolor="white"
+            ).pack(side=tk.LEFT, padx=(0, 12))
+
+        # 预测按钮
+        self.mp_predict_btn = tk.Button(
+            left_frame, text=t("mp_start_predict"),
+            command=self._mp_predict_clicked,
+            bg="#8e44ad", fg="white", font=("Microsoft YaHei", 11, "bold"),
+            padx=20, pady=8, relief=tk.FLAT, cursor="hand2",
+            state=tk.DISABLED
+        )
+        self.mp_predict_btn.pack(anchor="w", padx=10, pady=(12, 8))
+
+        # 分隔线
+        tk.Frame(left_frame, bg="#ecf0f1", height=1).pack(fill=tk.X, padx=10, pady=12)
+
+        # 状态信息
+        tk.Label(
+            left_frame, text=t("mp_status_title"),
+            bg="white", font=("Microsoft YaHei", 9, "bold")
+        ).pack(anchor="w", padx=10, pady=(4, 2))
+
+        self.mp_status_label = tk.Label(
+            left_frame, text=t("mp_status_ready"),
+            bg="white", font=("Microsoft YaHei", 9), fg="#27ae60", anchor="w", justify=tk.LEFT
+        )
+        self.mp_status_label.pack(anchor="w", padx=10, pady=(0, 8), fill=tk.X)
+
+        # 操作提示
+        tk.Label(
+            left_frame, text=t("mp_help_title"),
+            bg="white", font=("Microsoft YaHei", 9, "bold")
+        ).pack(anchor="w", padx=10, pady=(12, 2))
+
+        help_text = tk.Label(
+            left_frame, text=t("mp_help_text"),
+            bg="white", font=("Microsoft YaHei", 8), fg="#555", anchor="w", justify=tk.LEFT
+        )
+        help_text.pack(anchor="w", padx=10, pady=(0, 8), fill=tk.X)
+
+        # ═══ 右侧：输出显示区 ═══════════════════════════════════════════
+        right_frame = tk.Frame(main_paned, bg="white")
+        main_paned.add(right_frame, minsize=500)
+
+        # 创建可滚动容器
+        right_canvas = tk.Canvas(right_frame, bg="white", highlightthickness=0)
+        right_scroll = tk.Scrollbar(right_frame, orient=tk.VERTICAL, command=right_canvas.yview)
+        self.mp_output_frame = tk.Frame(right_canvas, bg="white")
+
+        self.mp_output_frame.bind(
+            "<Configure>",
+            lambda e: right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+        )
+        right_canvas.create_window((0, 0), window=self.mp_output_frame, anchor="nw")
+        right_canvas.configure(yscrollcommand=right_scroll.set)
+
+        right_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        right_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 初始提示
+        self.mp_placeholder = tk.Label(
+            self.mp_output_frame,
+            text=t("mp_output_placeholder"),
+            bg="white", font=("Microsoft YaHei", 11), fg="#999"
+        )
+        self.mp_placeholder.pack(pady=120)
+
+        # 加载产品系列列表（异步）
+        # 注意：用 after() 延迟到 mainloop 启动后再起线程，否则 worker 内的
+        # root.after() 会因 "main thread is not in main loop" 失败
+        self.root.after(
+            300,
+            lambda: threading.Thread(target=self._mp_load_product_series, daemon=True).start(),
+        )
+
+    def _mp_load_product_series(self):
+        """后台加载产品系列列表（从知识图谱或数据库）
+
+        本方法运行在后台线程，**不直接操作任何 Tkinter 组件**，
+        所有 UI 更新通过 self.root.after(0, callback, *args) 调度到主线程。
+        """
+        # 状态：加载中
+        self.root.after(0, self.mp_status_label.config,
+                        {"text": t("mp_status_loading"), "fg": "#f39c12"})
+
+        series_list = []
+        try:
+            from risk.product_taxonomy import normalize_series_name
+
+            # 方法1：尝试从知识图谱加载
+            try:
+                from knowledge_graph import KnowledgeGraph, NODE_PRODUCT
+                kg = KnowledgeGraph.from_sqlite('cve_data/cve_database.db')
+                kg.build(limit_cve=5000, limit_dsa=None)
+                # 获取 Top-100 产品节点（按 DSA 数量）
+                top_products = kg.top_products(k=100)
+                series_list = [prod for prod, count in top_products if count > 0]
+            except Exception as kg_err:
+                self.root.after(0, self.log, f"知识图谱加载失败，回退数据库方案: {kg_err}")
+
+            # 方法2：回退方案 - 从 dell_advisories 直接提取
+            if not series_list:
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT data FROM dell_advisories
+                    WHERE data IS NOT NULL AND data != ''
+                """)
+                rows = cursor.fetchall()
+                product_names = set()
+                for (data_json,) in rows:
+                    try:
+                        data = json.loads(data_json)
+                        for ap in data.get("affected_products", []):
+                            product_name = ap.get("name", "").strip()
+                            if product_name:
+                                product_names.add(product_name)
+                    except Exception:
+                        pass
+                series_list = sorted(product_names)
+
+            # 规范化：剥离尾部微码/版本号（如 "Dell PowerMaxOS 5978.714.714" → "Dell PowerMaxOS"），
+            # 统一为产品系列后去重，保持原有出现顺序（知识图谱按 DSA 数量降序）。
+            seen = set()
+            normalized = []
+            for raw in series_list:
+                s = normalize_series_name(raw)
+                if s and s not in seen:
+                    seen.add(s)
+                    normalized.append(s)
+            series_list = normalized
+
+            # 回主线程更新 UI
+            self.root.after(0, self._mp_apply_series_list, series_list)
+
+        except Exception as e:
+            err = str(e)[:50]
+            self.root.after(0, self.log, f"加载产品系列失败: {e}")
+            self.root.after(0, self.mp_status_label.config,
+                            {"text": t("mp_status_error", err=err), "fg": "#c0392b"})
+
+    def _mp_apply_series_list(self, series_list):
+        """主线程：把加载到的产品系列写入下拉框（由 _mp_load_product_series 调度）"""
+        if series_list:
+            self.mp_series_combo.config(values=series_list)
+            self.mp_series_combo.current(0)
+            self.mp_status_label.config(
+                text=t("mp_status_loaded", count=len(series_list)), fg="#27ae60")
+            self._mp_check_predict_ready()
+        else:
+            self.mp_status_label.config(text=t("mp_status_no_data"), fg="#e67e22")
+
+    def _mp_on_series_selected(self, event=None):
+        """产品系列选择后，加载该系列的历史版本号（供参考）"""
+        self._mp_check_predict_ready()
+        # TODO: 可在此处加载版本号自动补全列表（未来增强）
+
+    def _mp_check_predict_ready(self):
+        """检查是否可启用预测按钮"""
+        series = self.mp_series_var.get().strip()
+        if series:
+            self.mp_predict_btn.config(state=tk.NORMAL)
+        else:
+            self.mp_predict_btn.config(state=tk.DISABLED)
+
+    def _mp_predict_clicked(self):
+        """点击预测按钮"""
+        series = self.mp_series_var.get().strip()
+        version = self.mp_version_var.get().strip()
+        days = self.mp_period_var.get()
+
+        if not series:
+            messagebox.showwarning(t("msg_warning"), t("mp_no_series"))
+            return
+
+        if not version:
+            messagebox.showwarning(t("msg_warning"), t("mp_no_version"))
+            return
+
+        # 异步执行预测
+        self.mp_predict_btn.config(state=tk.DISABLED)
+        self.mp_status_label.config(text=t("mp_status_predicting"), fg="#f39c12")
+        threading.Thread(
+            target=self._mp_do_predict,
+            args=(series, version, days),
+            daemon=True
+        ).start()
+
+    def _validate_file_path(self, path):
+        """校验文件路径是否存在且为文件。
+
+        不存在或非文件时弹出友好提示并返回 False，调用方据此中止操作。
+        统一入口，避免各处直接把原始 OSError 文本暴露给用户。
+        """
+        if not path:
+            return False
+        p = Path(path)
+        if not p.exists():
+            messagebox.showerror(
+                t("msg_file_not_found_title"),
+                t("msg_file_not_found", path=str(path)),
+            )
+            self.log(t("msg_file_not_found", path=str(path)).replace("\n", " "))
+            return False
+        if not p.is_file():
+            messagebox.showerror(
+                t("msg_file_not_found_title"),
+                t("msg_path_not_file", path=str(path)),
+            )
+            return False
+        return True
+
+    def _mp_resolve_eoss_path(self):
+        """解析 EOSS 软件版本文档路径（多候选回退）。
+
+        返回第一个存在的路径字符串，全部缺失返回 None（预测器会降级为无生命周期调整）。
+        """
+        candidates = [
+            # 1. 真实 EOSS 软件文档（Obsidian 知识库）
+            Path(r"D:\AI\Obsidian\Star\工作\流程和工具\Dell Technologies Operating Environment Software Release and Service Dates - EOSS.md"),
+            # 2. 项目内缓存的 EOSS JSON
+            Path(self.data_dir) / "eoss_data.json" if hasattr(self, "data_dir") else None,
+            Path("risk") / "eoss_data.json",
+        ]
+        for c in candidates:
+            if c and Path(c).exists():
+                return str(c)
+        return None
+
+    def _mp_do_predict(self, series: str, version: str, days: int):
+        """后台执行预测（调用 ProductSeriesPredictor）
+
+        本方法运行在后台线程，不直接操作 Tkinter，UI 更新经 root.after 调度。
+        """
+        try:
+            from risk.dsa_prediction_series import ProductSeriesPredictor
+
+            eoss_path = self._mp_resolve_eoss_path()
+
+            # 创建预测器
+            predictor = ProductSeriesPredictor(
+                db_path=self.db_path,
+                eoss_oe_path=eoss_path
+            )
+
+            # 执行预测
+            result = predictor.forecast_series(
+                product_series=series,
+                version=version,
+                forecast_days=days
+            )
+
+            # 更新 UI（主线程）
+            self.root.after(0, self._mp_update_output, result)
+
+        except Exception as e:
+            error_msg = str(e)
+            self.root.after(0, self.log, f"预测失败: {error_msg}")
+            self.root.after(0, self._mp_show_error, error_msg)
+
+    def _mp_update_output(self, result):
+        """更新右侧输出区域（主线程）"""
+        # 清空现有内容
+        for widget in self.mp_output_frame.winfo_children():
+            widget.destroy()
+
+        # ═══ 1. DSA 发生概率 ══════════════════════════════════════════
+        prob_frame = tk.Frame(self.mp_output_frame, bg="white", height=80)
+        prob_frame.pack(fill=tk.X, padx=10, pady=(10, 6))
+        prob_frame.pack_propagate(False)
+
+        tk.Label(
+            prob_frame, text=t("mp_probability_title"),
+            bg="white", font=("Microsoft YaHei", 9, "bold")
+        ).pack(anchor="w", pady=(4, 2))
+
+        # 进度条容器
+        bar_container = tk.Frame(prob_frame, bg="white")
+        bar_container.pack(fill=tk.X, pady=(4, 2))
+
+        # 进度条（Canvas 实现）
+        bar_canvas = tk.Canvas(bar_container, height=30, bg="white", highlightthickness=0)
+        bar_canvas.pack(fill=tk.X)
+
+        probability_pct = result.probability * 100
+        bar_width = bar_canvas.winfo_reqwidth() or 600
+        fill_width = int(bar_width * result.probability)
+
+        # 颜色映射
+        if probability_pct >= 75:
+            bar_color = "#c0392b"
+            risk_badge_text = "🔴 " + t("mp_risk_critical")
+            risk_badge_bg = "#c0392b"
+        elif probability_pct >= 50:
+            bar_color = "#e67e22"
+            risk_badge_text = "🟠 " + t("mp_risk_high")
+            risk_badge_bg = "#e67e22"
+        elif probability_pct >= 30:
+            bar_color = "#f39c12"
+            risk_badge_text = "🟡 " + t("mp_risk_medium")
+            risk_badge_bg = "#f39c12"
+        else:
+            bar_color = "#27ae60"
+            risk_badge_text = "🟢 " + t("mp_risk_low")
+            risk_badge_bg = "#27ae60"
+
+        def draw_bar(event=None):
+            w = bar_canvas.winfo_width()
+            bar_canvas.delete("all")
+            fill_w = int(w * result.probability)
+            # 背景
+            bar_canvas.create_rectangle(0, 0, w, 30, fill="#ecf0f1", outline="")
+            # 填充
+            bar_canvas.create_rectangle(0, 0, fill_w, 30, fill=bar_color, outline="")
+            # 百分比文字
+            bar_canvas.create_text(
+                w / 2, 15, text=f"{probability_pct:.1f}%",
+                font=("Microsoft YaHei", 11, "bold"), fill="#2c3e50"
+            )
+
+        bar_canvas.bind("<Configure>", draw_bar)
+        bar_canvas.update_idletasks()
+        draw_bar()
+
+        # 风险徽章（右上角）
+        risk_badge = tk.Label(
+            prob_frame, text=risk_badge_text,
+            bg=risk_badge_bg, fg="white",
+            font=("Microsoft YaHei", 10, "bold"),
+            padx=10, pady=4
+        )
+        risk_badge.place(relx=1.0, rely=0, anchor="ne", x=-8, y=4)
+
+        # ═══ 2. CWE Top-3 高频弱点类型 ═══════════════════════════════════
+        cwe_frame = tk.LabelFrame(
+            self.mp_output_frame, text=t("mp_cwe_top3_title"),
+            bg="white", font=("Microsoft YaHei", 9, "bold"), fg="#34495e"
+        )
+        cwe_frame.pack(fill=tk.X, padx=10, pady=6)
+
+        cwe_tree = ttk.Treeview(
+            cwe_frame,
+            columns=("cwe_id", "cwe_name", "percentage"),
+            show="headings",
+            height=3,
+            selectmode="none"
+        )
+        cwe_tree.heading("cwe_id", text=t("mp_cwe_id"))
+        cwe_tree.heading("cwe_name", text=t("mp_cwe_name"))
+        cwe_tree.heading("percentage", text=t("mp_cwe_percentage"))
+        cwe_tree.column("cwe_id", width=90, anchor="center")
+        cwe_tree.column("cwe_name", width=240, anchor="w")
+        cwe_tree.column("percentage", width=80, anchor="center")
+        cwe_tree.pack(fill=tk.X, padx=4, pady=4)
+
+        # 插入 Top-3 CWE
+        for cwe_id, cwe_label, pct in result.likely_cwes[:3]:
+            cwe_tree.insert("", tk.END, values=(cwe_id, cwe_label, f"{pct:.1f}%"))
+
+        # ═══ 3. 历史匹配 DSA ═══════════════════════════════════════════════
+        dsa_frame = tk.LabelFrame(
+            self.mp_output_frame, text=t("mp_matched_dsa_title"),
+            bg="white", font=("Microsoft YaHei", 9, "bold"), fg="#34495e"
+        )
+        dsa_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+
+        dsa_scroll = tk.Scrollbar(dsa_frame, orient=tk.VERTICAL)
+        dsa_tree = ttk.Treeview(
+            dsa_frame,
+            columns=("dsa_id", "title", "date", "cvss"),
+            show="headings",
+            height=8,
+            yscrollcommand=dsa_scroll.set
+        )
+        dsa_scroll.config(command=dsa_tree.yview)
+
+        dsa_tree.heading("dsa_id", text=t("mp_dsa_id"))
+        dsa_tree.heading("title", text=t("mp_dsa_title"))
+        dsa_tree.heading("date", text=t("mp_dsa_date"))
+        dsa_tree.heading("cvss", text=t("mp_dsa_cvss"))
+        dsa_tree.column("dsa_id", width=100, anchor="w")
+        dsa_tree.column("title", width=380, anchor="w")
+        dsa_tree.column("date", width=90, anchor="center")
+        dsa_tree.column("cvss", width=80, anchor="center")
+
+        dsa_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        dsa_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
+
+        # 查询历史匹配 DSA（从数据库）
+        matched_dsa_list = self._mp_query_matched_dsa(result.product_series, result.version)
+        for dsa_id, title, date, max_cvss in matched_dsa_list:
+            dsa_tree.insert("", tk.END, values=(dsa_id, title, date, max_cvss))
+
+        # ═══ 4. 预测依据（可解释性）════════════════════════════════════
+        explain_frame = tk.LabelFrame(
+            self.mp_output_frame, text=t("mp_explanation_title"),
+            bg="#fafafa", font=("Microsoft YaHei", 9, "bold"), fg="#34495e"
+        )
+        explain_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 10))
+
+        explain_text = scrolledtext.ScrolledText(
+            explain_frame, wrap=tk.WORD,
+            font=("Microsoft YaHei", 9), bg="#fafafa",
+            height=10, state=tk.NORMAL
+        )
+        explain_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # 插入解释文本
+        for line in result.explanation:
+            explain_text.insert(tk.END, "• " + line + "\n")
+        explain_text.config(state=tk.DISABLED)
+
+        # 更新状态
+        self.mp_status_label.config(text=t("mp_status_done"), fg="#27ae60")
+        self.mp_predict_btn.config(state=tk.NORMAL)
+        self.log(t("log_model_predict_done", series=result.product_series, version=result.version, prob=f"{probability_pct:.1f}%"))
+
+    def _mp_query_matched_dsa(self, series: str, version: str):
+        """查询历史匹配的 DSA（版本范围覆盖）"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT dsa_id, title, published_date, data
+                FROM dell_advisories
+                WHERE data IS NOT NULL
+                ORDER BY published_date DESC
+                LIMIT 200
+            """)
+            rows = cursor.fetchall()
+
+            matched = []
+            for dsa_id, title, pub_date, data_json in rows:
+                try:
+                    data = json.loads(data_json)
+                    series_lower = series.lower()
+                    title_lower = (title or "").lower()
+
+                    # 匹配策略：以 title 为主（产品名多在标题中，affected_products.name
+                    # 常为 "Multiple" 等无意义值），name/model 字段为辅。
+                    is_match = series_lower in title_lower
+                    if not is_match:
+                        for ap in data.get("affected_products", []):
+                            prod_text = (ap.get("name", "") + " " + ap.get("model", "")).lower()
+                            if series_lower in prod_text:
+                                is_match = True
+                                break
+
+                    if is_match:
+                        # 提取最高 CVSS（cvss_score 存于 cves.data JSON 中，非独立列）
+                        max_cvss = 0.0
+                        for cve_id in data.get("cve_ids", []):
+                            c_cur = self.conn.cursor()
+                            c_cur.execute("SELECT data FROM cves WHERE cve_id = ?", (cve_id,))
+                            score_row = c_cur.fetchone()
+                            if score_row and score_row[0]:
+                                try:
+                                    cve_data = json.loads(score_row[0])
+                                    score = cve_data.get("cvss_score")
+                                    if score:
+                                        max_cvss = max(max_cvss, float(score))
+                                except (json.JSONDecodeError, ValueError, TypeError):
+                                    pass
+
+                        matched.append((
+                            dsa_id,
+                            title[:60] + "..." if len(title) > 60 else title,
+                            pub_date[:10] if pub_date else "N/A",
+                            f"{max_cvss:.1f}" if max_cvss > 0 else "N/A"
+                        ))
+                except (json.JSONDecodeError, sqlite3.Error, ValueError, TypeError, AttributeError) as e:
+                    # 单条公告数据异常不应中断整体匹配，跳过并记录
+                    self.log(f"[匹配跳过] 公告 {dsa_id} 解析失败: {e}")
+                    continue
+
+            return matched[:20]  # 最多显示 20 条
+
+        except Exception as e:
+            self.log(f"查询匹配 DSA 失败: {e}")
+            return []
+
+    def _mp_show_error(self, error_msg: str):
+        """显示预测错误"""
+        self.mp_status_label.config(text=t("mp_status_failed", err=error_msg[:50]), fg="#c0392b")
+        self.mp_predict_btn.config(state=tk.NORMAL)
+        messagebox.showerror(t("msg_error"), t("mp_predict_error", err=error_msg))
+
     def create_learn_view(self):
         """创建智能学习（费曼学习法）标签页内容"""
         # ── 顶部说明栏 ────────────────────────────────────────────────
@@ -6802,6 +7370,8 @@ Script requirements:
             ]
         )
         if not path:
+            return
+        if not self._validate_file_path(path):
             return
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -8613,8 +9183,8 @@ mindmap
                         + (", correct_count = correct_count + 1" if is_correct else "")
                         + " WHERE id = ?", (qid,))
                     self.conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("更新 flashcards 复习计数失败: %s", e)
 
             next_btn.config(state=tk.NORMAL)
 
@@ -8818,8 +9388,8 @@ mindmap
                         + ", next_review = ? WHERE id = ?",
                         (next_review, cid))
                     self.conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("更新 flashcards 复习进度失败: %s", e)
 
             # 更新统计显示
             s = fc_state["stats"]
@@ -9360,8 +9930,8 @@ mindmap
                                     try:
                                         for cve_to_store in cves_to_store:
                                             self.redis_manager.store_cve(cve_to_store)
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        logger.debug("Redis 批量缓存写入失败（不影响主流程）: %s", e)
 
                                 # Clear the batch
                                 cves_to_store = []
@@ -10355,8 +10925,8 @@ mindmap
                             "UPDATE dell_advisories SET data = ? WHERE dsa_id = ?",
                             (_json.dumps(data, ensure_ascii=False), item['dsa_id'])
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("更新 DSA %s 日期失败: %s", item.get('dsa_id'), e)
             self.conn.commit()
             self.log_queue.put(t("dell_fix_success", count=len(updated)))
         else:
@@ -10649,6 +11219,8 @@ mindmap
         )
 
         if filename:
+            if not self._validate_file_path(filename):
+                return
             try:
                 with open(filename, "r", encoding="utf-8") as f:
                     loaded_cves = json.load(f)
@@ -10805,6 +11377,8 @@ mindmap
         )
 
         if filename:
+            if not self._validate_file_path(filename):
+                return
             try:
                 with open(filename, "r", encoding="utf-8") as f:
                     self.dell_advisories = json.load(f)
@@ -10838,6 +11412,8 @@ mindmap
         )
 
         if csv_file:
+            if not self._validate_file_path(csv_file):
+                return
             try:
                 import csv
                 with open(csv_file, 'r', encoding='utf-8-sig') as f:
@@ -11934,8 +12510,8 @@ mindmap
                 try:
                     for cid in cve_ids_to_delete:
                         self.redis_manager.delete_cve(cid)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Redis 缓存删除失败（不影响主流程）: %s", e)
         except sqlite3.Error as e:
             messagebox.showerror("删除失败", f"数据库操作失败：{e}")
             return
